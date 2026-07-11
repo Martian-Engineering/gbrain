@@ -22,6 +22,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { GBrainConfig } from './config.ts';
 import { discoverOAuth, mintClientCredentialsToken } from './remote-mcp-probe.ts';
+import { getOrCreateCachedOAuthToken } from './oauth-token-cache.ts';
 
 interface CachedToken {
   access_token: string;
@@ -58,6 +59,7 @@ export type RemoteMcpErrorReason =
   | 'discovery'
   | 'auth'
   | 'auth_after_refresh'
+  | 'rate_limited'
   | 'network'
   | 'tool_error'
   | 'parse';
@@ -69,6 +71,8 @@ export interface RemoteMcpErrorDetail {
   kind?: 'timeout' | 'aborted' | 'unreachable';
   /** v0.31.1: server-supplied error code on tool_error (e.g. 'missing_scope'). */
   code?: string;
+  /** OAuth token endpoint Retry-After, normalized to seconds. */
+  retry_after_seconds?: number;
 }
 
 export class RemoteMcpError extends Error {
@@ -185,18 +189,43 @@ async function getAccessToken(config: GBrainConfig, force = false): Promise<stri
     );
   }
 
-  const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, remote.oauth_client_id, secret);
-  if (!tokenRes.ok) {
-    throw new RemoteMcpError(
-      tokenRes.reason === 'auth' ? 'auth' : tokenRes.reason === 'network' ? 'network' : 'discovery',
-      `OAuth /token failed: ${tokenRes.message}`,
-      { ...(tokenRes.status ? { status: tokenRes.status } : {}), mcp_url: remote.mcp_url },
-    );
-  }
-
-  const ttlSec = tokenRes.token.expires_in ?? 3600;
-  const expires_at_ms = Date.now() + Math.max(0, ttlSec * 1000 - 30_000);
-  const token: CachedToken = { access_token: tokenRes.token.access_token, expires_at_ms };
+  const persistent = await getOrCreateCachedOAuthToken(
+    {
+      tokenEndpoint: disco.metadata.token_endpoint,
+      clientId: remote.oauth_client_id,
+    },
+    async () => {
+      const tokenRes = await mintClientCredentialsToken(
+        disco.metadata.token_endpoint,
+        remote.oauth_client_id,
+        secret,
+      );
+      if (!tokenRes.ok) {
+        throw new RemoteMcpError(
+          tokenRes.reason === 'auth'
+            ? 'auth'
+            : tokenRes.reason === 'rate_limited'
+              ? 'rate_limited'
+              : tokenRes.reason === 'network'
+                ? 'network'
+                : 'discovery',
+          `OAuth /token failed: ${tokenRes.message}`,
+          {
+            ...(tokenRes.status ? { status: tokenRes.status } : {}),
+            ...(tokenRes.retryAfterSeconds === undefined ? {} : { retry_after_seconds: tokenRes.retryAfterSeconds }),
+            mcp_url: remote.mcp_url,
+          },
+        );
+      }
+      const ttlSec = tokenRes.token.expires_in ?? 3600;
+      return {
+        accessToken: tokenRes.token.access_token,
+        expiresAtMs: Date.now() + Math.max(0, ttlSec * 1000 - 30_000),
+      };
+    },
+    { force },
+  );
+  const token: CachedToken = { access_token: persistent.accessToken, expires_at_ms: persistent.expiresAtMs };
   tokenCache.set(remote.mcp_url, token);
   return token.access_token;
 }

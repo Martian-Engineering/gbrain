@@ -86,7 +86,7 @@ describe('toRemoteMcpError', () => {
   });
 
   test('the dispatcher contract: every output has a recognized reason', () => {
-    const validReasons = ['config', 'discovery', 'auth', 'auth_after_refresh', 'network', 'tool_error', 'parse'];
+    const validReasons = ['config', 'discovery', 'auth', 'auth_after_refresh', 'rate_limited', 'network', 'tool_error', 'parse'];
     const inputs = [
       new Error('x'),
       'string-error',

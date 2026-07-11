@@ -31,8 +31,16 @@ Key files:
   ('timeout' | 'aborted' | 'unreachable') sub-tag, `RemoteMcpErrorDetail.code`
   field carrying server-supplied error codes (e.g. `missing_scope`).
   `extractToolErrorCode` parses JSON envelopes first, falls back to substring
-  detection for legacy server messages. `unpackToolResult<T>(res)` unchanged
-  (parses tool-call JSON content). `_clearMcpClientTokenCache()` test escape.
+  detection for legacy server messages. OAuth access tokens are cached across
+  CLI processes by `src/core/oauth-token-cache.ts`; the cache is keyed by token
+  endpoint, client id, and requested scope, stored beneath
+  `~/.gbrain/oauth-token-cache/` with a private directory and `0600` atomic
+  files, and serialized by a stale-recoverable per-key lock. Client secrets are
+  never cached. `GBRAIN_REMOTE_TOKEN_CACHE=0` disables persistent caching.
+  `/token` 429 responses retain `Retry-After` as a `rate_limited` error rather
+  than masquerading as discovery or credential failure. `unpackToolResult<T>`
+  parses tool-call JSON content. `_clearMcpClientTokenCache()` clears only the
+  process-local test cache; the persistent layer deliberately survives it.
 - `src/core/cli-options.ts` — `parseGlobalFlags` adds `--timeout=Ns` (accepts
   `30s`, `2m`, `500ms`, plain ms). Default `null` = per-command default (30s
   for most ops, 180s for `think`). `parseTimeout(s)` exported helper.
