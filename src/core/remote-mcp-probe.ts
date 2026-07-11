@@ -16,7 +16,7 @@
 
 export type ProbeResult<T = void> =
   | { ok: true } & ({} extends T ? unknown : T extends void ? unknown : { value: T })
-  | { ok: false; reason: 'network' | 'http' | 'auth' | 'parse' | 'config'; status?: number; message: string };
+  | { ok: false; reason: 'network' | 'http' | 'auth' | 'rate_limited' | 'parse' | 'config'; status?: number; retryAfterSeconds?: number; message: string };
 
 /**
  * GET <issuer_url>/.well-known/oauth-authorization-server. Verifies the
@@ -83,46 +83,63 @@ export async function mintClientCredentialsToken(
   clientId: string,
   clientSecret: string,
   opts: { scope?: string; timeoutMs?: number } = {},
-): Promise<{ ok: true; token: TokenResponse } | { ok: false; reason: 'network' | 'http' | 'auth' | 'parse' | 'config'; status?: number; message: string }> {
+): Promise<{ ok: true; token: TokenResponse } | { ok: false; reason: 'network' | 'http' | 'auth' | 'rate_limited' | 'parse' | 'config'; status?: number; retryAfterSeconds?: number; message: string }> {
   if (!clientId) return { ok: false, reason: 'config', message: 'client_id is required' };
   if (!clientSecret) return { ok: false, reason: 'config', message: 'client_secret is required' };
 
-  const body = new URLSearchParams();
-  body.set('grant_type', 'client_credentials');
-  body.set('client_id', clientId);
-  body.set('client_secret', clientSecret);
-  if (opts.scope) body.set('scope', opts.scope);
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
   try {
-    const res = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString(),
-      signal: controller.signal,
-    });
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, reason: 'auth', status: res.status, message: `OAuth /token returned ${res.status} — check client_id and client_secret` };
-    }
-    if (!res.ok) {
-      return { ok: false, reason: 'http', status: res.status, message: `OAuth /token returned ${res.status}` };
-    }
-    let json: unknown;
+    const body = new URLSearchParams();
+    body.set('grant_type', 'client_credentials');
+    body.set('client_id', clientId);
+    body.set('client_secret', clientSecret);
+    if (opts.scope) body.set('scope', opts.scope);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 10_000);
     try {
-      json = await res.json();
-    } catch (e) {
-      return { ok: false, reason: 'parse', message: `OAuth /token returned non-JSON: ${(e as Error).message}` };
+      const res = await fetch(tokenEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+        signal: controller.signal,
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, reason: 'auth', status: res.status, message: `OAuth /token returned ${res.status} — check client_id and client_secret` };
+      }
+      if (res.status === 429) {
+        const retryAfterSeconds = parseRetryAfterSeconds(res.headers.get('retry-after'));
+        const suffix = retryAfterSeconds === undefined ? '' : `; retry after ${retryAfterSeconds}s`;
+        return { ok: false, reason: 'rate_limited', status: 429, retryAfterSeconds, message: `OAuth /token returned 429${suffix}` };
+      }
+      if (!res.ok) {
+        return { ok: false, reason: 'http', status: res.status, message: `OAuth /token returned ${res.status}` };
+      }
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch (e) {
+        return { ok: false, reason: 'parse', message: `OAuth /token returned non-JSON: ${(e as Error).message}` };
+      }
+      if (!json || typeof json !== 'object' || typeof (json as TokenResponse).access_token !== 'string') {
+        return { ok: false, reason: 'parse', message: 'OAuth /token response missing access_token' };
+      }
+      return { ok: true, token: json as TokenResponse };
+    } finally {
+      clearTimeout(timer);
     }
-    if (!json || typeof json !== 'object' || typeof (json as TokenResponse).access_token !== 'string') {
-      return { ok: false, reason: 'parse', message: `OAuth /token response missing access_token` };
-    }
-    return { ok: true, token: json as TokenResponse };
   } catch (e) {
     return { ok: false, reason: 'network', message: `OAuth /token network error: ${(e as Error).message}` };
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+/** Parse Retry-After as delta-seconds or an HTTP date. */
+export function parseRetryAfterSeconds(value: string | null, nowMs = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const retryAt = Date.parse(trimmed);
+  if (!Number.isFinite(retryAt)) return undefined;
+  return Math.max(0, Math.ceil((retryAt - nowMs) / 1000));
 }
 
 /**

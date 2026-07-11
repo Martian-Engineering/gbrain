@@ -25,15 +25,18 @@ import {
 } from '../src/core/mcp-client.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { randomUUID } from 'crypto';
 
 let server: Server;
 let port: number;
 
 // Per-test response control
 let tokenStatus = 200;
+let tokenRetryAfter: string | null = null;
 let mcpResponseFor: (req: { method: string; params?: unknown }) => unknown = () => ({});
 let mcpStatusOverride: number | null = null;
 let tokenMintCount = 0;
+let oauthClientId = '';
 
 beforeAll(async () => {
   server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -47,6 +50,7 @@ beforeAll(async () => {
       tokenMintCount++;
       res.statusCode = tokenStatus;
       res.setHeader('Content-Type', 'application/json');
+      if (tokenRetryAfter !== null) res.setHeader('Retry-After', tokenRetryAfter);
       if (tokenStatus === 200) {
         res.end(JSON.stringify({
           access_token: `token-${Date.now()}-${tokenMintCount}`,
@@ -109,10 +113,14 @@ afterAll(async () => {
 
 beforeEach(() => {
   tokenStatus = 200;
+  tokenRetryAfter = null;
   tokenMintCount = 0;
   mcpStatusOverride = null;
   mcpResponseFor = () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] });
   _clearMcpClientTokenCache();
+  // A unique identity prevents a persistent cache entry from an earlier test
+  // process from turning this file's in-process cache assertions into hits.
+  oauthClientId = `cid-${randomUUID()}`;
 });
 
 function makeConfig(): GBrainConfig {
@@ -121,7 +129,7 @@ function makeConfig(): GBrainConfig {
     remote_mcp: {
       issuer_url: `http://127.0.0.1:${port}`,
       mcp_url: `http://127.0.0.1:${port}/mcp`,
-      oauth_client_id: 'cid',
+      oauth_client_id: oauthClientId,
       oauth_client_secret: 'csecret',
     },
   };
@@ -155,8 +163,8 @@ describe('callRemoteTool — happy path', () => {
   });
 });
 
-describe('callRemoteTool — 401 refresh-on-once', () => {
-  test('401 from /mcp → re-mint token + retry succeeds', async () => {
+describe('callRemoteTool — cache layers', () => {
+  test('memory reset falls back to the persistent token cache', async () => {
     // Pre-seed cache with a fresh-but-server-rejected token by first
     // succeeding once, then flipping the server to 401 just once.
     await callRemoteTool(makeConfig(), 'first_success', {});
@@ -191,11 +199,11 @@ describe('callRemoteTool — 401 refresh-on-once', () => {
     // value AFTER first success, then restoring. Skipped for this case;
     // covered indirectly by the cache-reuse test above.
 
-    // Instead, assert that the cache invalidation API works: clear cache,
-    // call again, expect new token.
+    // Clearing the process-local map simulates a new CLI process. The
+    // file-backed cache should still avoid another token request.
     _clearMcpClientTokenCache();
     await callRemoteTool(makeConfig(), 'after_clear', {});
-    expect(tokenMintCount).toBe(2);
+    expect(tokenMintCount).toBe(1);
   });
 });
 
@@ -232,6 +240,19 @@ describe('callRemoteTool — error surfaces', () => {
     } catch (e) {
       expect(e).toBeInstanceOf(RemoteMcpError);
       expect((e as RemoteMcpError).reason).toBe('auth');
+    }
+  });
+
+  test('token mint 429 → throws RemoteMcpError(rate_limited) with Retry-After', async () => {
+    tokenStatus = 429;
+    tokenRetryAfter = '17';
+    try {
+      await callRemoteTool(makeConfig(), 'foo', {});
+      throw new Error('expected throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(RemoteMcpError);
+      expect((e as RemoteMcpError).reason).toBe('rate_limited');
+      expect((e as RemoteMcpError).detail?.retry_after_seconds).toBe(17);
     }
   });
 

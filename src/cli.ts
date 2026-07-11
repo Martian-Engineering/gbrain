@@ -548,6 +548,12 @@ async function runThinClientRouted(
           console.error('OAuth auth failed after token refresh. Credentials may have been revoked.');
           console.error('Run `gbrain remote doctor` to confirm.');
           break;
+        case 'rate_limited': {
+          const retry = e.detail?.retry_after_seconds;
+          console.error(`OAuth token endpoint rate-limited this client${retry === undefined ? '.' : `; retry after ${retry}s.`}`);
+          console.error('Wait for the stated interval; credentials do not need to be re-registered.');
+          break;
+        }
         case 'network':
           if (e.detail?.kind === 'timeout') {
             const hint = cliOpts.timeoutMs ? '' : ` (default ${defaultTimeoutMs}ms; pass --timeout=Ns to override)`;

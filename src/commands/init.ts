@@ -624,11 +624,18 @@ async function initRemoteMcp(opts: {
   // 2. Token round-trip
   const tokenRes = await mintClientCredentialsToken(disco.metadata.token_endpoint, clientId, clientSecret);
   if (!tokenRes.ok) {
+    const hint = tokenRes.reason === 'rate_limited'
+      ? `Wait${tokenRes.retryAfterSeconds === undefined ? '' : ` ${tokenRes.retryAfterSeconds}s`} and retry; the credentials do not need to be replaced.`
+      : `The host operator can run \`gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin\` to mint fresh credentials.`;
     fail(
       `token_${tokenRes.reason}`,
       `Pre-flight failed: OAuth /token — ${tokenRes.message}\n` +
-      `Hint: the host operator can run \`gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin\` to mint fresh credentials.`,
-      { detail: tokenRes.message, ...(tokenRes.status ? { status: tokenRes.status } : {}) },
+      `Hint: ${hint}`,
+      {
+        detail: tokenRes.message,
+        ...(tokenRes.status ? { status: tokenRes.status } : {}),
+        ...(tokenRes.retryAfterSeconds === undefined ? {} : { retry_after_seconds: tokenRes.retryAfterSeconds }),
+      },
     );
   }
   if (!jsonOutput) console.log(`  ✓ OAuth /token (${tokenRes.token.token_type ?? 'bearer'}, scope=${tokenRes.token.scope ?? 'unspecified'})`);
