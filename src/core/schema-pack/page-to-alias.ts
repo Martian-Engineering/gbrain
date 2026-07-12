@@ -19,9 +19,9 @@
 //   - canonical_unreachable: resolver couldn't extract canonical from body
 //   - parse_failed: page body failed markdown parse
 
-import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../operations.ts';
 import { parseMarkdown } from '../markdown.ts';
+import { activePageExists, insertSlugAliasIfAbsent } from '../slug-alias.ts';
 import { loadActivePackBestEffort } from './best-effort.ts';
 import type { PackResolverSpec } from './manifest-v1.ts';
 
@@ -103,39 +103,6 @@ function resolveValue(
 /**
  * Confirm a canonical slug actually exists as an active page. Source-scoped.
  */
-async function canonicalExists(
-  engine: BrainEngine,
-  slug: string,
-  sourceId: string,
-): Promise<boolean> {
-  const rows = await engine.executeRaw<{ id: number }>(
-    `SELECT id FROM pages WHERE slug = $1 AND source_id = $2 AND deleted_at IS NULL LIMIT 1`,
-    [slug, sourceId],
-  );
-  return rows.length > 0;
-}
-
-/**
- * Insert a slug_aliases row. ON CONFLICT DO NOTHING (idempotent retry).
- * Returns true on first-time insert, false on conflict (already exists).
- */
-async function insertAliasRow(
-  engine: BrainEngine,
-  sourceId: string,
-  aliasSlug: string,
-  canonicalSlug: string,
-  notes: string | undefined,
-): Promise<boolean> {
-  const rows = await engine.executeRaw<{ id: number }>(
-    `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug, notes)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (source_id, alias_slug) DO NOTHING
-     RETURNING id`,
-    [sourceId, aliasSlug, canonicalSlug, notes ?? null],
-  );
-  return rows.length > 0;
-}
-
 /**
  * Pure core for the unify-types Minion handler's page-to-alias phase.
  * Per-rule iteration; per-page unresolved tracking; source-scoped throughout.
@@ -212,14 +179,14 @@ export async function runPageToAliasCore(
           continue;
         }
         // Verify canonical exists in pages.
-        const exists = await canonicalExists(ctx.engine, canonicalSlug, effectiveSourceId);
+        const exists = await activePageExists(ctx.engine, canonicalSlug, effectiveSourceId);
         if (!exists) {
           unresolved.push({ slug: r.slug, reason: 'canonical_missing' });
           continue;
         }
         const notes = rule.notes_from ? resolveValue(rule.notes_from, pageView) : undefined;
         // Insert alias row (ON CONFLICT DO NOTHING — idempotent).
-        await insertAliasRow(ctx.engine, effectiveSourceId, aliasSlug, canonicalSlug, notes);
+        await insertSlugAliasIfAbsent(ctx.engine, effectiveSourceId, aliasSlug, canonicalSlug, notes);
         aliased++;
         // D15: do NOT rewriteLinks. Alias table IS the resolver.
         // Soft-delete LAST so a crash between insert + delete leaves

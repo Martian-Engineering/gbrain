@@ -23,7 +23,7 @@ import { loadConfig, loadConfigFileOnly, loadConfigWithEngine, toEngineConfig, i
 import type { GBrainConfig } from './core/config.ts';
 import type { AIGatewayConfig } from './core/ai/types.ts';
 import type { BrainEngine } from './core/engine.ts';
-import { operations, OperationError } from './core/operations.ts';
+import { operations, operationsByName, OperationError } from './core/operations.ts';
 import { formatVolunteeredPage } from './core/context/volunteer.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
 import { shouldForceExitAfterMain, finishCliTeardown, flushThenExit, currentExitCode, setCliExitVerdict } from './core/cli-force-exit.ts';
@@ -240,7 +240,9 @@ async function main() {
   // GBRAIN_SKIP_STARTUP_HOOKS for their children. Runs for every real command.
   maybeEmitUpdateMarker(command);
 
-  const subArgs = args.slice(1);
+  let subArgs = args.slice(1);
+  let routedOp: Operation | undefined;
+  let invokedCommand = command;
 
   // DX alias: `ask` is a natural-language alias for `query`
   if (command === 'ask') {
@@ -256,6 +258,29 @@ async function main() {
   if (!['serve', 'jobs', 'autopilot'].includes(command)) {
     const { markShortLivedCliProcess } = await import('./core/facts/cli-process-mode.ts');
     markShortLivedCliProcess();
+  }
+
+  // Supported slug redirects use nested CLI verbs while dispatching through
+  // the same shared operations as MCP and thin clients.
+  if (command === 'alias') {
+    const verb = subArgs[0];
+    if (!verb || verb === '--help' || verb === '-h') {
+      printAliasHelp();
+      return;
+    }
+    const opName = verb === 'add'
+      ? 'add_slug_alias'
+      : verb === 'remove'
+        ? 'remove_slug_alias'
+        : undefined;
+    if (!opName) {
+      console.error(`Unknown alias subcommand: ${verb}`);
+      printAliasHelp();
+      process.exit(1);
+    }
+    routedOp = operationsByName[opName];
+    invokedCommand = `alias ${verb}`;
+    subArgs = subArgs.slice(1);
   }
 
   // T5 — `gbrain search modes|stats|tune` is the read-only config dashboard,
@@ -296,9 +321,9 @@ async function main() {
 
   // Per-command --help
   if (hasHelpFlag(subArgs)) {
-    const op = cliOps.get(command) ?? cliAliases.get(command);
+    const op = routedOp ?? cliOps.get(command) ?? cliAliases.get(command);
     if (op) {
-      printOpHelp(op, command);
+      printOpHelp(op, invokedCommand);
       return;
     }
     if (CLI_ONLY.has(command) && !CLI_ONLY_SELF_HELP.has(command)) {
@@ -325,7 +350,7 @@ async function main() {
   }
 
   // Shared operations (fall through to aliases, e.g. link-add -> add_link)
-  const op = cliOps.get(command) ?? cliAliases.get(command);
+  const op = routedOp ?? cliOps.get(command) ?? cliAliases.get(command);
   if (!op) {
     console.error(`Unknown command: ${command}`);
     console.error('Run gbrain --help for available commands.');
@@ -366,7 +391,7 @@ async function main() {
   for (const [key, def] of Object.entries(op.params)) {
     if (def.required && params[key] === undefined) {
       if (queryHasAlt && key === 'query') continue;
-      const cliName = op.cliHints?.name || op.name;
+      const cliName = invokedCommand || op.cliHints?.name || op.name;
       const positional = op.cliHints?.positional || [];
       const usage = positional.map(p => `<${p}>`).join(' ');
       console.error(`Usage: gbrain ${cliName} ${usage}`);
@@ -499,6 +524,14 @@ function printCliOnlyHelp(command: string) {
   console.log(`Usage: gbrain ${command}`);
   console.log('');
   console.log(`gbrain ${command} - run gbrain --help for the full command list.`);
+}
+
+function printAliasHelp() {
+  console.log(`Usage:
+  gbrain alias add <old> <canonical> [--soft-delete-old] [--replace] [--source ID]
+  gbrain alias remove <old> [--source ID]
+
+Manage source-scoped slug redirects. Removing a redirect does not restore a page.`);
 }
 
 /**
@@ -2322,6 +2355,12 @@ LINKS
   graph <slug> [--depth N]           Traverse link graph (returns nodes)
   graph-query <slug> [--type T]      Edge-based traversal with type/direction filters
         [--depth N] [--direction in|out|both]
+
+SLUG ALIASES
+  alias add <old> <canonical>        Add a source-scoped slug redirect
+        [--soft-delete-old] [--replace] [--source ID]
+  alias remove <old>                 Remove a redirect (does not restore pages)
+        [--source ID]
 
 TAGS
   tags <slug>                        List tags

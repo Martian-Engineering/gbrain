@@ -28,6 +28,15 @@ import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
+import { assertValidSourceId } from './source-id.ts';
+import {
+  addSlugAlias,
+  removeSlugAlias,
+  SlugAliasError,
+  syncedFileWarning,
+} from './slug-alias.ts';
+import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
+import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -469,6 +478,48 @@ export function thinkSourceScopeOpts(ctx: OperationContext): {
     : scope.sourceId !== undefined
       ? { sourceId: scope.sourceId }
       : {};
+}
+
+/**
+ * Resolve the single source for a write operation. OAuth federation grants are
+ * read-only; a remote writer is pinned to auth.sourceId and cannot select a
+ * neighboring source through operation params.
+ */
+export function resolveWriteSourceId(
+  ctx: OperationContext,
+  requestedSourceId?: string,
+): string {
+  // Once authenticated identity is present, its source is authoritative.
+  // Do not fall back to a separately populated context field if auth.sourceId
+  // is missing; that would turn a transport wiring bug into a write-scope
+  // widening. Stdio MCP has no auth object and uses its explicit ctx source.
+  const grantedSourceId = ctx.auth ? ctx.auth.sourceId : ctx.sourceId;
+  if (ctx.remote !== false) {
+    if (!grantedSourceId) {
+      throw new OperationError('permission_denied', 'No source is assigned to this authenticated caller.');
+    }
+    if (requestedSourceId !== undefined && requestedSourceId !== grantedSourceId) {
+      throw new OperationError(
+        'permission_denied',
+        `source '${requestedSourceId}' is outside your write scope`,
+        `Omit source_id or use the OAuth client's assigned source '${grantedSourceId}'.`,
+      );
+    }
+    try {
+      assertValidSourceId(grantedSourceId);
+    } catch {
+      throw new OperationError('permission_denied', 'The authenticated write source is invalid.');
+    }
+    return grantedSourceId;
+  }
+
+  const sourceId = requestedSourceId ?? ctx.sourceId ?? 'default';
+  try {
+    assertValidSourceId(sourceId);
+  } catch (error) {
+    throw new OperationError('invalid_params', error instanceof Error ? error.message : String(error));
+  }
+  return sourceId;
 }
 
 /**
@@ -1328,6 +1379,139 @@ const delete_page: Operation = {
     return { status: 'soft_deleted', slug, recoverable_until: 'now + 72h via restore_page' };
   },
   cliHints: { name: 'delete', positional: ['slug'] },
+};
+
+function aliasAuditActor(ctx: OperationContext): SlugAliasAuditActor {
+  if (ctx.remote === false) return 'cli';
+  return `mcp:${(ctx.auth?.clientId ?? 'unknown').slice(0, 8)}`;
+}
+
+function requestedAliasSource(p: Record<string, unknown>): string | undefined {
+  const sourceId = typeof p.source_id === 'string' ? p.source_id : undefined;
+  const cliSource = typeof p.source === 'string' ? p.source : undefined;
+  if (sourceId !== undefined && cliSource !== undefined && sourceId !== cliSource) {
+    throw new OperationError('invalid_params', 'source_id and source must match when both are supplied.');
+  }
+  return sourceId ?? cliSource;
+}
+
+const add_slug_alias: Operation = {
+  name: 'add_slug_alias',
+  description: 'Add a source-scoped old-slug to canonical-slug redirect. The canonical page must be active. Existing mappings and active old pages require explicit flags.',
+  params: {
+    alias_slug: { type: 'string', required: true, description: 'Old slug that should redirect' },
+    canonical_slug: { type: 'string', required: true, description: 'Existing active canonical page slug' },
+    soft_delete_old: { type: 'boolean', description: 'Atomically soft-delete an active page at alias_slug before creating the redirect' },
+    replace: { type: 'boolean', description: 'Allow replacing an existing alias mapping' },
+    source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
+    source: { type: 'string', description: 'CLI spelling of source_id (--source)' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const aliasSlug = p.alias_slug as string;
+    const canonicalSlug = p.canonical_slug as string;
+    let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
+    try {
+      sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
+      validatePageSlug(aliasSlug);
+      validatePageSlug(canonicalSlug);
+      const result = await addSlugAlias(ctx.engine, {
+        sourceId,
+        aliasSlug,
+        canonicalSlug,
+        softDeleteOld: p.soft_delete_old === true,
+        replace: p.replace === true,
+      });
+
+      const cache = result.status === 'unchanged' && !result.soft_deleted_old
+        ? { rows_invalidated: 0 }
+        : await invalidateQueryCache(ctx.engine, sourceId);
+      const warning = result.soft_deleted_old
+        ? await syncedFileWarning(ctx.engine, sourceId, result.old_source_path).catch(() => null)
+        : null;
+      logSlugAliasAudit({
+        op: 'add_slug_alias',
+        actor: aliasAuditActor(ctx),
+        source_id: sourceId,
+        alias_slug: aliasSlug,
+        canonical_slug: canonicalSlug,
+        outcome: result.status,
+      });
+      const { old_source_path: _oldSourcePath, ...publicResult } = result;
+      return {
+        ...publicResult,
+        cache_rows_invalidated: cache.rows_invalidated,
+        warnings: warning ? [warning] : [],
+      };
+    } catch (error) {
+      logSlugAliasAudit({
+        op: 'add_slug_alias',
+        actor: aliasAuditActor(ctx),
+        source_id: sourceId,
+        alias_slug: aliasSlug,
+        canonical_slug: canonicalSlug,
+        outcome: 'failure',
+        reason: error instanceof SlugAliasError || error instanceof OperationError
+          ? error.code
+          : error instanceof Error ? error.name : 'unknown',
+      });
+      if (error instanceof SlugAliasError) {
+        throw new OperationError(error.code, error.message);
+      }
+      throw error;
+    }
+  },
+  cliHints: { hidden: true, positional: ['alias_slug', 'canonical_slug'] },
+};
+
+const remove_slug_alias: Operation = {
+  name: 'remove_slug_alias',
+  description: 'Remove a source-scoped slug redirect. This is idempotent and does not restore a soft-deleted page.',
+  params: {
+    alias_slug: { type: 'string', required: true, description: 'Old slug whose redirect should be removed' },
+    source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
+    source: { type: 'string', description: 'CLI spelling of source_id (--source)' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const aliasSlug = p.alias_slug as string;
+    let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
+    try {
+      sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
+      validatePageSlug(aliasSlug);
+      const result = await removeSlugAlias(ctx.engine, sourceId, aliasSlug);
+      const cache = result.status === 'removed'
+        ? await invalidateQueryCache(ctx.engine, sourceId)
+        : { rows_invalidated: 0 };
+      logSlugAliasAudit({
+        op: 'remove_slug_alias',
+        actor: aliasAuditActor(ctx),
+        source_id: sourceId,
+        alias_slug: aliasSlug,
+        outcome: result.status,
+      });
+      return {
+        ...result,
+        cache_rows_invalidated: cache.rows_invalidated,
+        page_restored: false,
+      };
+    } catch (error) {
+      logSlugAliasAudit({
+        op: 'remove_slug_alias',
+        actor: aliasAuditActor(ctx),
+        source_id: sourceId,
+        alias_slug: aliasSlug,
+        outcome: 'failure',
+        reason: error instanceof OperationError
+          ? error.code
+          : error instanceof Error ? error.name : 'unknown',
+      });
+      throw error;
+    }
+  },
+  cliHints: { hidden: true, positional: ['alias_slug'] },
 };
 
 const restore_page: Operation = {
@@ -5362,6 +5546,8 @@ const chronicle_backfill: Operation = {
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
+  // Source-scoped slug redirects
+  add_slug_alias, remove_slug_alias,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)
   restore_page, purge_deleted_pages,
   // Search

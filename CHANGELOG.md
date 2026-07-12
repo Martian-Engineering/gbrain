@@ -2,6 +2,11 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Supported source-scoped slug redirects.** Operators can add redirects with `gbrain alias add <old> <canonical>` and remove them with `gbrain alias remove <old>`. The same interface is available to authenticated MCP clients through the write-scoped `add_slug_alias` and `remove_slug_alias` operations. Canonical pages must be active; self-aliases, cycles, implicit replacement, and active-page collisions are rejected. `--soft-delete-old` makes the old-page soft-delete and alias write one PostgreSQL/PGLite transaction, while `--replace` explicitly permits replacement. Repeated adds and removes are idempotent. Remote callers remain pinned to their OAuth write source. Alias changes emit an audit record, clear only the affected source's query cache, and warn when a remaining synced file can recreate a soft-deleted page without editing that file or Git.
+
 ## [0.42.64.0] - 2026-07-20
 
 ### Fixed
@@ -184,7 +189,6 @@ The reported page and type counts now come from the `database_path` in `~/.gbrai
    ```
 3. **If a previously-resolving shorthand name now files under a holding page**, that's the new ambiguity quarantine working as intended — add an alias or use the full name/slug for entities you want bare shorthand to hit.
 4. **If any step fails,** please file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `~/.gbrain/upgrade-errors.jsonl` if it exists.
-
 ## [0.42.58.0] - 2026-07-06
 
 **gbrain now runs cleanly on the stack you already have — a local Ollama box, a self-hosted LiteLLM proxy, llama.cpp's llama-server, or gbrain running as a Claude Code MCP subprocess — instead of silently degrading or hard-failing when you're not on a raw OpenAI/Anthropic key.** A provider-agnostic plumbing pass across the AI gateway: environment handling, base-URL normalization, and embedding-dimension validation all stop tripping on the non-frontier-vendor setups that used to fail without a clear signal.

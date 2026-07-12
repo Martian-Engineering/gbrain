@@ -1,0 +1,466 @@
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from 'bun:test';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
+import {
+  OperationError,
+  operationsByName,
+  type OperationContext,
+} from '../src/core/operations.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import {
+  addSlugAlias,
+  removeSlugAlias,
+  SlugAliasError,
+} from '../src/core/slug-alias.ts';
+import { readRecentSlugAliasAudit } from '../src/core/audit/slug-alias-audit.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+});
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+});
+
+function page(slug: string, sourcePath: string | null = null) {
+  return {
+    type: 'note' as const,
+    title: slug,
+    compiled_truth: `# ${slug}`,
+    timeline: '',
+    frontmatter: {},
+    source_path: sourcePath,
+  };
+}
+
+async function seedPage(slug: string, sourceId = 'default', sourcePath: string | null = null) {
+  await engine.putPage(slug, page(slug, sourcePath), { sourceId });
+}
+
+function ctx(
+  sourceId = 'default',
+  remote = false,
+  auth?: OperationContext['auth'],
+): OperationContext {
+  return {
+    engine,
+    config: { engine: 'pglite' },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    dryRun: false,
+    remote,
+    sourceId,
+    auth,
+  };
+}
+
+async function withAuditDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-audit-'));
+  try {
+    return await withEnv({ GBRAIN_AUDIT_DIR: dir }, () => fn(dir));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('slug-alias operation registration', () => {
+  test('both operations are normal remote-capable write operations', () => {
+    for (const name of ['add_slug_alias', 'remove_slug_alias']) {
+      const op = operationsByName[name];
+      expect(op).toBeDefined();
+      expect(op.scope).toBe('write');
+      expect(op.localOnly).not.toBe(true);
+    }
+    expect(operationsByName.add_slug_alias.params).toHaveProperty('soft_delete_old');
+    expect(operationsByName.add_slug_alias.params).toHaveProperty('replace');
+  });
+});
+
+describe('addSlugAlias on PGLite', () => {
+  test('requires an active canonical page', async () => {
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'missing',
+    })).rejects.toMatchObject({ code: 'canonical_not_found' });
+
+    await seedPage('canonical');
+    await engine.softDeletePage('canonical', { sourceId: 'default' });
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    })).rejects.toMatchObject({ code: 'canonical_not_found' });
+  });
+
+  test('rejects self aliases', async () => {
+    await seedPage('same');
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'same', canonicalSlug: 'same',
+    })).rejects.toMatchObject({ code: 'self_alias' });
+  });
+
+  test('rejects an active alias page without explicit soft-delete', async () => {
+    await seedPage('old');
+    await seedPage('canonical');
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    })).rejects.toMatchObject({ code: 'alias_page_collision' });
+    expect((await engine.getPage('old', { sourceId: 'default' }))?.deleted_at).toBeNull();
+  });
+
+  test('soft-deletes the old page and inserts the alias in one transaction', async () => {
+    await seedPage('old');
+    await seedPage('canonical');
+    const result = await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical',
+      softDeleteOld: true,
+    });
+    expect(result.status).toBe('added');
+    expect(result.soft_deleted_old).toBe(true);
+    expect(await engine.getPage('old', { sourceId: 'default' })).toBeNull();
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical');
+  });
+
+  test('identical mapping is idempotent success', async () => {
+    await seedPage('canonical');
+    const first = await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    });
+    const second = await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    });
+    expect(first.status).toBe('added');
+    expect(second.status).toBe('unchanged');
+    const rows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM slug_aliases WHERE source_id = 'default' AND alias_slug = 'old'`,
+    );
+    expect(rows[0].n).toBe(1);
+  });
+
+  test('an active page still requires explicit soft-delete for an identical mapping', async () => {
+    await seedPage('canonical');
+    await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    });
+    await seedPage('old');
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    })).rejects.toMatchObject({ code: 'alias_page_collision' });
+
+    const result = await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical',
+      softDeleteOld: true,
+    });
+    expect(result).toMatchObject({ status: 'unchanged', soft_deleted_old: true });
+    expect(await engine.getPage('old', { sourceId: 'default' })).toBeNull();
+  });
+
+  test('replacement is gated and explicit replacement changes the resolver', async () => {
+    await seedPage('canonical-a');
+    await seedPage('canonical-b');
+    await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical-a',
+    });
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical-b',
+    })).rejects.toMatchObject({ code: 'alias_replacement_required' });
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical-a');
+
+    const replaced = await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical-b',
+      replace: true,
+    });
+    expect(replaced.status).toBe('replaced');
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical-b');
+  });
+
+  test('rejects a multi-hop cycle', async () => {
+    await seedPage('page-b');
+    await seedPage('page-c');
+    await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'page-a', canonicalSlug: 'page-b',
+    });
+    await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'page-b',
+      canonicalSlug: 'page-c',
+      softDeleteOld: true,
+    });
+    // Make page-a an active canonical candidate after its alias row exists.
+    await seedPage('page-a');
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'page-c',
+      canonicalSlug: 'page-a',
+      softDeleteOld: true,
+    })).rejects.toMatchObject({ code: 'alias_cycle' });
+    expect((await engine.getPage('page-c', { sourceId: 'default' }))?.deleted_at).toBeNull();
+  });
+
+  test('rolls back old-page soft-delete when the alias insert fails', async () => {
+    await seedPage('old');
+    await seedPage('canonical');
+    const originalTransaction = engine.transaction.bind(engine);
+    engine.transaction = async <T>(fn: (tx: BrainEngine) => Promise<T>): Promise<T> =>
+      originalTransaction(async (tx) => {
+        const originalExecuteRaw = tx.executeRaw.bind(tx);
+        tx.executeRaw = async <R = Record<string, unknown>>(sql: string, params?: unknown[]) => {
+          if (/INSERT INTO slug_aliases/.test(sql)) throw new Error('forced alias insert failure');
+          return originalExecuteRaw<R>(sql, params);
+        };
+        return fn(tx);
+      });
+    try {
+      await expect(addSlugAlias(engine, {
+        sourceId: 'default',
+        aliasSlug: 'old',
+        canonicalSlug: 'canonical',
+        softDeleteOld: true,
+      })).rejects.toThrow('forced alias insert failure');
+    } finally {
+      engine.transaction = originalTransaction;
+    }
+    expect((await engine.getPage('old', { sourceId: 'default' }))?.deleted_at).toBeNull();
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('old');
+  });
+
+  test('rolls back old-page soft-delete when an alias replacement fails', async () => {
+    await seedPage('canonical-a');
+    await seedPage('canonical-b');
+    await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical-a',
+    });
+    await seedPage('old');
+
+    const originalTransaction = engine.transaction.bind(engine);
+    engine.transaction = async <T>(fn: (tx: BrainEngine) => Promise<T>): Promise<T> =>
+      originalTransaction(async (tx) => {
+        const originalExecuteRaw = tx.executeRaw.bind(tx);
+        tx.executeRaw = async <R = Record<string, unknown>>(sql: string, params?: unknown[]) => {
+          if (/UPDATE slug_aliases/.test(sql)) throw new Error('forced alias update failure');
+          return originalExecuteRaw<R>(sql, params);
+        };
+        return fn(tx);
+      });
+    try {
+      await expect(addSlugAlias(engine, {
+        sourceId: 'default',
+        aliasSlug: 'old',
+        canonicalSlug: 'canonical-b',
+        softDeleteOld: true,
+        replace: true,
+      })).rejects.toThrow('forced alias update failure');
+    } finally {
+      engine.transaction = originalTransaction;
+    }
+    expect((await engine.getPage('old', { sourceId: 'default' }))?.deleted_at).toBeNull();
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical-a');
+  });
+});
+
+describe('source isolation and removal', () => {
+  beforeEach(async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('other', 'other') ON CONFLICT (id) DO NOTHING`,
+    );
+    await seedPage('canonical', 'default');
+    await seedPage('canonical', 'other');
+  });
+
+  test('same alias is isolated by source', async () => {
+    await addSlugAlias(engine, {
+      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
+    });
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical');
+    expect(await engine.resolveSlugWithAlias('old', 'other')).toBe('old');
+  });
+
+  test('remove is source-scoped, idempotent, and never restores a page', async () => {
+    await seedPage('old', 'default');
+    await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical',
+      softDeleteOld: true,
+    });
+    await addSlugAlias(engine, {
+      sourceId: 'other', aliasSlug: 'old', canonicalSlug: 'canonical',
+    });
+
+    expect((await removeSlugAlias(engine, 'default', 'old')).status).toBe('removed');
+    expect((await removeSlugAlias(engine, 'default', 'old')).status).toBe('not_found');
+    expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('old');
+    expect(await engine.resolveSlugWithAlias('old', 'other')).toBe('canonical');
+    const deleted = await engine.getPage('old', { sourceId: 'default', includeDeleted: true });
+    expect(deleted?.deleted_at).not.toBeNull();
+  });
+});
+
+describe('operation auth, cache, audit, and synced-file warning', () => {
+  test('remote caller inherits OAuth write source and cannot override it', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('oauth-src', 'oauth-src'), ('other', 'other') ON CONFLICT (id) DO NOTHING`,
+    );
+    await seedPage('canonical', 'oauth-src');
+    const auth = {
+      token: 't', clientId: 'client-123456789', scopes: ['write'], sourceId: 'oauth-src',
+      allowedSources: ['oauth-src', 'other'],
+    };
+
+    await withAuditDir(async () => {
+      await expect(operationsByName.add_slug_alias.handler(
+        ctx('oauth-src', true, auth),
+        { alias_slug: 'old', canonical_slug: 'canonical', source_id: 'other' },
+      )).rejects.toMatchObject({ code: 'permission_denied' });
+
+      const result = await operationsByName.add_slug_alias.handler(
+        ctx('oauth-src', true, auth),
+        { alias_slug: 'old', canonical_slug: 'canonical' },
+      ) as { source_id: string; status: string };
+      expect(result).toMatchObject({ source_id: 'oauth-src', status: 'added' });
+    });
+    expect(await engine.resolveSlugWithAlias('old', 'oauth-src')).toBe('canonical');
+    expect(await engine.resolveSlugWithAlias('old', 'other')).toBe('old');
+  });
+
+  test('remote authenticated context fails closed when OAuth has no write source', async () => {
+    const auth = { token: 't', clientId: 'client', scopes: ['write'] };
+    await withAuditDir(async () => {
+      await expect(operationsByName.remove_slug_alias.handler(
+        ctx('default', true, auth),
+        { alias_slug: 'old' },
+      )).rejects.toMatchObject({ code: 'permission_denied' });
+    });
+  });
+
+  test('invalidates only the affected source query cache after a real change', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('other', 'other') ON CONFLICT (id) DO NOTHING`,
+    );
+    await seedPage('canonical');
+    for (const sourceId of ['default', 'other']) {
+      await engine.executeRaw(
+        `INSERT INTO query_cache
+          (id, query_text, source_id, knobs_hash, embedding, results, meta, ttl_seconds, created_at)
+         VALUES ($1, 'q', $2, 'test', NULL, '[]'::jsonb, '{}'::jsonb, 3600, now())`,
+        [`cache-${sourceId}`, sourceId],
+      );
+    }
+
+    await withAuditDir(async () => {
+      const result = await operationsByName.add_slug_alias.handler(ctx(), {
+        alias_slug: 'old', canonical_slug: 'canonical',
+      }) as { cache_rows_invalidated: number };
+      expect(result.cache_rows_invalidated).toBe(1);
+      const unchanged = await operationsByName.add_slug_alias.handler(ctx(), {
+        alias_slug: 'old', canonical_slug: 'canonical',
+      }) as { cache_rows_invalidated: number };
+      expect(unchanged.cache_rows_invalidated).toBe(0);
+    });
+    const rows = await engine.executeRaw<{ source_id: string }>(
+      `SELECT source_id FROM query_cache ORDER BY source_id`,
+    );
+    expect(rows.map((row) => row.source_id)).toEqual(['other']);
+  });
+
+  test('emits an audit record and warns when sync can recreate the old page', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-source-'));
+    const audit = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-audit-'));
+    try {
+      mkdirSync(join(repo, 'notes'), { recursive: true });
+      writeFileSync(join(repo, 'notes', 'old.md'), '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('notes/old', 'default', 'notes/old.md');
+      await seedPage('notes/canonical');
+
+      await withEnv({ GBRAIN_AUDIT_DIR: audit }, async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          soft_delete_old: true,
+        }) as { warnings: string[] };
+        expect(result.warnings).toHaveLength(1);
+        expect(result.warnings[0]).toContain('future sync can recreate');
+        expect(result.warnings[0]).toContain('Git was not modified');
+        expect(readFileSync(join(repo, 'notes', 'old.md'), 'utf8')).toBe('# old\n');
+
+        const events = readRecentSlugAliasAudit();
+        expect(events.at(-1)).toMatchObject({
+          op: 'add_slug_alias',
+          actor: 'cli',
+          source_id: 'default',
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          outcome: 'added',
+        });
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(audit, { recursive: true, force: true });
+    }
+  });
+
+  test('synced-file warning honors the legacy default-source repo path', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-legacy-source-'));
+    try {
+      writeFileSync(join(repo, 'old.md'), '# old\n');
+      await engine.setConfig('sync.repo_path', repo);
+      await seedPage('old', 'default', 'old.md');
+      await seedPage('canonical');
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'old',
+          canonical_slug: 'canonical',
+          soft_delete_old: true,
+        }) as { warnings: string[] };
+        expect(result.warnings[0]).toContain('future sync can recreate');
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('remove operation is idempotent and reports that no page was restored', async () => {
+    await withAuditDir(async () => {
+      const result = await operationsByName.remove_slug_alias.handler(ctx(), {
+        alias_slug: 'not-registered',
+      }) as { status: string; page_restored: boolean; cache_rows_invalidated: number };
+      expect(result).toEqual(expect.objectContaining({
+        status: 'not_found',
+        page_restored: false,
+        cache_rows_invalidated: 0,
+      }));
+    });
+  });
+});
+
+test('SlugAliasError remains a tagged domain error', () => {
+  const error = new SlugAliasError('self_alias', 'x');
+  expect(error).toBeInstanceOf(Error);
+  expect(error.code).toBe('self_alias');
+  expect(new OperationError('permission_denied', 'x').code).toBe('permission_denied');
+});

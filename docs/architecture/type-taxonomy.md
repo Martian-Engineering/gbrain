@@ -154,6 +154,43 @@ emits a once-per-process `multi_match` stderr warning and returns the
 first match by source array order. Federated reads pass the full
 allowed-source array.
 
+## Operator-managed slug redirects
+
+`slug_aliases` also has a supported operator interface. The CLI and MCP
+operations call the same source-scoped implementation:
+
+```bash
+gbrain alias add <old> <canonical>
+gbrain alias add <old> <canonical> --soft-delete-old
+gbrain alias add <old> <canonical> --replace
+gbrain alias remove <old>
+```
+
+The corresponding MCP operations are `add_slug_alias` and
+`remove_slug_alias`. They require the normal `write` scope. An authenticated
+remote caller writes only to its OAuth-assigned source; federated read grants
+do not grant write access to the other sources in that array. Local CLI callers
+can select a source with `--source <id>`.
+
+`alias add` requires an active canonical page. It rejects self-aliases, cycles,
+and an active page at the old slug. `--soft-delete-old` permits that collision
+by soft-deleting the old page in the same database transaction as the alias
+insert or replacement. `--replace` is required to change an existing mapping;
+adding the same mapping again returns an idempotent success. PostgreSQL and
+PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
+
+`alias remove` is source-scoped and idempotent. It removes only the redirect;
+page restoration remains an explicit `restore_page` operation. If a
+soft-deleted page came from a file that still exists beneath the source's
+registered `local_path`, `alias add` warns that a later sync can recreate the
+page. The alias command never edits the file or Git history.
+
+Alias changes clear `query_cache` rows for the affected source because the
+`alias_resolved_boost` search stage reads `slug_aliases`. Other caches are not
+invalidated. Each attempt writes the standard ISO-week JSONL audit record under
+`~/.gbrain/audit/slug-aliases-YYYY-Www.jsonl`; HTTP MCP requests also retain the
+normal `mcp_request_log` record.
+
 ## Search ranking signal: alias_resolved_boost
 
 Post-unify, search results whose slug is a canonical_slug in
@@ -172,6 +209,8 @@ invalidate pre-v0.42 cache rows that don't reflect the new stage.
 - Pack file: `src/core/schema-pack/base/gbrain-base-v2.yaml`
 - Pack-upgrade mechanism: `docs/architecture/pack-upgrade-mechanism.md`
 - Migration handler: `src/core/schema-pack/unify-types-handler.ts`
+- Supported mutation primitive: `src/core/slug-alias.ts`
+- Shared operations: `add_slug_alias`, `remove_slug_alias`
 - Onboard checks: `src/core/onboard/checks.ts`
 - Skill: `skills/schema-unify/SKILL.md`
 - Plan + decisions: `~/.claude/plans/system-instruction-you-are-working-transient-elephant.md`
