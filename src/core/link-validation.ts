@@ -47,6 +47,32 @@ export async function validatePageReferences(
     seen.add(key);
 
     if (ref.needsResolution) {
+      // Generic wikilinks include both true basenames (`[[openclaw]]`) and
+      // full paths outside the extractor's entity-directory allow-list
+      // (`[[partners/josh/sources/...]]`). Full paths are not fuzzy names:
+      // prefer an exact, source-scoped lookup first. Slugs are canonicalized
+      // to lowercase by import, while historical display paths may retain
+      // mixed-case external IDs, so try the lowercase path as well.
+      if (ref.slug.includes('/')) {
+        const exactCandidates = [...new Set([ref.slug, ref.slug.toLowerCase()])];
+        let exact: Page | null = null;
+        let exactSlug = ref.slug;
+        for (const candidate of exactCandidates) {
+          exact = await engine.getPage(candidate, opts);
+          if (exact) { exactSlug = candidate; break; }
+        }
+        if (exact) {
+          findings.push({
+            source_slug: page.slug,
+            target: ref.slug,
+            status: 'resolved',
+            source_id: page.source_id,
+            target_source_id: exact.source_id,
+            ...(exactSlug !== ref.slug ? { resolved_target: exactSlug } : {}),
+          });
+          continue;
+        }
+      }
       const candidates = await engine.resolveSlugs(ref.slug, opts);
       const unique = [...new Set(candidates)];
       if (unique.length === 1) {

@@ -52,6 +52,20 @@ describe('link validation', () => {
     expect(findings[0].candidates).toHaveLength(2);
   });
 
+  test('resolves mixed-case full-path generic wikilinks exactly before fuzzy lookup', async () => {
+    const findings = await validatePageReferences(
+      engine(['partners/josh/sources/granola/not-abc-artifact'], {
+        'partners/josh/sources/granola/not-AbC-artifact': ['wrong/a', 'wrong/b'],
+      }),
+      page('meetings/x', '[[partners/josh/sources/granola/not-AbC-artifact]]'),
+      { sourceId: 'martian' },
+    );
+    expect(findings[0]).toMatchObject({
+      status: 'resolved',
+      resolved_target: 'partners/josh/sources/granola/not-abc-artifact',
+    });
+  });
+
   test('summary excludes resolved references from findings', async () => {
     const report = await validateLinks(
       engine(['companies/acme']),
