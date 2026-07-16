@@ -42,8 +42,10 @@ This skill guarantees:
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every attendee and company mentioned MUST get a back-link from their page to
-the meeting page. An unlinked mention is a broken brain.
+Every attendee and company reference MUST resolve to a graph edge and be
+reverse-navigable from the entity. Add a dossier Timeline entry when the
+meeting materially changes the entity's history; routine attendance need not
+be duplicated into Markdown.
 
 ## Phases
 
@@ -85,7 +87,7 @@ For EACH attendee:
 1. `gbrain search "{name}"` — does a people page exist?
 2. If NO → create via enrich skill (this is mandatory, not optional)
 3. If YES → update compiled truth with meeting context
-4. Add timeline entry on the person's page:
+4. When the meeting is a material event for the person, add a timeline entry:
    `gbrain timeline-add <person-slug> <date> "Attended <meeting-title>"`
 
 **Note (v0.10.1):** Once the meeting page is written via `gbrain put`, the
@@ -99,8 +101,8 @@ for dated events (auto-link only handles links, not timeline entries).
 For each company, project, or concept discussed:
 1. Check brain for existing page
 2. Create/update as needed
-3. Add timeline entry referencing the meeting
-4. Back-link from entity page to meeting page
+3. Add a timeline entry when the meeting materially changes the entity dossier
+4. Verify reverse navigation through `get_backlinks`
 
 ### Phase 5: Timeline merge
 

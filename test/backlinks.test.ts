@@ -4,7 +4,9 @@ import {
   extractPageTitle,
   hasBacklink,
   buildBacklinkEntry,
+  auditGraphBacklinks,
 } from '../src/commands/backlinks.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 
 describe('extractEntityRefs', () => {
   test('extracts people links', () => {
@@ -69,6 +71,52 @@ describe('hasBacklink', () => {
   test('returns false when source filename is absent', () => {
     const content = '## Timeline\n\n- Some other entry';
     expect(hasBacklink(content, 'q1-review.md')).toBe(false);
+  });
+
+  test('recognizes canonical extensionless wikilinks', () => {
+    const content = '## Timeline\n\n- [[partners/josh/meetings/q1-review|Q1 Review]]';
+    expect(hasBacklink(content, 'partners/josh/meetings/q1-review.md')).toBe(true);
+  });
+});
+
+describe('auditGraphBacklinks', () => {
+  const source = {
+    slug: 'meetings/q1-review',
+    source_id: 'martian',
+    compiled_truth: 'Met [[people/alice|Alice]].',
+    timeline: '',
+  } as any;
+  const alice = {
+    slug: 'people/alice',
+    source_id: 'martian',
+    compiled_truth: '# Alice',
+    timeline: '',
+  } as any;
+
+  function engine(opts: { edge?: boolean; backlink?: boolean } = {}): BrainEngine {
+    const edge = opts.edge !== false;
+    const backlink = opts.backlink !== false;
+    return {
+      listPages: async ({ offset }: { offset?: number }) => offset ? [] : [source],
+      resolveSlugWithAlias: async (slug: string) => slug,
+      getPage: async (slug: string) => slug === alice.slug ? alice : null,
+      getLinks: async () => edge ? [{ from_slug: source.slug, to_slug: alice.slug }] : [],
+      getBacklinks: async () => backlink ? [{ from_slug: source.slug, to_slug: alice.slug }] : [],
+    } as unknown as BrainEngine;
+  }
+
+  test('passes when a resolved reference has an edge and inverse view', async () => {
+    const report = await auditGraphBacklinks(engine(), { sourceId: 'martian' });
+    expect(report.gaps_found).toBe(0);
+    expect(report.graph_edges_missing).toBe(0);
+    expect(report.backlink_views_missing).toBe(0);
+  });
+
+  test('distinguishes missing edges from missing inverse views', async () => {
+    const noEdge = await auditGraphBacklinks(engine({ edge: false }), { sourceId: 'martian' });
+    expect(noEdge.graph_edges_missing).toBe(1);
+    const noBacklink = await auditGraphBacklinks(engine({ backlink: false }), { sourceId: 'martian' });
+    expect(noBacklink.backlink_views_missing).toBe(1);
   });
 });
 

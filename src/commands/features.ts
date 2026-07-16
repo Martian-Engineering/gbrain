@@ -104,7 +104,7 @@ async function scanFeatures(engine: BrainEngine): Promise<FeatureScanResult> {
       id: 'dead-links', priority: 1,
       title: 'Fix Dead Links',
       pitch: `${health.dead_links} links pointing to non-existent pages.`,
-      command: 'gbrain check-backlinks fix',
+      command: 'gbrain validate-links',
       auto_fixable: false,
     });
   }

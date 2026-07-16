@@ -234,11 +234,13 @@ Full troubleshooting guide: `docs/guides/minions-fix.md`.
 
 ### Back-link enforcement
 Check that the back-linking iron law is being followed:
-- For each recently updated page, check if entities mentioned in it have
-  corresponding back-links FROM those entity pages
-- A mention without a back-link is a broken brain
-- Fix: add the missing back-link to the entity's Timeline or See Also section
-- Format: `- **YYYY-MM-DD** | Referenced in [page title](path) -- brief context`
+- Run `gbrain check-backlinks check` to verify that explicit references resolve,
+  have graph edges, and appear through each target's inverse backlink view.
+- Re-extract graph links when an edge or inverse view is missing.
+- Review dossier timelines separately. Add reciprocal Markdown only for a
+  material event, not routine attendance, raw evidence, or ordinary mentions.
+- Use `--materialized` only when auditing a brain that deliberately requires
+  reciprocal Markdown links.
 
 ### Filing rule violations
 Check for common misfiling patterns (see `skills/_brain-filing-rules.md`):

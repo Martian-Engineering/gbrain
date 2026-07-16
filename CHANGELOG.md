@@ -5,6 +5,14 @@ All notable changes to GBrain will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Graph-aware backlink auditing.** `gbrain check-backlinks check` now verifies
+  reference resolution, graph-edge parity, and inverse `get_backlinks`
+  navigation instead of treating every absent reciprocal filename as a broken
+  link. The historical Markdown mirroring audit/fixer remains available behind
+  `--materialized` (`--legacy` alias). Canonical backlink guidance now reserves
+  dossier Timeline entries for material history rather than routine mentions.
+  Qualified nested wikilinks are now resolved exactly during extraction even
+  when optional global-basename matching is disabled.
 - **Source-scoped unresolved-reference validation.** `gbrain validate-links [slug]`
   and the read-scoped MCP `validate_links` operation audit explicit internal
   references without mutating the graph. Missing and ambiguous targets remain

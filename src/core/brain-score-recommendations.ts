@@ -244,12 +244,14 @@ export function computeRecommendations(
   }
 
   // ---------------------------------------------------------------------
-  // backlinks.fix — dead links (refs to non-existent slugs)
+  // backlinks.audit — report dead links and graph parity. Repair depends on
+  // whether the source reference is missing, ambiguous, or merely unextracted,
+  // so this is intentionally not an automatic Markdown mutation.
   // ---------------------------------------------------------------------
   if (health.dead_links > 0 && ctx.repoPath) {
-    const params = { action: 'fix', dir: ctx.repoPath };
+    const params = { action: 'check', dir: ctx.repoPath, sourceId: source };
     out.push({
-      id: 'backlinks.fix',
+      id: 'backlinks.audit',
       job: 'backlinks',
       params,
       idempotency_key: idemKey(source, 'backlinks', params),

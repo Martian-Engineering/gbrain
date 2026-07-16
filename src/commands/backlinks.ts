@@ -16,8 +16,9 @@ import { extractEntityRefs as canonicalExtractEntityRefs } from '../core/link-ex
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import type { BrainEngine } from '../core/engine.ts';
-import type { LinkValidationReport } from '../core/link-validation.ts';
-import { validateAllLinks } from '../core/link-validation.ts';
+import type { Page } from '../core/types.ts';
+import type { LinkValidationFinding, LinkValidationReport } from '../core/link-validation.ts';
+import { validateAllLinks, validatePageReferences } from '../core/link-validation.ts';
 
 interface BacklinkGap {
   /** The page that mentions the entity */
@@ -61,8 +62,10 @@ export function extractPageTitle(content: string): string {
 }
 
 /** Check if a page already contains a back-link to a given source file */
-export function hasBacklink(targetContent: string, sourceFilename: string): boolean {
-  return targetContent.includes(sourceFilename);
+export function hasBacklink(targetContent: string, sourcePage: string): boolean {
+  const normalized = sourcePage.replace(/\\/g, '/').replace(/\.md$/, '');
+  const legacyFilename = basename(sourcePage);
+  return targetContent.includes(normalized) || targetContent.includes(legacyFilename);
 }
 
 /** Build a timeline back-link entry */
@@ -102,7 +105,6 @@ export function findBacklinkGaps(brainDir: string): BacklinkGap[] {
   // For each page, check entity references
   for (const page of allPages) {
     const refs = extractEntityRefs(page.content, page.relPath);
-    const sourceFilename = basename(page.relPath);
     // LOCAL PATCH (paolo, 2026-05-12): dedupe (source, target) pairs within
     // a single source page. extractEntityRefs returns one EntityRef per
     // occurrence, so a source page that mentions the same target N times
@@ -121,7 +123,7 @@ export function findBacklinkGaps(brainDir: string): BacklinkGap[] {
       if (!target) continue; // target page doesn't exist
 
       // Check if the target already has a back-link to this source page
-      if (!hasBacklink(target.content, sourceFilename)) {
+      if (!hasBacklink(target.content, page.relPath)) {
         gaps.push({
           sourcePage: page.relPath,
           targetPage: targetSlug + '.md',
@@ -194,15 +196,107 @@ export interface BacklinksOpts {
   action: 'check' | 'fix';
   dir: string;
   dryRun?: boolean;
+  engine?: BrainEngine | null;
+  sourceId?: string;
+  materialized?: boolean;
+}
+
+export interface GraphBacklinkGap {
+  source_slug: string;
+  target_slug: string;
+  kind: 'missing_graph_edge' | 'missing_backlink_view';
 }
 
 export interface BacklinksResult {
   action: 'check' | 'fix';
+  mode: 'graph' | 'materialized';
   gaps_found: number;
   fixed: number;
   pages_affected: number;
   dryRun: boolean;
   reference_validation?: LinkValidationReport;
+  graph_edges_missing?: number;
+  backlink_views_missing?: number;
+  graph_findings?: GraphBacklinkGap[];
+}
+
+function resolvedTarget(finding: LinkValidationFinding): string | null {
+  if (finding.status !== 'resolved') return null;
+  return finding.resolved_target ?? finding.candidates?.[0] ?? finding.target;
+}
+
+/**
+ * Verify the modern backlink invariant: an explicit reference resolves, is
+ * represented by a graph edge, and is therefore visible from the target via
+ * getBacklinks. No reciprocal Markdown or reverse graph row is required.
+ */
+export async function auditGraphBacklinks(
+  engine: BrainEngine,
+  opts: { sourceId?: string } = {},
+): Promise<BacklinksResult> {
+  const scope = opts.sourceId ? { sourceId: opts.sourceId } : {};
+  const pages: Page[] = [];
+  const batchSize = 100;
+  for (let offset = 0; ; offset += batchSize) {
+    const batch = await engine.listPages({ ...scope, sort: 'slug', limit: batchSize, offset });
+    pages.push(...batch);
+    if (batch.length < batchSize) break;
+  }
+
+  const graphFindings: GraphBacklinkGap[] = [];
+  const referenceFindings: LinkValidationFinding[] = [];
+  const backlinkCache = new Map<string, Set<string>>();
+
+  for (const page of pages) {
+    const findings = await validatePageReferences(engine, page, scope);
+    referenceFindings.push(...findings);
+    const outgoing = await engine.getLinks(page.slug, scope);
+    const outgoingTargets = new Set(outgoing.map(link => link.to_slug));
+
+    for (const finding of findings) {
+      const target = resolvedTarget(finding);
+      if (!target) continue;
+      if (!outgoingTargets.has(target)) {
+        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_graph_edge' });
+        continue;
+      }
+      let referrers = backlinkCache.get(target);
+      if (!referrers) {
+        const backlinks = await engine.getBacklinks(target, scope);
+        referrers = new Set(backlinks.map(link => link.from_slug));
+        backlinkCache.set(target, referrers);
+      }
+      if (!referrers.has(page.slug)) {
+        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_backlink_view' });
+      }
+    }
+  }
+
+  const referenceValidation: LinkValidationReport = {
+    pages_scanned: pages.length,
+    references_scanned: referenceFindings.length,
+    resolved: referenceFindings.filter(f => f.status === 'resolved').length,
+    missing: referenceFindings.filter(f => f.status === 'missing').length,
+    ambiguous: referenceFindings.filter(f => f.status === 'ambiguous').length,
+    blocked: referenceFindings.filter(f => f.status === 'blocked').length,
+    findings: referenceFindings.filter(f => f.status !== 'resolved'),
+  };
+  const graphEdgesMissing = graphFindings.filter(f => f.kind === 'missing_graph_edge').length;
+  const backlinkViewsMissing = graphFindings.filter(f => f.kind === 'missing_backlink_view').length;
+  const unresolved = referenceValidation.missing + referenceValidation.ambiguous + referenceValidation.blocked;
+
+  return {
+    action: 'check',
+    mode: 'graph',
+    gaps_found: unresolved + graphFindings.length,
+    fixed: 0,
+    pages_affected: new Set(graphFindings.map(f => f.target_slug)).size,
+    dryRun: true,
+    reference_validation: referenceValidation,
+    graph_edges_missing: graphEdgesMissing,
+    backlink_views_missing: backlinkViewsMissing,
+    graph_findings: graphFindings,
+  };
 }
 
 /**
@@ -216,6 +310,13 @@ export async function runBacklinksCore(opts: BacklinksOpts): Promise<BacklinksRe
   }
   if (!existsSync(opts.dir)) {
     throw new Error(`Directory not found: ${opts.dir}`);
+  }
+
+  if (!opts.materialized && opts.engine) {
+    if (opts.action === 'fix') {
+      throw new Error('Graph-aware backlink audit is read-only. Run `gbrain extract links --source db` to reconcile graph edges, or add --materialized to write reciprocal Markdown links.');
+    }
+    return auditGraphBacklinks(opts.engine, opts.sourceId ? { sourceId: opts.sourceId } : {});
   }
 
   // findBacklinkGaps is a sync double-walk of the brain dir. On 50K-page
@@ -234,9 +335,9 @@ export async function runBacklinksCore(opts: BacklinksOpts): Promise<BacklinksRe
 
   if (opts.action === 'fix' && gaps.length > 0) {
     const fixed = fixBacklinkGaps(opts.dir, gaps, !!opts.dryRun);
-    return { action: 'fix', gaps_found: gaps.length, fixed, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
+    return { action: 'fix', mode: 'materialized', gaps_found: gaps.length, fixed, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
   }
-  return { action: opts.action, gaps_found: gaps.length, fixed: 0, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
+  return { action: opts.action, mode: 'materialized', gaps_found: gaps.length, fixed: 0, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
 }
 
 export async function runBacklinks(engine: BrainEngine | null, args: string[]) {
@@ -246,13 +347,20 @@ export async function runBacklinks(engine: BrainEngine | null, args: string[]) {
   const dryRun = args.includes('--dry-run');
   const sourceIdx = args.indexOf('--source');
   const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
+  const materialized = args.includes('--materialized') || args.includes('--legacy');
 
   if (!subcommand || !['check', 'fix'].includes(subcommand)) {
-    console.error('Usage: gbrain check-backlinks <check|fix> [--dir <brain-dir>] [--dry-run]');
-    console.error('  check    Report missing back-links');
-    console.error('  fix      Create missing back-links (appends to Timeline)');
+    console.error('Usage: gbrain check-backlinks <check|fix> [--dir <brain-dir>] [--source ID] [--materialized] [--dry-run]');
+    console.error('  check    Verify reference resolution and graph-backed reverse navigation');
+    console.error('  fix      With --materialized, append reciprocal Markdown timeline entries');
     console.error('  --dir    Brain directory (default: current directory)');
     console.error('  --dry-run  Preview fixes without writing');
+    console.error('  --materialized  Use the legacy reciprocal-Markdown audit/fixer (--legacy alias)');
+    process.exit(1);
+  }
+
+  if (!engine && !materialized) {
+    console.error('Graph-aware backlink audit requires a configured brain connection. Add --materialized to run the legacy filesystem audit.');
     process.exit(1);
   }
 
@@ -262,8 +370,13 @@ export async function runBacklinks(engine: BrainEngine | null, args: string[]) {
       action: subcommand as 'check' | 'fix',
       dir: brainDir,
       dryRun,
+      engine,
+      sourceId,
+      materialized,
     });
-    if (engine) result.reference_validation = await validateAllLinks(engine, sourceId ? { sourceId } : {});
+    if (result.mode === 'materialized' && engine) {
+      result.reference_validation = await validateAllLinks(engine, sourceId ? { sourceId } : {});
+    }
   } catch (e) {
     console.error(e instanceof Error ? e.message : String(e));
     process.exit(1);
@@ -271,16 +384,27 @@ export async function runBacklinks(engine: BrainEngine | null, args: string[]) {
 
   const validation = result.reference_validation;
   const unresolved = validation ? validation.missing + validation.ambiguous + validation.blocked : 0;
-  if (result.gaps_found === 0) console.log('No missing back-links found.');
+  if (result.mode === 'graph') {
+    const validation = result.reference_validation!;
+    console.log(`Explicit references: ${validation.references_scanned} scanned; ${validation.missing} missing, ${validation.ambiguous} ambiguous, ${validation.blocked} blocked.`);
+    console.log(`Graph parity: ${result.graph_edges_missing ?? 0} missing edge(s); ${result.backlink_views_missing ?? 0} missing reverse-navigation view(s).`);
+    for (const finding of [...validation.findings, ...(result.graph_findings ?? [])]) {
+      if ('kind' in finding) console.log(`  ${finding.source_slug} -> ${finding.target_slug} (${finding.kind})`);
+      else console.log(`  ${finding.source_slug} -> ${finding.target} (${finding.status})`);
+    }
+    return;
+  }
+
+  if (result.gaps_found === 0) console.log('No missing materialized back-links found.');
   if (result.gaps_found > 0 && result.action === 'check') {
     // Re-walk for user-facing output (core returns counts, CLI shows detail).
     const gaps = findBacklinkGaps(brainDir);
-    console.log(`Found ${gaps.length} missing back-link(s):\n`);
+    console.log(`Found ${gaps.length} missing materialized back-link(s):\n`);
     for (const gap of gaps) {
       console.log(`  ${gap.targetPage} <- ${gap.sourcePage}`);
       console.log(`    "${gap.entityName}" mentioned in "${gap.sourceTitle}"`);
     }
-    console.log(`\nRun 'gbrain check-backlinks fix --dir ${brainDir}' to create them.`);
+    console.log(`\nRun 'gbrain check-backlinks fix --materialized --dir ${brainDir}' to create them.`);
   } else if (result.gaps_found > 0) {
     const label = result.dryRun ? '(dry run) ' : '';
     console.log(`${label}Fixed ${result.fixed} missing back-link(s) across ${result.pages_affected} page(s).`);

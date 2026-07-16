@@ -265,7 +265,7 @@ HANDLER TYPES (built in)
   lint              Run page linter; --params '{"dir":"...","fix":true}'
   import            Bulk import markdown; --params '{"dir":"..."}'
   extract           Extract links + timeline entries; '{"mode":"all"}'
-  backlinks         Check or fix back-links; '{"action":"fix"}'
+  backlinks         Audit graph backlinks; '{"action":"check"}'
   autopilot-cycle   One autopilot pass (sync+extract+embed+backlinks)
   shell             Run a command or argv. Requires GBRAIN_ALLOW_SHELL_JOBS=1
                     on the worker. Params: {cmd?, argv?, cwd, env?}.
@@ -1664,11 +1664,18 @@ export async function registerBuiltinHandlers(
 
   worker.register('backlinks', async (job) => {
     const { runBacklinksCore } = await import('./backlinks.ts');
-    const action: 'check' | 'fix' = job.data.action === 'check' ? 'check' : 'fix';
+    const action: 'check' | 'fix' = job.data.action === 'fix' ? 'fix' : 'check';
     const dir = typeof job.data.dir === 'string'
       ? job.data.dir
       : (await engine.getConfig('sync.repo_path')) ?? '.';
-    return await runBacklinksCore({ action, dir, dryRun: !!job.data.dryRun });
+    return await runBacklinksCore({
+      action,
+      dir,
+      dryRun: !!job.data.dryRun,
+      engine,
+      sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
+      materialized: job.data.materialized === true,
+    });
   });
 
   // Local patch 2026-06-11: durable facts:absorb. One-shot CLI processes

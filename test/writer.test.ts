@@ -607,12 +607,10 @@ describe('back-link validator', () => {
     expect(findings).toEqual([]);
   });
 
-  test('outbound link without reverse → warning', async () => {
+  test('a directed outbound link is visible through the target backlink view', async () => {
     await engine.putPage('people/x', { type: 'person', title: 'x', compiled_truth: 'x', frontmatter: {} });
     await engine.putPage('people/y', { type: 'person', title: 'y', compiled_truth: 'y', frontmatter: {} });
     await engine.addLink('people/x', 'people/y', 'mentions', 'mentions');
-    // no reverse back-link
-
     const findings = await backLinkValidator.validate({
       slug: 'people/x',
       type: 'person',
@@ -621,9 +619,7 @@ describe('back-link validator', () => {
       frontmatter: {},
       engine,
     });
-    expect(findings.length).toBe(1);
-    expect(findings[0].severity).toBe('warning');
-    expect(findings[0].message).toContain('people/y');
+    expect(findings).toEqual([]);
   });
 
   test('bidirectional links → no findings', async () => {

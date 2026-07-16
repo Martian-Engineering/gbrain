@@ -43,7 +43,8 @@ This skill guarantees:
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every mention of a person or company with a brain page MUST create a back-link.
+Every explicit person or company reference MUST resolve to a graph edge and be
+reverse-navigable. Reciprocal Markdown is reserved for material dossier history.
 Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
 
 ## Phases

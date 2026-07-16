@@ -482,6 +482,23 @@ export async function extractPageLinks(
     // pre-v0.40.8.2 behavior of dropping bare wikilinks outside
     // DIR_PATTERN.
     if (ref.needsResolution) {
+      // A qualified deep path is an exact reference, not a fuzzy basename.
+      // Resolve it even when global-basename mode is disabled so validation
+      // and extraction agree on preserved artifacts and other nested pages.
+      if (ref.slug.includes('/') && resolver.resolveExact) {
+        const exact = await resolver.resolveExact(ref.slug);
+        if (exact && exact !== slug) {
+          const idx = content.indexOf(ref.slug);
+          const context = idx >= 0 ? excerpt(content, idx, 240) : ref.name;
+          candidates.push({
+            targetSlug: exact,
+            linkType: inferLinkType(pageType, context, content, exact),
+            context,
+            linkSource: 'markdown',
+          });
+        }
+        continue;
+      }
       if (!opts.globalBasename || typeof resolver.resolveBasenameMatches !== 'function') {
         continue;
       }
@@ -814,6 +831,8 @@ export const FRONTMATTER_LINK_MAP: FrontmatterFieldMapping[] = [
 // ─── Slug resolver ──────────────────────────────────────────────
 
 export interface SlugResolver {
+  /** Resolve a fully-qualified slug exactly within the resolver's source. */
+  resolveExact?(slug: string): Promise<string | null>;
   /**
    * Resolve a display name to a canonical slug.
    * Returns null when no match meets confidence threshold — callers should
@@ -941,6 +960,18 @@ export function makeResolver(
   }
 
   return {
+    async resolveExact(slug: string): Promise<string | null> {
+      if (!slug || typeof slug !== 'string') return null;
+      for (const candidate of [...new Set([slug, slug.toLowerCase()])]) {
+        const page = await engine.getPage(
+          candidate,
+          opts.sourceId ? { sourceId: opts.sourceId } : undefined,
+        );
+        if (page) return candidate;
+      }
+      return null;
+    },
+
     async resolveBasenameMatches(name: string): Promise<string[]> {
       // Issue #972 (codex [P2] DRY): shared query so resolver + FS + doctor
       // return the same matches in the same stable order.

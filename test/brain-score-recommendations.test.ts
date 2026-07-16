@@ -128,7 +128,7 @@ describe('computeRecommendations', () => {
     const recs = computeRecommendations(health, { repoPath: '/brain', embeddingProviderConfigured: true });
     const ids = recs.map((r) => r.id);
     expect(ids).toContain('sync.repo');
-    expect(ids).toContain('backlinks.fix');
+    expect(ids).toContain('backlinks.audit');
     expect(ids).toContain('extract.all');
   });
 

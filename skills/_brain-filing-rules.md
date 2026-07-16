@@ -62,16 +62,17 @@ Not everything deserves a brain page. Before creating a new entity page:
 
 ## Iron Law: Back-Linking (MANDATORY)
 
-Every mention of a person or company with a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them. This is bidirectional:
-the new page links to the entity, AND the entity's page links back.
+Every explicit reference MUST resolve, produce a graph edge, and be visible
+from the target through `get_backlinks`. A duplicate reverse edge or reciprocal
+Markdown link is not required for navigation.
 
-Format for back-links (append to Timeline or See Also):
+For material events, append a curated dossier entry to Timeline or See Also:
 ```
 - **YYYY-MM-DD** | Referenced in [page title](path/to/page.md) -- brief context
 ```
 
-An unlinked mention is a broken brain. The graph is the intelligence.
+Unresolved references and missing graph edges are broken brain. Routine
+mentions remain graph-visible without cluttering entity timelines.
 
 ## Citation Requirements (MANDATORY)
 

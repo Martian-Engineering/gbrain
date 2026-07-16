@@ -66,8 +66,9 @@ For each entity:
   d. If page is thin (< 5 lines compiled truth): spawn background enrichment
 
 STEP 3 — BACK-LINKING (mandatory):
-For every entity mentioned, add a back-link FROM their page TO this source.
-An unlinked mention is a broken brain.
+For every explicit entity reference, verify resolution, graph extraction, and
+reverse navigation from the entity through `get_backlinks`. Add reciprocal
+dossier prose only when the source records material history.
 Format: - **YYYY-MM-DD** | Referenced in [{page title}]({path}) — {context}
 
 STEP 4 — SYNC:
@@ -124,8 +125,8 @@ is_notable(entity):
 
 ### The Iron Law of Back-Linking
 
-Every entity mention MUST create a back-link FROM the entity page TO the
-source. This is not optional.
+Every explicit entity reference MUST create a graph edge that is visible from
+the target through inverse backlink navigation. This is not optional.
 
 ```
 // When message mentions "Pedro" and creates a meeting page:

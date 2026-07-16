@@ -313,6 +313,19 @@ describe('extractPageLinks', () => {
     expect(candidates).toEqual([]);
   });
 
+  test('qualified deep-path wikilink resolves exactly when globalBasename is OFF', async () => {
+    const resolver: SlugResolver = {
+      resolve: async () => null,
+      resolveExact: async (slug) => slug === 'partners/josh/sources/note-artifact' ? slug : null,
+    };
+    const { candidates } = await extractPageLinks(
+      'meetings/working-session',
+      'Source: [[partners/josh/sources/note-artifact|Raw artifact]].',
+      {}, 'meeting', resolver,
+    );
+    expect(candidates.map(c => c.targetSlug)).toEqual(['partners/josh/sources/note-artifact']);
+  });
+
   test('bare wikilink emits one candidate per basename match when flag ON', async () => {
     const resolver: SlugResolver = {
       resolve: async () => null,

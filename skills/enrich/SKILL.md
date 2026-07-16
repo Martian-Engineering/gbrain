@@ -43,9 +43,9 @@ This skill guarantees:
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every mention of a person or company with a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them. An unlinked mention is a
-broken brain. See `skills/_brain-filing-rules.md` for format.
+Every explicit person or company reference MUST resolve to a graph edge and be
+reverse-navigable. Reciprocal Markdown is reserved for material dossier history.
+See `skills/_brain-filing-rules.md` for the canonical rule.
 
 ## Philosophy
 

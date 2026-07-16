@@ -31,16 +31,17 @@ Ingest meetings, articles, media, documents, and conversations into the brain.
 ## Contract
 
 - Every fact written to a brain page carries an inline `[Source: ...]` citation with date and provenance.
-- Every entity mention creates a back-link from the entity's page to the page mentioning them (Iron Law).
+- Every explicit entity reference resolves to a graph edge and is reverse-navigable (Iron Law).
 - Raw sources are preserved for provenance via `gbrain files upload-raw` with automatic size routing.
 - State sections are rewritten with current best understanding, never appended to.
 - Entity detection fires on every inbound message; notable entities get pages or updates.
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every mention of a person or company with a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them. An unlinked mention is a
-broken brain. See `skills/_brain-filing-rules.md` for format.
+Every explicit person or company reference MUST resolve, create a graph edge,
+and appear through the target's `get_backlinks` view. Add a reciprocal Timeline
+entry only when the source is material to the dossier. See
+`skills/_brain-filing-rules.md`.
 
 ## Citation Requirements (MANDATORY)
 
@@ -276,7 +277,7 @@ up 100 bad pages is enormous.
 ## Anti-Patterns
 
 - **Appending to State sections.** State is rewritten with the current best understanding on every update. Append-only State sections grow stale and contradictory.
-- **Ingesting without back-links.** An unlinked mention is a broken brain. Every entity mentioned must have a back-link from their page to the page mentioning them.
+- **Ingesting without graph-backed references.** Every explicit entity reference must resolve and be reverse-navigable. Reserve dossier Timeline entries for material events.
 - **Skipping raw source preservation.** Every ingested item must have its raw source preserved. A brain page without provenance is unverifiable.
 - **Bulk processing without sample test.** Test on 3-5 items first. Fix quality issues in the approach, not via one-off patches.
 - **Paraphrasing the user's original thinking.** The user's exact language IS the insight. Capture verbatim phrasing for ideas, theses, and frameworks.

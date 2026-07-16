@@ -808,18 +808,24 @@ export async function runPhaseLint(brainDir: string, dryRun: boolean, engine?: B
   }
 }
 
-export async function runPhaseBacklinks(brainDir: string, dryRun: boolean): Promise<PhaseResult> {
+export async function runPhaseBacklinks(
+  brainDir: string,
+  dryRun: boolean,
+  engine: BrainEngine | null = null,
+  sourceId?: string,
+): Promise<PhaseResult> {
   try {
-    // Maintenance cycles must not rewrite tracked brain pages with generated
-    // "Referenced in" timeline bullets. The graph extractor/auto-link path is
-    // the canonical link store during sync/dream/autopilot; the legacy
-    // filesystem fixer remains available explicitly via `gbrain check-backlinks
-    // fix` for users who truly want markdown backlinks materialized.
+    // Maintenance cycles audit the canonical graph and never rewrite tracked
+    // pages with mechanical reciprocal timeline bullets. Engine-less cycles
+    // retain the legacy filesystem audit as a compatibility fallback.
     const { runBacklinksCore } = await import('../commands/backlinks.ts');
     const result = await runBacklinksCore({
       action: 'check',
       dir: brainDir,
       dryRun,
+      engine,
+      sourceId,
+      materialized: !engine,
     });
     const gaps = result.gaps_found ?? 0;
     const added = result.fixed ?? 0;
@@ -829,9 +835,19 @@ export async function runPhaseBacklinks(brainDir: string, dryRun: boolean): Prom
       status,
       duration_ms: 0,
       summary: gaps === 0
-        ? 'no missing back-links found'
-        : `${gaps} missing back-link(s) found (audit-only; run gbrain check-backlinks fix to materialize)`,
-      details: { gaps, added, pages_affected: result.pages_affected, dryRun, mode: 'audit-only' },
+        ? (result.mode === 'graph' ? 'all references are graph-backed and reverse-navigable' : 'no missing materialized back-links found')
+        : (result.mode === 'graph'
+            ? `${gaps} reference or graph backlink defect(s) found`
+            : `${gaps} missing materialized back-link(s) found (legacy audit)`),
+      details: {
+        gaps,
+        added,
+        pages_affected: result.pages_affected,
+        dryRun,
+        mode: result.mode,
+        graph_edges_missing: result.graph_edges_missing ?? 0,
+        backlink_views_missing: result.backlink_views_missing ?? 0,
+      },
     };
   } catch (e) {
     return {
@@ -1645,7 +1661,7 @@ export async function runCycle(
         phaseResults.push(skipNoBrainDir('backlinks'));
       } else {
         progress.start('cycle.backlinks');
-        const { result, duration_ms } = await timePhase(() => runPhaseBacklinks(brainDir, dryRun));
+        const { result, duration_ms } = await timePhase(() => runPhaseBacklinks(brainDir, dryRun, engine, opts.sourceId));
         result.duration_ms = duration_ms;
         phaseResults.push(result);
         progress.finish();

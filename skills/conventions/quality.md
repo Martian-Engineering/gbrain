@@ -22,12 +22,18 @@ Every fact written to a brain page must carry an inline `[Source: ...]` citation
 
 ## Back-Linking (MANDATORY)
 
-Every mention of a person or company WITH a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them.
+Every explicit reference to a brain page MUST resolve, produce a graph edge,
+and be discoverable from the target through `get_backlinks`. This is reverse
+navigation over one canonical edge; it does not require a duplicate reverse
+edge or reciprocal Markdown.
 
-Format: `- **YYYY-MM-DD** | Referenced in [page title](path) -- context`
+Add a dated entry to an entity's Timeline only when the source records a
+material event or changes the durable understanding of that entity. Ordinary
+mentions, raw artifacts, and routine attendance remain graph-discoverable
+without becoming mechanical dossier prose.
 
-An unlinked mention is a broken brain.
+Use `gbrain check-backlinks check` for the graph invariant. The legacy
+reciprocal-Markdown audit remains available as `--materialized`.
 
 ## Notability Gate
 

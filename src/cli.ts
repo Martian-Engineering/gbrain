@@ -2387,7 +2387,10 @@ TOOLS
         [--type T] [--since DATE]    filters (db source)
         [--dry-run] [--json]
   publish <page.md> [--password]     Shareable HTML (strips private data, optional AES-256)
-  check-backlinks <check|fix> [dir]  Find/fix missing back-links across brain
+  check-backlinks check              Verify resolved, graph-backed reverse navigation
+        [--source ID] [--dir PATH]
+  check-backlinks <check|fix> --materialized
+                                     Legacy reciprocal-Markdown audit/fixer
   lint <dir|file> [--fix]            Catch LLM artifacts, placeholder dates, bad frontmatter
   orphans [--json] [--count]         Find pages with no inbound wikilinks
   salience [--days N] [--kind P]     v0.29: pages ranked by emotional + activity salience

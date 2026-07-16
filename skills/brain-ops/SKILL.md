@@ -42,13 +42,13 @@ This skill guarantees:
 - Every outbound response checks brain for relevant context
 - Source attribution on every fact written (inline `[Source: ...]` citations)
 - User's direct statements are highest-authority data
-- Back-links maintained on every brain write (Iron Law)
+- Resolved graph edges and reverse navigation maintained on every brain write (Iron Law)
 
 ## Iron Law: Back-Linking (MANDATORY)
 
-Every mention of a person or company with a brain page MUST create a back-link
-FROM that entity's page TO the page mentioning them. An unlinked mention is a
-broken brain. See `skills/conventions/quality.md` for format.
+Every explicit reference MUST resolve, create a graph edge, and appear through
+the target's `get_backlinks` view. Add reciprocal dossier prose only for
+material events. See `skills/conventions/quality.md`.
 
 ## Phases
 
