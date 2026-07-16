@@ -93,7 +93,12 @@ Pages with zero inbound links. Nobody references them.
 
 ### Dead links
 Links pointing to pages that don't exist.
-- Remove dead links in gbrain
+- Run `gbrain validate-links` for a source-wide read-only audit. This reports
+  explicit references that cannot become graph rows, including the failures
+  that graph-only dead-link metrics cannot see.
+- Create the missing canonical page, correct the reference, or record an
+  approved example/exception. Do not remove a reference merely to make the
+  report green.
 
 ### Missing cross-references
 Pages that mention entity names but don't have formal links.
@@ -270,6 +275,10 @@ Populate them periodically or after major imports:
 - `gbrain stats` — verify `link_count > 0` and `timeline_entry_count > 0` after extraction.
 - `gbrain health` — review `link_coverage` and `timeline_coverage` percentages
   on entity pages (person/company). Below 50% means more extraction is needed.
+- `gbrain validate-links [slug]` — audit one page or every page in the active
+  source scope for missing and ambiguous explicit internal references. This is
+  read-only and should run before `check-backlinks`, because absent targets
+  cannot have graph rows or backlinks yet.
 
 Available link types (use with `gbrain graph-query --type`):
 `attended`, `works_at`, `invested_in`, `founded`, `advises`, `mentions`, `source`.

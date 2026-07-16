@@ -5,6 +5,12 @@ All notable changes to GBrain will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Source-scoped unresolved-reference validation.** `gbrain validate-links [slug]`
+  and the read-scoped MCP `validate_links` operation audit explicit internal
+  references without mutating the graph. Missing and ambiguous targets remain
+  visible instead of being silently discarded before graph insertion. The
+  meeting-ingestion and maintain skills now use this report as a completion
+  gate, while keeping dossier quality as a separate check.
 - **Supported source-scoped slug redirects.** Operators can add redirects with `gbrain alias add <old> <canonical>` and remove them with `gbrain alias remove <old>`. The same interface is available to authenticated MCP clients through the write-scoped `add_slug_alias` and `remove_slug_alias` operations. Canonical pages must be active; self-aliases, cycles, implicit replacement, and active-page collisions are rejected. `--soft-delete-old` makes the old-page soft-delete and alias write one PostgreSQL/PGLite transaction, while `--replace` explicitly permits replacement. Repeated adds and removes are idempotent. Remote callers remain pinned to their OAuth write source. Alias changes emit an audit record, clear only the affected source's query cache, and warn when a remaining synced file can recreate a soft-deleted page without editing that file or Git.
 
 ## [0.42.64.0] - 2026-07-20

@@ -1335,8 +1335,6 @@ describe("v0.18.0 migration v22 — links_resolution_type", () => {
     expect(v22!.sql).toContain("unqualified");
   });
 });
-
-
 describe('parseTimelineEntries — Format 3: inline [Source: ..., YYYY-MM-DD] citations', () => {
   test('extracts an entry from a dated citation', () => {
     const entries = parseTimelineEntries('Closed the seed round. [Source: board notes, 2025-04-02]');

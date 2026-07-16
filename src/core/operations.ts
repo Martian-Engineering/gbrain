@@ -17,6 +17,7 @@ import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
+import { validateLinks } from './link-validation.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
@@ -816,6 +817,33 @@ const get_page: Operation = {
   },
   scope: 'read',
   cliHints: { name: 'get', positional: ['slug'] },
+};
+
+const validate_links: Operation = {
+  name: 'validate_links',
+  description: 'Read-only, source-scoped validation of explicit internal references. Reports missing and ambiguous targets that graph extraction would otherwise discard.',
+  params: {
+    slug: { type: 'string', description: 'Validate one page. Omit to validate every page visible in the caller source scope.' },
+  },
+  handler: async (ctx, p) => {
+    const scope = sourceScopeOpts(ctx);
+    const slug = typeof p.slug === 'string' && p.slug.trim() ? p.slug.trim() : undefined;
+    const pages = slug
+      ? [await ctx.engine.getPage(slug, scope)].filter((page): page is NonNullable<typeof page> => page !== null)
+      : [];
+    if (!slug) {
+      const batchSize = 100;
+      for (let offset = 0; ; offset += batchSize) {
+        const batch = await ctx.engine.listPages({ ...scope, sort: 'slug', limit: batchSize, offset });
+        pages.push(...batch);
+        if (batch.length < batchSize) break;
+      }
+    }
+    if (slug && pages.length === 0) throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    return validateLinks(ctx.engine, pages, scope);
+  },
+  scope: 'read',
+  cliHints: { name: 'validate-links', positional: ['slug'] },
 };
 
 const put_page: Operation = {
@@ -5545,7 +5573,7 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, put_page, delete_page, list_pages,
+  get_page, validate_links, put_page, delete_page, list_pages,
   // Source-scoped slug redirects
   add_slug_alias, remove_slug_alias,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)

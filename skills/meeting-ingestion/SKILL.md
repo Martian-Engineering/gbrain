@@ -17,6 +17,7 @@ tools:
   - put_page
   - add_link
   - add_timeline_entry
+  - validate_links
 mutating: true
 writes_pages: true
 writes_to:
@@ -110,6 +111,18 @@ Acme Corp, the event goes on Alice's page, Bob's page, AND Acme Corp's page.
 
 `gbrain sync` to update the index.
 
+### Phase 7: Completion gate (MANDATORY)
+
+Call `validate_links` for the meeting page after entity propagation and before
+advancing any ingestion checkpoint. A meeting is incomplete when the report
+contains a missing or ambiguous reference. Repair or explicitly escalate every
+finding; do not mark the source processed merely because `put_page` succeeded.
+
+Link integrity and dossier quality are separate gates. For each important
+person, company, and project, also verify a cited summary/State section, dated
+timeline, source provenance, and relevant meeting backlinks. Existing-but-thin
+pages fail this quality gate even when every link resolves.
+
 ## Output Format
 
 Meeting page created. Report: "Meeting ingested: {N} attendees enriched, {N} entities
@@ -122,3 +135,5 @@ updated, {N} action items captured."
 - Not merging timelines across all mentioned entities
 - Creating attendee stubs without meaningful content
 - Filing meeting pages without cross-linking to all participants
+- Advancing the ingestion checkpoint before `validate_links` is clean
+- Treating a resolved link as proof that the target dossier is substantive
