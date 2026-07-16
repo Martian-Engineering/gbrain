@@ -15,6 +15,9 @@ import { join, relative, basename } from 'path';
 import { extractEntityRefs as canonicalExtractEntityRefs } from '../core/link-extraction.ts';
 import { createProgress, startHeartbeat } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
+import type { BrainEngine } from '../core/engine.ts';
+import type { LinkValidationReport } from '../core/link-validation.ts';
+import { validateAllLinks } from '../core/link-validation.ts';
 
 interface BacklinkGap {
   /** The page that mentions the entity */
@@ -199,6 +202,7 @@ export interface BacklinksResult {
   fixed: number;
   pages_affected: number;
   dryRun: boolean;
+  reference_validation?: LinkValidationReport;
 }
 
 /**
@@ -235,11 +239,13 @@ export async function runBacklinksCore(opts: BacklinksOpts): Promise<BacklinksRe
   return { action: opts.action, gaps_found: gaps.length, fixed: 0, pages_affected: pagesAffected, dryRun: !!opts.dryRun };
 }
 
-export async function runBacklinks(args: string[]) {
+export async function runBacklinks(engine: BrainEngine | null, args: string[]) {
   const subcommand = args[0];
   const dirIdx = args.indexOf('--dir');
   const brainDir = dirIdx >= 0 ? args[dirIdx + 1] : '.';
   const dryRun = args.includes('--dry-run');
+  const sourceIdx = args.indexOf('--source');
+  const sourceId = sourceIdx >= 0 ? args[sourceIdx + 1] : undefined;
 
   if (!subcommand || !['check', 'fix'].includes(subcommand)) {
     console.error('Usage: gbrain check-backlinks <check|fix> [--dir <brain-dir>] [--dry-run]');
@@ -257,16 +263,16 @@ export async function runBacklinks(args: string[]) {
       dir: brainDir,
       dryRun,
     });
+    if (engine) result.reference_validation = await validateAllLinks(engine, sourceId ? { sourceId } : {});
   } catch (e) {
     console.error(e instanceof Error ? e.message : String(e));
     process.exit(1);
   }
 
-  if (result.gaps_found === 0) {
-    console.log('No missing back-links found.');
-    return;
-  }
-  if (result.action === 'check') {
+  const validation = result.reference_validation;
+  const unresolved = validation ? validation.missing + validation.ambiguous + validation.blocked : 0;
+  if (result.gaps_found === 0) console.log('No missing back-links found.');
+  if (result.gaps_found > 0 && result.action === 'check') {
     // Re-walk for user-facing output (core returns counts, CLI shows detail).
     const gaps = findBacklinkGaps(brainDir);
     console.log(`Found ${gaps.length} missing back-link(s):\n`);
@@ -275,11 +281,18 @@ export async function runBacklinks(args: string[]) {
       console.log(`    "${gap.entityName}" mentioned in "${gap.sourceTitle}"`);
     }
     console.log(`\nRun 'gbrain check-backlinks fix --dir ${brainDir}' to create them.`);
-  } else {
+  } else if (result.gaps_found > 0) {
     const label = result.dryRun ? '(dry run) ' : '';
     console.log(`${label}Fixed ${result.fixed} missing back-link(s) across ${result.pages_affected} page(s).`);
     if (result.dryRun) {
       console.log('\nRe-run without --dry-run to apply.');
     }
   }
+  if (validation) {
+    console.log(`\nExplicit references: ${validation.references_scanned} scanned; ${validation.missing} missing, ${validation.ambiguous} ambiguous, ${validation.blocked} blocked.`);
+    for (const finding of validation.findings) {
+      console.log(`  ${finding.source_slug} -> ${finding.target} (${finding.status})`);
+    }
+  }
+  if (result.gaps_found === 0 && unresolved === 0) return;
 }

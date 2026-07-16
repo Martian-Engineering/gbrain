@@ -51,6 +51,7 @@ import { isUndefinedColumnError } from '../core/utils.ts';
 // drift from what search actually filters.
 import { resolveHardExcludes, DEFAULT_HARD_EXCLUDES } from '../core/search/source-boost.ts';
 import { escapeLikePattern, buildVisibilityClause } from '../core/search/sql-ranking.ts';
+import { validateAllLinks } from '../core/link-validation.ts';
 
 export interface Check {
   name: string;
@@ -4251,6 +4252,8 @@ export async function buildChecks(
     }
   }
 
+  const referenceScope = orphanRatioSourceId ? { sourceId: orphanRatioSourceId } : {};
+
   const checks: Check[] = [];
   let autoFixReport: AutoFixReport | null = null;
 
@@ -5899,6 +5902,29 @@ export async function buildChecks(
     }
   } catch {
     checks.push({ name: 'graph_coverage', status: 'warn', message: 'Could not check graph coverage' });
+  }
+
+  // Explicit source references rejected before graph insertion must remain
+  // visible in doctor. This consumes the same canonical report as the
+  // validate_links CLI/MCP operation and check-backlinks display.
+  progress.heartbeat('unresolved_references');
+  try {
+    const report = await validateAllLinks(engine, referenceScope);
+    const defects = report.missing + report.ambiguous + report.blocked;
+    checks.push({
+      name: 'unresolved_references',
+      status: defects === 0 ? 'ok' : 'warn',
+      message: defects === 0
+        ? `All ${report.references_scanned} explicit references resolve across ${report.pages_scanned} pages`
+        : `${defects} unresolved explicit reference(s): ${report.missing} missing, ${report.ambiguous} ambiguous, ${report.blocked} blocked`,
+      details: { ...report },
+    });
+  } catch (err) {
+    checks.push({
+      name: 'unresolved_references',
+      status: 'warn',
+      message: `Could not validate explicit references: ${(err as Error).message}`,
+    });
   }
 
   // 9b. v0.41.18.0 — orphan_ratio check (migration #1 of #1409).

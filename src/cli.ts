@@ -1205,7 +1205,16 @@ async function handleCliOnly(command: string, args: string[]) {
   }
   if (command === 'check-backlinks') {
     const { runBacklinks } = await import('./commands/backlinks.ts');
-    await runBacklinks(args);
+    // Preserve the command's historical file-only mode for unconfigured or
+    // partially configured checkouts. Canonical reference validation is an
+    // additive display when a usable brain connection is available.
+    let eng: BrainEngine | null = null;
+    try {
+      if (loadConfig()) eng = await connectEngine();
+    } catch {
+      eng = null;
+    }
+    try { await runBacklinks(eng, args); } finally { if (eng) await finishCliTeardown({ engine: eng }); }
     return;
   }
   if (command === 'frontmatter') {

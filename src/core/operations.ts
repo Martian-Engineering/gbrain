@@ -17,7 +17,7 @@ import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
 import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
-import { validateLinks } from './link-validation.ts';
+import { validateAllLinks, validateLinks } from './link-validation.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
@@ -831,14 +831,7 @@ const validate_links: Operation = {
     const pages = slug
       ? [await ctx.engine.getPage(slug, scope)].filter((page): page is NonNullable<typeof page> => page !== null)
       : [];
-    if (!slug) {
-      const batchSize = 100;
-      for (let offset = 0; ; offset += batchSize) {
-        const batch = await ctx.engine.listPages({ ...scope, sort: 'slug', limit: batchSize, offset });
-        pages.push(...batch);
-        if (batch.length < batchSize) break;
-      }
-    }
+    if (!slug) return validateAllLinks(ctx.engine, scope);
     if (slug && pages.length === 0) throw new OperationError('page_not_found', `Page not found: ${slug}`);
     return validateLinks(ctx.engine, pages, scope);
   },

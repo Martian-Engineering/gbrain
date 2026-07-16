@@ -139,3 +139,18 @@ export async function validateLinks(
     findings: findings.filter(f => f.status !== 'resolved'),
   };
 }
+
+/** Paginate and validate every page visible in the supplied source scope. */
+export async function validateAllLinks(
+  engine: BrainEngine,
+  opts: { sourceId?: string; sourceIds?: string[] } = {},
+): Promise<LinkValidationReport> {
+  const pages: Page[] = [];
+  const batchSize = 100;
+  for (let offset = 0; ; offset += batchSize) {
+    const batch = await engine.listPages({ ...opts, sort: 'slug', limit: batchSize, offset });
+    pages.push(...batch);
+    if (batch.length < batchSize) break;
+  }
+  return validateLinks(engine, pages, opts);
+}

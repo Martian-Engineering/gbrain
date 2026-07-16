@@ -96,6 +96,9 @@ Links pointing to pages that don't exist.
 - Run `gbrain validate-links` for a source-wide read-only audit. This reports
   explicit references that cannot become graph rows, including the failures
   that graph-only dead-link metrics cannot see.
+- `gbrain doctor` and `gbrain check-backlinks check` consume the same report;
+  use their missing, ambiguous, and blocked counts rather than the legacy
+  database `dead_links` count as the completion signal.
 - Create the missing canonical page, correct the reference, or record an
   approved example/exception. Do not remove a reference merely to make the
   report green.
