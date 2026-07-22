@@ -54,12 +54,22 @@ export async function validatePageReferences(
       // to lowercase by import, while historical display paths may retain
       // mixed-case external IDs, so try the lowercase path as well.
       if (ref.slug.includes('/')) {
+        const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : []);
+        if (ref.sourceId && allowedSources.length > 0 && !allowedSources.includes(ref.sourceId)) {
+          findings.push({ source_slug: page.slug, target: ref.slug, status: 'blocked', source_id: page.source_id });
+          continue;
+        }
+        const targetOpts = ref.sourceId ? { sourceId: ref.sourceId } : opts;
+        const resolutionSources = ref.sourceId ? [ref.sourceId] : allowedSources;
         const exactCandidates = [...new Set([ref.slug, ref.slug.toLowerCase()])];
         let exact: Page | null = null;
         let exactSlug = ref.slug;
         for (const candidate of exactCandidates) {
-          exact = await engine.getPage(candidate, opts);
-          if (exact) { exactSlug = candidate; break; }
+          const canonical = resolutionSources.length > 0
+            ? await engine.resolveSlugWithAlias(candidate, resolutionSources)
+            : candidate;
+          exact = await engine.getPage(canonical, targetOpts);
+          if (exact) { exactSlug = canonical; break; }
         }
         if (exact) {
           findings.push({
