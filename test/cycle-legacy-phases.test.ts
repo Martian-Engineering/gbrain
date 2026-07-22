@@ -119,7 +119,7 @@ describe('runPhaseBacklinks — result-mapping', () => {
       expect(result.status).toBe('ok');
       expect(result.summary.toLowerCase()).toMatch(/no missing back-links|^no\b/);
       expect(result.error).toBeUndefined();
-      expect(result.details).toMatchObject({ mode: 'audit-only' });
+      expect(result.details).toMatchObject({ mode: 'materialized' });
     } finally {
       cleanupBrain();
     }
@@ -134,10 +134,11 @@ describe('runPhaseBacklinks — result-mapping', () => {
       );
       const result = await runPhaseBacklinks(brainDir, false);
       expect(result.phase).toBe('backlinks');
-      // Even with gaps, the wrapper returns status='ok' — backlinks is
-      // audit-only by design (v0.22+). Mode reflects that.
+      // Even with gaps, the wrapper returns status='ok'. Engine-less cycles
+      // retain the legacy materialized-filesystem audit as a compatibility
+      // fallback; engine-backed cycles use the graph audit.
       expect(result.status).toBe('ok');
-      expect(result.details).toMatchObject({ mode: 'audit-only' });
+      expect(result.details).toMatchObject({ mode: 'materialized' });
     } finally {
       cleanupBrain();
     }
@@ -148,7 +149,7 @@ describe('runPhaseBacklinks — result-mapping', () => {
       const result = await runPhaseBacklinks(brainDir, true);
       expect(result.phase).toBe('backlinks');
       expect(result.status).toBe('ok');
-      expect(result.details).toMatchObject({ dryRun: true, mode: 'audit-only' });
+      expect(result.details).toMatchObject({ dryRun: true, mode: 'materialized' });
     } finally {
       cleanupBrain();
     }
