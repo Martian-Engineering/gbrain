@@ -248,9 +248,10 @@ export async function auditGraphBacklinks(
   const backlinkCache = new Map<string, Set<string>>();
 
   for (const page of pages) {
-    const findings = await validatePageReferences(engine, page, scope);
+    const pageScope = opts.sourceId ? scope : { sourceId: page.source_id };
+    const findings = await validatePageReferences(engine, page, pageScope);
     referenceFindings.push(...findings);
-    const outgoing = await engine.getLinks(page.slug, scope);
+    const outgoing = await engine.getLinks(page.slug, pageScope);
     const outgoingTargets = new Set(outgoing.map(link => link.to_slug));
 
     for (const finding of findings) {
@@ -260,11 +261,12 @@ export async function auditGraphBacklinks(
         graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_graph_edge' });
         continue;
       }
-      let referrers = backlinkCache.get(target);
+      const targetKey = `${page.source_id}\u0000${target}`;
+      let referrers = backlinkCache.get(targetKey);
       if (!referrers) {
-        const backlinks = await engine.getBacklinks(target, scope);
+        const backlinks = await engine.getBacklinks(target, pageScope);
         referrers = new Set(backlinks.map(link => link.from_slug));
-        backlinkCache.set(target, referrers);
+        backlinkCache.set(targetKey, referrers);
       }
       if (!referrers.has(page.slug)) {
         graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_backlink_view' });

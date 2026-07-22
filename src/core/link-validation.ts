@@ -45,6 +45,7 @@ export async function validatePageReferences(
     const key = `${ref.sourceId ?? ''}\u0000${ref.slug}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : [page.source_id]);
 
     if (ref.needsResolution) {
       // Generic wikilinks include both true basenames (`[[openclaw]]`) and
@@ -54,12 +55,13 @@ export async function validatePageReferences(
       // to lowercase by import, while historical display paths may retain
       // mixed-case external IDs, so try the lowercase path as well.
       if (ref.slug.includes('/')) {
-        const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : []);
         if (ref.sourceId && allowedSources.length > 0 && !allowedSources.includes(ref.sourceId)) {
           findings.push({ source_slug: page.slug, target: ref.slug, status: 'blocked', source_id: page.source_id });
           continue;
         }
-        const targetOpts = ref.sourceId ? { sourceId: ref.sourceId } : opts;
+        const targetOpts = ref.sourceId
+          ? { sourceId: ref.sourceId }
+          : (opts.sourceId || opts.sourceIds ? opts : { sourceId: page.source_id });
         const resolutionSources = ref.sourceId ? [ref.sourceId] : allowedSources;
         const exactCandidates = [...new Set([ref.slug, ref.slug.toLowerCase()])];
         let exact: Page | null = null;
@@ -107,12 +109,13 @@ export async function validatePageReferences(
       continue;
     }
 
-    const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : []);
     if (ref.sourceId && allowedSources.length > 0 && !allowedSources.includes(ref.sourceId)) {
       findings.push({ source_slug: page.slug, target: ref.slug, status: 'blocked', source_id: page.source_id });
       continue;
     }
-    const targetOpts = ref.sourceId ? { sourceId: ref.sourceId } : opts;
+    const targetOpts = ref.sourceId
+      ? { sourceId: ref.sourceId }
+      : (opts.sourceId || opts.sourceIds ? opts : { sourceId: page.source_id });
     const resolutionSources = ref.sourceId ? [ref.sourceId] : allowedSources;
     const canonical = resolutionSources.length > 0
       ? await engine.resolveSlugWithAlias(ref.slug, resolutionSources)

@@ -118,6 +118,26 @@ describe('auditGraphBacklinks', () => {
     const noBacklink = await auditGraphBacklinks(engine({ backlink: false }), { sourceId: 'martian' });
     expect(noBacklink.backlink_views_missing).toBe(1);
   });
+
+  test('keeps graph checks source-scoped when identical slugs exist in multiple sources', async () => {
+    const restrictedSource = { ...source, source_id: 'martian-restricted' };
+    const e = {
+      listPages: async ({ offset }: { offset?: number }) => offset ? [] : [source, restrictedSource],
+      resolveSlugWithAlias: async (slug: string) => slug,
+      getPage: async (slug: string, opts: { sourceId?: string }) =>
+        slug === alice.slug ? { ...alice, source_id: opts.sourceId } : null,
+      getLinks: async (_slug: string, opts: { sourceId?: string }) =>
+        opts.sourceId === 'martian' ? [{ from_slug: source.slug, to_slug: alice.slug }] : [],
+      getBacklinks: async (_slug: string, opts: { sourceId?: string }) =>
+        opts.sourceId === 'martian' ? [{ from_slug: source.slug, to_slug: alice.slug }] : [],
+    } as unknown as BrainEngine;
+
+    const report = await auditGraphBacklinks(e);
+    expect(report.graph_edges_missing).toBe(1);
+    expect(report.graph_findings).toEqual([
+      { source_slug: source.slug, target_slug: alice.slug, kind: 'missing_graph_edge' },
+    ]);
+  });
 });
 
 describe('buildBacklinkEntry', () => {

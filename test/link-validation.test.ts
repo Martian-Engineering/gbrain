@@ -85,6 +85,24 @@ describe('link validation', () => {
     });
   });
 
+  test('uses the page source to resolve aliases when validation is unscoped', async () => {
+    const e = engine(['partners/josh/sources/canonical-artifact']);
+    e.resolveSlugWithAlias = async (slug, sources) => {
+      expect(sources).toEqual(['martian']);
+      return slug === 'partners/josh/sources/old-artifact'
+        ? 'partners/josh/sources/canonical-artifact'
+        : slug;
+    };
+    const findings = await validatePageReferences(
+      e,
+      page('meetings/x', '[[partners/josh/sources/old-artifact]]'),
+    );
+    expect(findings[0]).toMatchObject({
+      status: 'resolved',
+      resolved_target: 'partners/josh/sources/canonical-artifact',
+    });
+  });
+
   test('summary excludes resolved references from findings', async () => {
     const report = await validateLinks(
       engine(['companies/acme']),
