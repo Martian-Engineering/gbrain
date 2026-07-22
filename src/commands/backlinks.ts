@@ -310,15 +310,15 @@ export async function runBacklinksCore(opts: BacklinksOpts): Promise<BacklinksRe
   if (!['check', 'fix'].includes(opts.action)) {
     throw new Error(`Invalid backlinks action "${opts.action}". Allowed: check, fix.`);
   }
-  if (!existsSync(opts.dir)) {
-    throw new Error(`Directory not found: ${opts.dir}`);
-  }
-
   if (!opts.materialized && opts.engine) {
     if (opts.action === 'fix') {
       throw new Error('Graph-aware backlink audit is read-only. Run `gbrain extract links --source db` to reconcile graph edges, or add --materialized to write reciprocal Markdown links.');
     }
     return auditGraphBacklinks(opts.engine, opts.sourceId ? { sourceId: opts.sourceId } : {});
+  }
+
+  if (!existsSync(opts.dir)) {
+    throw new Error(`Directory not found: ${opts.dir}`);
   }
 
   // findBacklinkGaps is a sync double-walk of the brain dir. On 50K-page

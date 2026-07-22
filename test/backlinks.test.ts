@@ -5,6 +5,7 @@ import {
   hasBacklink,
   buildBacklinkEntry,
   auditGraphBacklinks,
+  runBacklinksCore,
 } from '../src/commands/backlinks.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
@@ -137,6 +138,16 @@ describe('auditGraphBacklinks', () => {
     expect(report.graph_findings).toEqual([
       { source_slug: source.slug, target_slug: alice.slug, kind: 'missing_graph_edge' },
     ]);
+  });
+
+  test('graph audit does not require a materialized brain directory', async () => {
+    const report = await runBacklinksCore({
+      action: 'check',
+      dir: '/definitely/missing/gbrain-directory',
+      engine: engine(),
+    });
+    expect(report.mode).toBe('graph');
+    expect(report.gaps_found).toBe(0);
   });
 });
 
