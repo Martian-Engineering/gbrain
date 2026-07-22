@@ -173,6 +173,27 @@ describe('put_page write-through — trust gating', () => {
 });
 
 describe('put_page write-through — config edge cases', () => {
+  test('soft-deleted page rejects before mutation and requires explicit restore', async () => {
+    const ctx = makeCtx();
+    const slug = 'inbox/deleted-page';
+    const original = '---\ntitle: Original\n---\n\noriginal body';
+    const replacement = '---\ntitle: Replacement\n---\n\nreplacement body';
+
+    await putPage.handler(ctx, { slug, content: original });
+    await engine.softDeletePage(slug, { sourceId: 'default' });
+
+    await expect(putPage.handler(ctx, { slug, content: replacement })).rejects.toMatchObject({
+      code: 'page_deleted',
+      suggestion: 'Call restore_page for this slug before updating it.',
+    });
+
+    const deleted = await engine.getPage(slug, { sourceId: 'default', includeDeleted: true });
+    expect(deleted?.deleted_at).toBeTruthy();
+    expect(deleted?.compiled_truth).toContain('original body');
+    expect(deleted?.compiled_truth).not.toContain('replacement body');
+    expect(fs.readFileSync(path.join(brainDir, `${slug}.md`), 'utf8')).toContain('original body');
+  });
+
   test('repo not configured → skipped no_repo_configured', async () => {
     // No deleteConfig helper; remove via raw SQL.
     await engine.executeRaw("DELETE FROM config WHERE key = 'sync.repo_path'");
@@ -210,6 +231,39 @@ describe('put_page write-through — multi-source filing', () => {
     expect(result.write_through?.written).toBe(true);
     expect(result.write_through?.path).toBe(path.join(brainDir, '.sources/team-x/shared/page.md'));
     expect(fs.existsSync(result.write_through!.path!)).toBe(true);
+  });
+
+  test('soft-deleted lookup is scoped to the authenticated source', async () => {
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name) VALUES ('team-deleted', 'team-deleted')",
+    );
+    const slug = 'shared/deleted-page';
+    const defaultCtx = makeCtx();
+    const teamCtx = makeCtx({ sourceId: 'team-deleted' });
+
+    await putPage.handler(defaultCtx, {
+      slug,
+      content: '---\ntitle: Default\n---\n\ndefault body',
+    });
+    await putPage.handler(teamCtx, {
+      slug,
+      content: '---\ntitle: Team\n---\n\nteam body',
+    });
+    await engine.softDeletePage(slug, { sourceId: 'team-deleted' });
+
+    await expect(putPage.handler(teamCtx, {
+      slug,
+      content: '---\ntitle: Replacement\n---\n\nreplacement body',
+    })).rejects.toMatchObject({ code: 'page_deleted' });
+
+    const defaultPage = await engine.getPage(slug, { sourceId: 'default' });
+    const deletedTeamPage = await engine.getPage(slug, {
+      sourceId: 'team-deleted',
+      includeDeleted: true,
+    });
+    expect(defaultPage?.compiled_truth).toContain('default body');
+    expect(deletedTeamPage?.compiled_truth).toContain('team body');
+    expect(deletedTeamPage?.compiled_truth).not.toContain('replacement body');
   });
 });
 

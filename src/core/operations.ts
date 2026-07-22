@@ -894,6 +894,25 @@ const put_page: Operation = {
     enforceSubagentSlugFence(ctx, slug, 'put_page');
 
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
+
+    // Page restoration is an explicit operation. Without this guard,
+    // importFromContent updates a matching soft-deleted row while leaving its
+    // deleted_at tombstone intact. The following write-through read then hides
+    // that row and reports page_not_found_after_write, even though put_page
+    // otherwise returns success. Reject before mutation so callers must restore
+    // the page deliberately and no hidden content update is lost from Git.
+    const existingIncludingDeleted = await ctx.engine.getPage(slug, {
+      sourceId: ctx.sourceId ?? 'default',
+      includeDeleted: true,
+    });
+    if (existingIncludingDeleted?.deleted_at) {
+      throw new OperationError(
+        'page_deleted',
+        `Page is soft-deleted: ${slug}`,
+        'Call restore_page for this slug before updating it.',
+      );
+    }
+
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
