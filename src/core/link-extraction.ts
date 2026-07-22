@@ -963,11 +963,14 @@ export function makeResolver(
     async resolveExact(slug: string): Promise<string | null> {
       if (!slug || typeof slug !== 'string') return null;
       for (const candidate of [...new Set([slug, slug.toLowerCase()])]) {
+        const canonical = opts.sourceId
+          ? await engine.resolveSlugWithAlias(candidate, opts.sourceId)
+          : candidate;
         const page = await engine.getPage(
-          candidate,
+          canonical,
           opts.sourceId ? { sourceId: opts.sourceId } : undefined,
         );
-        if (page) return candidate;
+        if (page) return canonical;
       }
       return null;
     },

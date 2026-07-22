@@ -1067,6 +1067,25 @@ describe('makeResolver — fallback chain', () => {
     expect(await r.resolve('people/pedro')).toBe('people/pedro');
   });
 
+  test('qualified slug resolves a source-scoped slug alias', async () => {
+    const engine = makeFakeEngine(['partners/josh/sources/canonical-artifact']);
+    (engine as any).resolveSlugWithAlias = async (slug: string, sourceId: string) => {
+      expect(sourceId).toBe('josh-private');
+      return slug === 'partners/josh/sources/old-artifact'
+        ? 'partners/josh/sources/canonical-artifact'
+        : slug;
+    };
+    const resolver = makeResolver(engine, { mode: 'batch', sourceId: 'josh-private' });
+    const { candidates } = await extractPageLinks(
+      'meetings/working-session',
+      'Source: [[partners/josh/sources/old-artifact|Raw artifact]].',
+      {}, 'meeting', resolver,
+    );
+    expect(candidates.map(candidate => candidate.targetSlug)).toEqual([
+      'partners/josh/sources/canonical-artifact',
+    ]);
+  });
+
   test('step 2: dir-hint construction', async () => {
     const engine = makeFakeEngine(['companies/stripe']);
     const r = makeResolver(engine);
