@@ -78,7 +78,8 @@ describe('patterns scope filter', () => {
     // #2415: the namespace root is configurable (dream.synthesize.output_root,
     // default 'wiki') and bound as a parameter — the scope filter itself and
     // the reflections sub-path stay pinned.
-    expect(patternsSrc).toContain('slug LIKE $2');
+    expect(patternsSrc).toContain('source_id = $1');
+    expect(patternsSrc).toContain('slug LIKE $3');
     expect(patternsSrc).toContain('/personal/reflections/%');
   });
 

@@ -40,7 +40,9 @@ import type { ToolCtx, ToolDef } from '../types.ts';
  *   get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
  *
  * Conditional write:
- *   put_page (namespace-enforced by the tool schema + server-side check)
+ *   put_page (namespace-enforced by the tool schema + server-side check),
+ *   suppress_claim / unsuppress_claim / add_timeline_entry (server-side
+ *   namespace enforcement)
  *
  * Every name below MUST exist in src/core/operations.ts OPERATIONS; the
  * brain-allowlist test pins this invariant so an upstream rename fails CI
@@ -62,6 +64,10 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'resolve_slugs',
   'get_ingest_log',
   'put_page',
+  // Page-owned refutations use the same fail-closed operation-layer slug
+  // fence as put_page. Both mutations are idempotent over their active state.
+  'suppress_claim',
+  'unsuppress_claim',
   // #2778: the canonical timeline-write op. Fenced exactly like put_page —
   // operations.ts:enforceSubagentSlugFence confines the target slug to the
   // trusted-workspace allow-list (or the wiki/agents/<id>/ namespace) when
@@ -104,6 +110,8 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   resolve_slugs: 'Resolve free-form entity names to canonical slugs (e.g. "Alice" → `people/alice-example`). Use before any tool that takes a slug if the user gave a name not a slug.',
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
   put_page: 'Write a markdown page to the gbrain DATABASE (NOT the local filesystem). Page becomes searchable + linkable. Slug must match the agent\'s allowed namespace.',
+  suppress_claim: 'Record a user-refuted prose claim on an existing page without editing its prose. Slug must match the agent\'s allowed namespace.',
+  unsuppress_claim: 'Deactivate a page-owned claim suppression while retaining its audit row. Slug must match the agent\'s allowed namespace.',
   add_timeline_entry: 'Append a dated timeline entry to an existing page (the canonical timeline write). Use over rewriting the page body when recording a dated event. Slug must match the agent\'s allowed namespace.',
   get_recent_salience: 'Read pages ranked by emotional + activity salience over a recency window. Use for "what\'s been on my mind lately".',
   find_anomalies: 'Read cohort-level activity outliers (e.g. tag-cohort or type-cohort with unusual recent volume). Use for "what\'s unusual lately".',

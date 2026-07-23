@@ -32,6 +32,12 @@ import type { Page, PageType } from '../types.ts';
 import { loadAllowedSlugPrefixes, loadOutputRoot } from './synthesize.ts';
 import { probeChatModel } from '../ai/gateway.ts';
 import { normalizeModelId } from '../model-id.ts';
+import {
+  buildSuppressionPromptBlock,
+  collectSuppressionBackstopEvents,
+  loadActiveSuppressedClaims,
+  parseSuppressionBackstopEvent,
+} from '../claim-suppression.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -52,6 +58,8 @@ export interface PatternsPhaseOpts {
    * mid-phase and starves every tail phase (#2781).
    */
   deadlineAtMs?: number | null;
+  /** Source containing both reflection inputs and pattern outputs. */
+  sourceId?: string;
 }
 
 /**
@@ -115,7 +123,13 @@ export async function runPhasePatterns(
     }
 
     // Gather reflections within lookback window.
-    const reflections = await gatherReflections(engine, config.lookbackDays, config.outputRoot);
+    const sourceId = opts.sourceId ?? 'default';
+    const reflections = await gatherReflections(
+      engine,
+      config.lookbackDays,
+      config.outputRoot,
+      sourceId,
+    );
     if (reflections.length < config.minEvidence) {
       return skipped(
         'insufficient_evidence',
@@ -152,6 +166,9 @@ export async function runPhasePatterns(
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
+    const suppressionPromptBlock = buildSuppressionPromptBlock(
+      await loadActiveSuppressedClaims(engine, sourceId, allowedSlugPrefixes),
+    );
 
     // #2781: budget the subagent from the REMAINING parent-job time, not
     // the fixed config default. Checked after the cheap gates (disabled /
@@ -168,10 +185,16 @@ export async function runPhasePatterns(
 
     const queue = new MinionQueue(engine);
     const data: SubagentHandlerData = {
-      prompt: buildPatternsPrompt(reflections, config.minEvidence, config.outputRoot),
+      prompt: buildPatternsPrompt(
+        reflections,
+        config.minEvidence,
+        config.outputRoot,
+        suppressionPromptBlock,
+      ),
       model: config.model,
       max_turns: 30,
       allowed_slug_prefixes: allowedSlugPrefixes,
+      ...(opts.sourceId ? { source_id: opts.sourceId } : {}),
     };
     const submitOpts: Partial<MinionJobInput> = {
       max_stalled: 3,
@@ -210,7 +233,13 @@ export async function runPhasePatterns(
     // Collect refs the subagent wrote (codex finding #2 — query tool exec rows).
     // v0.32.8: refs carry source_id so reverseWriteRefs targets the right
     // (source, slug) row instead of the first DB match.
-    const writtenRefs = await collectChildPutPageSlugs(engine, [job.id]);
+    const suppressionEvents = await collectSuppressionBackstopEvents(engine, [job.id]);
+    if (suppressionEvents.length > 0) {
+      process.stderr.write(
+        `[dream] honored ${suppressionEvents.length} suppressed-claim backstop event(s)\n`,
+      );
+    }
+    const writtenRefs = await collectChildPutPageSlugs(engine, [job.id], sourceId);
 
     // Reverse-write to fs.
     const reverseWriteCount = await reverseWriteRefs(engine, opts.brainDir, writtenRefs);
@@ -221,6 +250,8 @@ export async function runPhasePatterns(
       reverse_write_count: reverseWriteCount,
       child_outcome: outcome,
       job_id: job.id,
+      suppressions_honored: suppressionEvents.length,
+      suppression_events: suppressionEvents,
     };
 
     // #2782: the phase status must reflect the child outcome. Pre-fix this
@@ -329,6 +360,7 @@ async function gatherReflections(
   engine: BrainEngine,
   lookbackDays: number,
   outputRoot = 'wiki',
+  sourceId = 'default',
 ): Promise<ReflectionRef[]> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
   // #2415: reflections live under the configured output root (bound as a
@@ -336,11 +368,12 @@ async function gatherReflections(
   const rows = await engine.executeRaw<{ slug: string; title: string | null; compiled_truth: string | null }>(
     `SELECT slug, title, compiled_truth
        FROM pages
-      WHERE slug LIKE $2
-        AND updated_at >= $1::timestamptz
+      WHERE source_id = $1
+        AND slug LIKE $3
+        AND updated_at >= $2::timestamptz
       ORDER BY updated_at DESC
       LIMIT 100`,
-    [since, `${outputRoot}/personal/reflections/%`],
+    [sourceId, since, `${outputRoot}/personal/reflections/%`],
   );
   return rows.map(r => ({
     slug: r.slug,
@@ -351,7 +384,12 @@ async function gatherReflections(
 
 // ── Prompt ────────────────────────────────────────────────────────────
 
-function buildPatternsPrompt(reflections: ReflectionRef[], minEvidence: number, outputRoot = 'wiki'): string {
+function buildPatternsPrompt(
+  reflections: ReflectionRef[],
+  minEvidence: number,
+  outputRoot = 'wiki',
+  suppressionPromptBlock = '',
+): string {
   const today = new Date().toISOString().slice(0, 10);
   const corpus = reflections
     .map((r, i) => `### ${i + 1}. [[${r.slug}]] — ${r.title}\n${r.excerpt}`)
@@ -374,6 +412,7 @@ DO NOT WRITE
 CONTEXT
 - Today: ${today}
 - Reflections in scope: ${reflections.length}
+${suppressionPromptBlock}
 
 REFLECTIONS
 ${corpus}
@@ -386,6 +425,7 @@ When done, briefly list the pattern slugs you wrote/updated in your final messag
 async function collectChildPutPageSlugs(
   engine: BrainEngine,
   childIds: number[],
+  sourceId = 'default',
 ): Promise<Array<{ slug: string; source_id: string }>> {
   if (childIds.length === 0) return [];
   // v0.32.8: subagent put_page tool schema doesn't expose source_id (subagents
@@ -393,20 +433,26 @@ async function collectChildPutPageSlugs(
   // dream cycles are a v0.33 follow-up. The point of threading source_id is
   // so reverseWriteRefs can pass it through getPage and pick the correct
   // (source_id, slug) row instead of whatever the DB happens to return.
-  const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT DISTINCT
-            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
+  const rows = await engine.executeRaw<{ slug: string; output: unknown }>(
+    `SELECT COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug,
+            output
        FROM subagent_tool_executions
       WHERE job_id = ANY($1::int[])
         AND tool_name = 'brain_put_page'
         AND status = 'complete'
-      ORDER BY 1`,
+      ORDER BY id`,
     [childIds],
   );
-  return rows
-    .map(r => r.slug)
-    .filter((s): s is string => typeof s === 'string' && s.length > 0)
-    .map(slug => ({ slug, source_id: 'default' }));
+  const written = new Set<string>();
+  for (const row of rows) {
+    if (parseSuppressionBackstopEvent(row.output)) continue;
+    if (typeof row.slug === 'string' && row.slug.length > 0) {
+      written.add(row.slug);
+    }
+  }
+  return [...written]
+    .sort()
+    .map(slug => ({ slug, source_id: sourceId }));
 }
 
 // ── Reverse-write ────────────────────────────────────────────────────
@@ -490,3 +536,9 @@ function failed(error: PhaseError): PhaseResult {
 function makeError(cls: string, code: string, message: string, hint?: string): PhaseError {
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
+
+/** Test-only access to pure prompt construction. */
+export const __testing = {
+  buildPatternsPrompt,
+  gatherReflections,
+};

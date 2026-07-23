@@ -21,6 +21,17 @@ import { validateAllLinks, validateLinks } from './link-validation.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
+import { parseMarkdown } from './markdown.ts';
+import {
+  findSuppressedClaimMatches,
+  listSuppressedClaims,
+  suppressClaim,
+  unsuppressClaim,
+} from './claim-suppression.ts';
+import {
+  preserveSuppressedClaimsFence,
+  stripSuppressedClaimsFence,
+} from './suppressed-claims-fence.ts';
 import { getContentFlag } from './quarantine.ts';
 import { bumpLastRetrievedAt } from './last-retrieved.ts';
 import { isSearchMode } from './search/mode.ts';
@@ -795,13 +806,16 @@ const get_page: Operation = {
     //    drops private. World facts are public knowledge by definition;
     //    untrusted readers see them. Private facts never cross the boundary.
     const isUntrustedReader = ctx.remote === true;
-    const visibleBody = isUntrustedReader
+    const privacyFilteredTruth = isUntrustedReader
+      ? stripFactsFence(
+        stripTakesFence(page.compiled_truth),
+        { keepVisibility: ['world'] },
+      )
+      : page.compiled_truth;
+    const visibleBody = ctx.remote !== false
       ? {
           ...page,
-          compiled_truth: stripFactsFence(
-            stripTakesFence(page.compiled_truth),
-            { keepVisibility: ['world'] },
-          ),
+          compiled_truth: stripSuppressedClaimsFence(privacyFilteredTruth),
         }
       : page;
     // v0.42 (#1699) agent-warning channel: surface the page's content_flag
@@ -943,7 +957,33 @@ const put_page: Operation = {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
     }
-    const result = await importFromContent(ctx.engine, slug, p.content as string, {
+    const existingSuppressions = existingIncludingDeleted
+      ? await listSuppressedClaims(ctx.engine, slug, ctx.sourceId ?? 'default')
+      : null;
+    const candidateContent = p.content as string;
+    if (existingSuppressions?.some((claim) => claim.active)) {
+      const candidate = parseMarkdown(candidateContent, `${slug}.md`);
+      const matchedClaims = findSuppressedClaimMatches(
+        candidate.compiled_truth,
+        existingSuppressions,
+      );
+      if (matchedClaims.length > 0) {
+        return {
+          slug,
+          status: 'skipped',
+          suppression_backstop: {
+            action: 'skipped_page_write',
+            slug,
+            matched_claims: matchedClaims,
+          },
+        };
+      }
+    }
+    const content = preserveSuppressedClaimsFence(
+      existingIncludingDeleted?.compiled_truth ?? '',
+      candidateContent,
+    );
+    const result = await importFromContent(ctx.engine, slug, content, {
       noEmbed,
       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
@@ -1644,6 +1684,139 @@ const list_slug_aliases: Operation = {
       }
       throw error;
     }
+  },
+  cliHints: { hidden: true },
+};
+
+const suppress_claim: Operation = {
+  name: 'suppress_claim',
+  description: 'Record a user-refuted prose claim in the page-owned Suppressed Claims fence. Does not edit surrounding prose. Idempotent on normalized claim text.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug' },
+    claim_text: { type: 'string', required: true, description: 'Claim text exactly as it appeared' },
+    reason: { type: 'string', description: 'Optional suppression reason (max 500 characters)' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const slug = (p.slug as string).trim();
+    const claimText = (p.claim_text as string).trim();
+    const reason = typeof p.reason === 'string' ? p.reason.trim() : '';
+    enforceSubagentSlugFence(ctx, slug, 'suppress_claim');
+    if (!claimText) {
+      throw new OperationError('invalid_params', 'claim_text must be non-empty');
+    }
+    if (reason.length > 500) {
+      throw new OperationError('invalid_params', 'reason exceeds 500 characters');
+    }
+    if (ctx.dryRun) {
+      return { dry_run: true, action: 'suppress_claim', slug, claim_text: claimText };
+    }
+
+    const provenance = ctx.remote === false
+      ? 'cli:suppress_claim'
+      : 'mcp:suppress_claim';
+    const result = await suppressClaim(
+      ctx.engine,
+      slug,
+      ctx.sourceId ?? 'default',
+      {
+        claimText,
+        reason,
+        suppressedAt: new Date().toISOString().slice(0, 10),
+        provenance,
+      },
+    );
+    if (!result) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+    return {
+      slug,
+      claim_text: claimText,
+      suppressed: result.changed,
+      noop: !result.changed,
+      write_through: result.writeThrough,
+    };
+  },
+  cliHints: {
+    name: 'suppress-claim',
+    positional: ['slug', 'claim_text'],
+  },
+};
+
+const unsuppress_claim: Operation = {
+  name: 'unsuppress_claim',
+  description: 'Deactivate a page-owned prose suppression while retaining its struck-through audit row.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug' },
+    claim_text: { type: 'string', required: true, description: 'Suppressed claim text' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const slug = (p.slug as string).trim();
+    const claimText = (p.claim_text as string).trim();
+    enforceSubagentSlugFence(ctx, slug, 'unsuppress_claim');
+    if (!claimText) {
+      throw new OperationError('invalid_params', 'claim_text must be non-empty');
+    }
+    if (ctx.dryRun) {
+      return { dry_run: true, action: 'unsuppress_claim', slug, claim_text: claimText };
+    }
+    const result = await unsuppressClaim(
+      ctx.engine,
+      slug,
+      ctx.sourceId ?? 'default',
+      claimText,
+    );
+    if (!result) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+    if (!result.changed) {
+      throw new OperationError(
+        'suppression_not_found',
+        `Active suppression not found on ${slug}: ${claimText}`,
+      );
+    }
+    return {
+      slug,
+      claim_text: claimText,
+      unsuppressed: true,
+      write_through: result.writeThrough,
+    };
+  },
+  cliHints: {
+    name: 'unsuppress-claim',
+    positional: ['slug', 'claim_text'],
+  },
+};
+
+const list_suppressed_claims: Operation = {
+  name: 'list_suppressed_claims',
+  description: 'List active and inactive page-owned prose suppressions.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug' },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const slug = (p.slug as string).trim();
+    const page = await ctx.engine.getPage(slug, sourceScopeOpts(ctx));
+    if (!page) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+    const claims = await listSuppressedClaims(
+      ctx.engine,
+      slug,
+      page.source_id,
+    );
+    if (!claims) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+    return {
+      schema_version: 1,
+      count: claims.length,
+      suppressed_claims: claims,
+    };
   },
   cliHints: { hidden: true },
 };
@@ -5680,6 +5853,8 @@ const chronicle_backfill: Operation = {
 export const operations: Operation[] = [
   // Page CRUD
   get_page, validate_links, put_page, delete_page, list_pages,
+  // Page-owned durable prose refutations
+  suppress_claim, unsuppress_claim, list_suppressed_claims,
   // Source-scoped slug redirects
   add_slug_alias, remove_slug_alias, list_slug_aliases,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)

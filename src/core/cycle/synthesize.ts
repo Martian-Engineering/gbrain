@@ -43,6 +43,12 @@ import { serializeMarkdown, serializePageToMarkdown } from '../markdown.ts';
 import type { Page, PageType } from '../types.ts';
 import { validateSourceId } from '../utils.ts';
 import { safeSplitIndex } from '../text-safe.ts';
+import {
+  buildSuppressionPromptBlock,
+  collectSuppressionBackstopEvents,
+  loadActiveSuppressedClaims,
+  parseSuppressionBackstopEvent,
+} from '../claim-suppression.ts';
 
 // Slug regex from validatePageSlug — kept in sync.
 // Used for the orchestrator-written summary index slug.
@@ -425,6 +431,14 @@ export async function runPhaseSynthesize(
       return failed(makeError('InternalError', 'NO_ALLOWLIST',
         'skills/_brain-filing-rules.json missing dream_synthesize_paths.globs'));
     }
+    const cycleSourceId = opts.sourceId ?? 'default';
+    const suppressionPromptBlock = buildSuppressionPromptBlock(
+      await loadActiveSuppressedClaims(
+        engine,
+        cycleSourceId,
+        allowedSlugPrefixes,
+      ),
+    );
 
     const queue = new MinionQueue(engine);
     const childIds: number[] = [];
@@ -483,7 +497,15 @@ export async function runPhaseSynthesize(
           : config.model;
       for (let i = 0; i < chunks.length; i++) {
         const childData: SubagentHandlerData = {
-          prompt: buildSynthesisPrompt(t, chunks[i], i, chunks.length, priorContradictionsBlock, config.outputRoot),
+          prompt: buildSynthesisPrompt(
+            t,
+            chunks[i],
+            i,
+            chunks.length,
+            priorContradictionsBlock,
+            config.outputRoot,
+            suppressionPromptBlock,
+          ),
           model: subagentModel,
           max_turns: 30,
           allowed_slug_prefixes: allowedSlugPrefixes,
@@ -550,7 +572,12 @@ export async function runPhaseSynthesize(
     // v0.32.8: refs carry source_id so reverseWriteRefs picks the correct
     // (source, slug) row. #1586: refs are stamped with the cycle's resolved
     // source (children write there via SubagentHandlerData.source_id).
-    const cycleSourceId = opts.sourceId ?? 'default';
+    const suppressionEvents = await collectSuppressionBackstopEvents(engine, childIds);
+    if (suppressionEvents.length > 0) {
+      process.stderr.write(
+        `[dream] honored ${suppressionEvents.length} suppressed-claim backstop event(s)\n`,
+      );
+    }
     const writtenRefs = await collectChildPutPageSlugs(engine, childIds, chunkInfo, cycleSourceId);
 
     const summaryDate = opts.date ?? today();
@@ -594,6 +621,8 @@ export async function runPhaseSynthesize(
       children_submitted: childIds.length,
       // D5 cap hits + D8 legacy-key skips. Empty when nothing skipped.
       skips: skipReports,
+      suppressions_honored: suppressionEvents.length,
+      suppression_events: suppressionEvents,
       summary_slug: summarySlug,
       verdicts,
     });
@@ -1029,6 +1058,7 @@ function buildSynthesisPrompt(
   chunkTotal: number,
   priorContradictionsBlock = '',
   outputRoot = 'wiki',
+  suppressionPromptBlock = '',
 ): string {
   const dateHint = t.inferredDate ?? today();
   const baseSlugSegment = sanitizeForSlug(t.basename) || `session-${dateHint}`;
@@ -1047,7 +1077,7 @@ function buildSynthesisPrompt(
 CONTEXT
 - Today's date: ${dateHint}
 - Transcript hash suffix (USE THIS in slugs): ${hashSuffix}
-- Source file basename: ${baseSlugSegment}${chunkBanner}${priorContradictionsBlock}
+- Source file basename: ${baseSlugSegment}${chunkBanner}${priorContradictionsBlock}${suppressionPromptBlock}
 
 OUTPUT POLICY (ALL of these are required)
 1. Quote the user verbatim. Do not paraphrase memorable phrasings.
@@ -1116,9 +1146,10 @@ async function collectChildPutPageSlugs(
   // cycle's resolved source via SubagentHandlerData.source_id, and stamps
   // the SAME source here so reverseWriteRefs / provenance reads target the
   // correct (source_id, slug) row. Unset → legacy 'default'.
-  const rows = await engine.executeRaw<{ job_id: number; slug: string }>(
+  const rows = await engine.executeRaw<{ job_id: number; slug: string; output: unknown }>(
     `SELECT job_id,
-            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
+            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug,
+            output
        FROM subagent_tool_executions
       WHERE job_id = ANY($1::int[])
         AND tool_name = 'brain_put_page'
@@ -1127,6 +1158,7 @@ async function collectChildPutPageSlugs(
   );
   const rewritten = new Set<string>();
   for (const r of rows) {
+    if (parseSuppressionBackstopEvent(r.output)) continue;
     if (typeof r.slug !== 'string' || r.slug.length === 0) continue;
     const ci = chunkInfo.get(r.job_id);
     rewritten.add(ci ? rewriteChunkedSlug(r.slug, ci.hash6, ci.idx) : r.slug);
