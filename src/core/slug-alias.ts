@@ -33,6 +33,7 @@ export interface AddSlugAliasResult {
   alias_slug: string;
   canonical_slug: string;
   soft_deleted_old: boolean;
+  facts_migrated: number;
   old_source_path: string | null;
 }
 
@@ -162,11 +163,17 @@ export async function addSlugAlias(
 
     if (identical) {
       let softDeletedOld = false;
+      let factsMigrated = 0;
       if (oldPages.length > 0) {
         softDeletedOld = (await tx.softDeletePage(aliasSlug, { sourceId })) !== null;
         if (!softDeletedOld) {
           throw new Error(`Active alias page '${aliasSlug}' changed during alias creation.`);
         }
+        factsMigrated = (await tx.migrateFactsToCanonical(
+          aliasSlug,
+          canonicalSlug,
+          sourceId,
+        )).migrated;
       }
       return {
         status: 'unchanged' as const,
@@ -174,6 +181,7 @@ export async function addSlugAlias(
         alias_slug: aliasSlug,
         canonical_slug: canonicalSlug,
         soft_deleted_old: softDeletedOld,
+        facts_migrated: factsMigrated,
         old_source_path: oldPages[0]?.source_path ?? null,
       };
     }
@@ -185,11 +193,17 @@ export async function addSlugAlias(
     assertNoCycle(aliases, aliasSlug, canonicalSlug);
 
     let softDeletedOld = false;
+    let factsMigrated = 0;
     if (oldPages.length > 0) {
       softDeletedOld = (await tx.softDeletePage(aliasSlug, { sourceId })) !== null;
       if (!softDeletedOld) {
         throw new Error(`Active alias page '${aliasSlug}' changed during alias creation.`);
       }
+      factsMigrated = (await tx.migrateFactsToCanonical(
+        aliasSlug,
+        canonicalSlug,
+        sourceId,
+      )).migrated;
     }
 
     const status = existing.length > 0 ? 'replaced' as const : 'added' as const;
@@ -216,6 +230,7 @@ export async function addSlugAlias(
       alias_slug: aliasSlug,
       canonical_slug: canonicalSlug,
       soft_deleted_old: softDeletedOld,
+      facts_migrated: factsMigrated,
       old_source_path: oldPages[0]?.source_path ?? null,
     };
   });

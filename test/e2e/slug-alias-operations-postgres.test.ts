@@ -29,6 +29,15 @@ describePostgres('slug-alias transactional parity on PostgreSQL', () => {
         type: 'note', title: slug, compiled_truth: `# ${slug}`, timeline: '',
       }, { sourceId: 'alias-pg' });
     }
+    await engine.executeRaw(
+      `INSERT INTO facts (
+         source_id, entity_slug, fact, kind, valid_from, source,
+         source_markdown_slug, row_num
+       ) VALUES (
+         'alias-pg', 'old', 'Old fact', 'fact', '2020-01-01'::date,
+         'manual', 'old', 1
+       )`,
+    );
     const added = await addSlugAlias(engine, {
       sourceId: 'alias-pg',
       aliasSlug: 'old',
@@ -36,7 +45,19 @@ describePostgres('slug-alias transactional parity on PostgreSQL', () => {
       softDeleteOld: true,
     });
     expect(added.status).toBe('added');
+    expect(added.facts_migrated).toBe(1);
     expect(await engine.resolveSlugWithAlias('old', 'alias-pg')).toBe('canonical-a');
+    const facts = await engine.executeRaw<{
+      entity_slug: string;
+      source_markdown_slug: string;
+    }>(
+      `SELECT entity_slug, source_markdown_slug
+         FROM facts WHERE source_id = 'alias-pg' AND fact = 'Old fact'`,
+    );
+    expect(facts[0]).toEqual({
+      entity_slug: 'canonical-a',
+      source_markdown_slug: 'canonical-a',
+    });
 
     await expect(addSlugAlias(engine, {
       sourceId: 'alias-pg', aliasSlug: 'old', canonicalSlug: 'canonical-b',

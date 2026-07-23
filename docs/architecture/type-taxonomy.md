@@ -175,9 +175,10 @@ can select a source with `--source <id>`.
 `alias add` requires an active canonical page. It rejects self-aliases, cycles,
 and an active page at the old slug. `--soft-delete-old` permits that collision
 by soft-deleting the old page in the same database transaction as the alias
-insert or replacement. `--replace` is required to change an existing mapping;
-adding the same mapping again returns an idempotent success. PostgreSQL and
-PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
+insert or replacement. Active facts attached to that page move to the canonical
+slug in the same transaction. `--replace` is required to change an existing
+mapping; adding the same mapping again returns an idempotent success. PostgreSQL
+and PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
 
 `alias remove` is source-scoped and idempotent. It removes only the redirect;
 page restoration remains an explicit `restore_page` operation. If a

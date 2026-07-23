@@ -126,6 +126,15 @@ describe('addSlugAlias on PGLite', () => {
   test('soft-deletes the old page and inserts the alias in one transaction', async () => {
     await seedPage('old');
     await seedPage('canonical');
+    await engine.executeRaw(
+      `INSERT INTO facts (
+         source_id, entity_slug, fact, kind, valid_from, source,
+         source_markdown_slug, row_num
+       ) VALUES (
+         'default', 'old', 'Old fact', 'fact', '2020-01-01'::date,
+         'manual', 'old', 1
+       )`,
+    );
     const result = await addSlugAlias(engine, {
       sourceId: 'default',
       aliasSlug: 'old',
@@ -134,8 +143,20 @@ describe('addSlugAlias on PGLite', () => {
     });
     expect(result.status).toBe('added');
     expect(result.soft_deleted_old).toBe(true);
+    expect(result.facts_migrated).toBe(1);
     expect(await engine.getPage('old', { sourceId: 'default' })).toBeNull();
     expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical');
+    const facts = await engine.executeRaw<{
+      entity_slug: string;
+      source_markdown_slug: string;
+    }>(
+      `SELECT entity_slug, source_markdown_slug
+         FROM facts WHERE source_id = 'default' AND fact = 'Old fact'`,
+    );
+    expect(facts[0]).toEqual({
+      entity_slug: 'canonical',
+      source_markdown_slug: 'canonical',
+    });
   });
 
   test('identical mapping is idempotent success', async () => {
@@ -147,7 +168,9 @@ describe('addSlugAlias on PGLite', () => {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
     });
     expect(first.status).toBe('added');
+    expect(first.facts_migrated).toBe(0);
     expect(second.status).toBe('unchanged');
+    expect(second.facts_migrated).toBe(0);
     const rows = await engine.executeRaw<{ n: number }>(
       `SELECT COUNT(*)::int AS n FROM slug_aliases WHERE source_id = 'default' AND alias_slug = 'old'`,
     );
@@ -160,6 +183,15 @@ describe('addSlugAlias on PGLite', () => {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
     });
     await seedPage('old');
+    await engine.executeRaw(
+      `INSERT INTO facts (
+         source_id, entity_slug, fact, kind, valid_from, source,
+         source_markdown_slug, row_num
+       ) VALUES (
+         'default', 'old', 'Identical fact', 'fact', '2020-01-01'::date,
+         'manual', 'old', 1
+       )`,
+    );
     await expect(addSlugAlias(engine, {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
     })).rejects.toMatchObject({ code: 'alias_page_collision' });
@@ -170,8 +202,23 @@ describe('addSlugAlias on PGLite', () => {
       canonicalSlug: 'canonical',
       softDeleteOld: true,
     });
-    expect(result).toMatchObject({ status: 'unchanged', soft_deleted_old: true });
+    expect(result).toMatchObject({
+      status: 'unchanged',
+      soft_deleted_old: true,
+      facts_migrated: 1,
+    });
     expect(await engine.getPage('old', { sourceId: 'default' })).toBeNull();
+    const facts = await engine.executeRaw<{
+      entity_slug: string;
+      source_markdown_slug: string;
+    }>(
+      `SELECT entity_slug, source_markdown_slug
+         FROM facts WHERE source_id = 'default' AND fact = 'Identical fact'`,
+    );
+    expect(facts[0]).toEqual({
+      entity_slug: 'canonical',
+      source_markdown_slug: 'canonical',
+    });
   });
 
   test('replacement is gated and explicit replacement changes the resolver', async () => {
@@ -402,7 +449,8 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
           alias_slug: 'notes/old',
           canonical_slug: 'notes/canonical',
           soft_delete_old: true,
-        }) as { warnings: string[] };
+        }) as { facts_migrated: number; warnings: string[] };
+        expect(result.facts_migrated).toBe(0);
         expect(result.warnings).toHaveLength(1);
         expect(result.warnings[0]).toContain('future sync can recreate');
         expect(result.warnings[0]).toContain('Git was not modified');
