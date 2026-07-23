@@ -188,6 +188,20 @@ describe('runCycle — dryRun propagates to every phase', () => {
     expect(extractPhase?.status).toBe('skipped');
     expect(extractPhase?.details.reason).toBe('no_dry_run_support');
   });
+
+  test('dryRun reaches the BaseCyclePhase calibration family', async () => {
+    const report = await runCycle(sharedEngine, {
+      brainDir: '/tmp/brain',
+      dryRun: true,
+      phases: ['propose_takes', 'grade_takes', 'calibration_profile'],
+    });
+
+    expect(report.phases).toHaveLength(3);
+    for (const phase of report.phases) {
+      expect(phase.summary).toStartWith('(dry-run)');
+      expect(phase.details.dry_run).toBe(true);
+    }
+  });
 });
 
 // ─── Phase selection ──────────────────────────────────────────────

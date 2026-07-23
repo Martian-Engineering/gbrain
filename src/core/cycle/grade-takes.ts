@@ -451,6 +451,10 @@ class GradeTakesPhase extends BaseCyclePhase {
         continue;
       }
 
+      // Dry-run stops after the eligibility, evidence-signature, and cache
+      // reads. It must not call a judge, write a verdict, or resolve a take.
+      if (opts.dryRun) continue;
+
       // Budget pre-check.
       const budget = this.checkBudget({
         modelId: judgeModelId,
@@ -594,6 +598,23 @@ class GradeTakesPhase extends BaseCyclePhase {
     }
 
     if (opts.reporter) opts.reporter.finish();
+
+    if (opts.dryRun) {
+      const eligible = result.takes_scanned - result.too_recent - result.cache_hits;
+      return {
+        summary:
+          `(dry-run) would grade ${eligible} take${eligible === 1 ? '' : 's'}: ` +
+          `${result.too_recent} too recent, ${result.cache_hits} cached`,
+        details: {
+          ...result,
+          dry_run: true,
+          prompt_version: promptVersion,
+          auto_resolve: autoResolve,
+          auto_resolve_threshold: autoResolveThreshold,
+        },
+        status: 'ok',
+      };
+    }
 
     const summary =
       `grade_takes: scanned ${result.takes_scanned} takes ` +

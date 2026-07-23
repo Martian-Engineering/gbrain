@@ -245,6 +245,42 @@ describe('extractExistingTakesForDedup', () => {
 // ─── Phase integration ──────────────────────────────────────────────
 
 describe('runPhaseProposeTakes — phase integration', () => {
+  test('dry-run reports scan/cache counts without model calls or writes', async () => {
+    const cachedBody = 'A page that was already processed.';
+    const pages = [
+      buildPage({ slug: 'wiki/cached', body: cachedBody }),
+      buildPage({ slug: 'wiki/miss', body: 'A page that would need extraction.' }),
+    ];
+    const existing = new Set([
+      `default|wiki/cached|${contentHash(cachedBody)}|${PROPOSE_TAKES_PROMPT_VERSION}`,
+    ]);
+    const { engine, captured } = buildMockEngine({ pages, existingProposals: existing });
+    let extractorCalls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      extractorCalls += 1;
+      return [{ claim_text: 'must not be proposed', kind: 'take', holder: 'brain', weight: 0.5 }];
+    };
+
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      dryRun: true,
+      extractor,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.summary).toBe(
+      '(dry-run) would scan 2 pages: 1 cache hit, 1 cache miss',
+    );
+    expect(result.details).toMatchObject({
+      dry_run: true,
+      pages_scanned: 2,
+      cache_hits: 1,
+      cache_misses: 1,
+      proposals_inserted: 0,
+    });
+    expect(extractorCalls).toBe(0);
+    expect(captured.every(c => /^\s*SELECT\b/.test(c.sql))).toBe(true);
+  });
+
   test('happy path: scans pages, extracts proposals, writes via INSERT', async () => {
     const pages = [buildPage({ slug: 'wiki/concepts/network-effects', body: 'Marketplaces with cold-start liquidity always win.' })];
     const { engine, captured } = buildMockEngine({ pages });

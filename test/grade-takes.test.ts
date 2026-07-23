@@ -202,6 +202,37 @@ describe('takeIsOldEnough', () => {
 // ─── Phase integration ──────────────────────────────────────────────
 
 describe('runPhaseGradeTakes — phase integration', () => {
+  test('dry-run reads eligibility and cache state without model calls or writes', async () => {
+    const takes = [buildTake({ id: 1, sinceDate: '2023-01-01' })];
+    const { engine, captured, resolves } = buildMockEngine({ takes });
+    let judgeCalls = 0;
+    const judge: JudgeFn = async () => {
+      judgeCalls += 1;
+      return { verdict: 'correct', confidence: 1, reasoning: 'must not run' };
+    };
+
+    const result = await runPhaseGradeTakes(buildCtx(engine), {
+      dryRun: true,
+      judge,
+      autoResolve: true,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.summary).toBe(
+      '(dry-run) would grade 1 take: 0 too recent, 0 cached',
+    );
+    expect(result.details).toMatchObject({
+      dry_run: true,
+      takes_scanned: 1,
+      cache_hits: 0,
+      verdicts_written: 0,
+      auto_applied: 0,
+    });
+    expect(judgeCalls).toBe(0);
+    expect(captured.every(c => /^\s*SELECT\b/.test(c.sql))).toBe(true);
+    expect(resolves).toHaveLength(0);
+  });
+
   test('happy path: judge produces verdict, lands in take_grade_cache (applied=false default)', async () => {
     const takes = [buildTake({ id: 1, sinceDate: '2023-01-01' })];
     const { engine, captured, resolves } = buildMockEngine({ takes });

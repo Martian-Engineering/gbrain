@@ -197,6 +197,43 @@ const ENOUGH_RESOLVED_SCORECARD: TakesScorecard = {
 };
 
 describe('runPhaseCalibrationProfile — phase integration', () => {
+  test('dry-run reports the profile candidate without model calls or writes', async () => {
+    const { engine, captured } = buildMockEngine({ scorecard: ENOUGH_RESOLVED_SCORECARD });
+    let patternCalls = 0;
+    let biasTagCalls = 0;
+    let judgeCalls = 0;
+
+    const result = await runPhaseCalibrationProfile(buildCtx(engine), {
+      dryRun: true,
+      patternsGenerator: async () => {
+        patternCalls += 1;
+        return ['must not run'];
+      },
+      biasTagsGenerator: async () => {
+        biasTagCalls += 1;
+        return ['must-not-run'];
+      },
+      voiceGateJudge: async () => {
+        judgeCalls += 1;
+        return { verdict: 'conversational', reason: 'must not run' };
+      },
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.summary).toBe(
+      '(dry-run) would generate calibration profile for holder=garry from 12 resolved takes',
+    );
+    expect(result.details).toMatchObject({
+      dry_run: true,
+      profile_written: false,
+      total_resolved: 12,
+    });
+    expect(patternCalls).toBe(0);
+    expect(biasTagCalls).toBe(0);
+    expect(judgeCalls).toBe(0);
+    expect(captured).toHaveLength(0);
+  });
+
   test('cold-brain skip: <5 resolved → no row written, status=ok', async () => {
     const { engine, captured } = buildMockEngine({
       scorecard: { ...ENOUGH_RESOLVED_SCORECARD, resolved: 3 },

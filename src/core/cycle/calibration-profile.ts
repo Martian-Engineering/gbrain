@@ -250,6 +250,21 @@ class CalibrationProfilePhase extends BaseCyclePhase {
     result.total_resolved = scorecard.resolved;
     result.brier = scorecard.brier;
 
+    if (opts.dryRun) {
+      const hasEnoughData = scorecard.resolved >= 5;
+      return {
+        summary: hasEnoughData
+          ? `(dry-run) would generate calibration profile for holder=${holder} from ${scorecard.resolved} resolved takes`
+          : `(dry-run) would skip calibration profile for holder=${holder}: only ${scorecard.resolved} resolved takes`,
+        details: {
+          ...result,
+          dry_run: true,
+          ...(hasEnoughData ? {} : { skipped: 'insufficient_data' }),
+        },
+        status: 'ok',
+      };
+    }
+
     // Cold-brain branch: not enough resolved takes for a profile yet.
     if (scorecard.resolved < 5) {
       return {

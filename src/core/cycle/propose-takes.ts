@@ -359,6 +359,10 @@ class ProposeTakesPhase extends BaseCyclePhase {
       }
       result.cache_misses += 1;
 
+      // Dry-run stops at the cheap candidate + idempotency reads. It must not
+      // spend model tokens or create proposal, receipt, or rollup rows.
+      if (opts.dryRun) continue;
+
       // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
       const budget = this.checkBudget({
         modelId,
@@ -418,6 +422,17 @@ class ProposeTakesPhase extends BaseCyclePhase {
     }
 
     if (opts.reporter) opts.reporter.finish();
+
+    if (opts.dryRun) {
+      return {
+        summary:
+          `(dry-run) would scan ${result.pages_scanned} pages: ` +
+          `${result.cache_hits} cache hit${result.cache_hits === 1 ? '' : 's'}, ` +
+          `${result.cache_misses} cache miss${result.cache_misses === 1 ? '' : 'es'}`,
+        details: { ...result, dry_run: true, prompt_version: promptVersion },
+        status: 'ok',
+      };
+    }
 
     // v0.42 Wave B3: receipt + rollup for propose_takes. Source-scoped
     // via the read scope. Receipt only when proposals actually written.
