@@ -10,7 +10,7 @@ import { describe, test, expect } from 'bun:test';
 import { __testing } from '../src/commands/apply-migrations.ts';
 import type { CompletedMigrationEntry } from '../src/core/preferences.ts';
 
-const { parseArgs, indexCompleted, buildPlan, statusForVersion } = __testing;
+const { parseArgs, indexCompleted, buildPlan, statusForVersion, selectMigrationsToRun } = __testing;
 
 describe('parseArgs', () => {
   test('default flags', () => {
@@ -164,6 +164,16 @@ describe('buildPlan — diff against completed + installed VERSION', () => {
     expect(plan.pending).toEqual([]);
     expect(plan.partial).toEqual([]);
     expect(plan.skippedFuture).toEqual([]);
+  });
+});
+
+describe('selectMigrationsToRun', () => {
+  test('--migration force-runs an already completed orchestrator', () => {
+    const idx = indexCompleted([{ version: '0.32.2', status: 'complete' }]);
+    const plan = buildPlan(idx, '0.42.0', '0.32.2');
+
+    expect(selectMigrationsToRun(plan, true).map(m => m.version)).toEqual(['0.32.2']);
+    expect(selectMigrationsToRun(plan, false)).toEqual([]);
   });
 });
 

@@ -88,8 +88,8 @@ async function runCli(
 describe('apply-migrations on fresh PGLite (v0.36.1.x #1100)', () => {
   // ONE test, ONE brain, ONE end-to-end pass through the lifecycle. The
   // per-spawn cold-start on Ubuntu CI (~10-20s) is the dominant cost; we
-  // pay it 4 times here, not 8.
-  test('init --migrate-only → apply-migrations --yes → re-run → --list (all exit 0)', async () => {
+  // pay it 5 times here, not 8.
+  test('init → apply → re-run → force completed migration → list (all exit 0)', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-pglite-spawn-'));
     const shim = makeGbrainShim();
     try {
@@ -146,7 +146,17 @@ describe('apply-migrations on fresh PGLite (v0.36.1.x #1100)', () => {
       expect(second.exitCode).toBe(0);
       expect(second.stdout + second.stderr).toMatch(/All migrations up to date|up to date/);
 
-      // Step 4: --list exits 0 (third leg of the #1062 contract).
+      // Step 4: --migration force-runs an already completed orchestrator.
+      const forced = await runCli(
+        ['apply-migrations', '--migration', '0.32.2', '--yes', '--non-interactive'],
+        env,
+        90_000,
+      );
+      expect(forced.exitCode).toBe(0);
+      expect(forced.stdout + forced.stderr).toContain('Applying migration v0.32.2');
+      expect(forced.stdout + forced.stderr).not.toContain('All migrations up to date.');
+
+      // Step 5: --list exits 0 (third leg of the #1062 contract).
       const list = await runCli(['apply-migrations', '--list'], env, 60_000);
       expect(list.exitCode).toBe(0);
       expect(list.stdout + list.stderr).toMatch(/applied|pending|migration/i);

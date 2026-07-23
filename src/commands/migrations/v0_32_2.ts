@@ -8,7 +8,7 @@
  * to its entity page's `## Facts` fence, atomically + idempotently.
  *
  * Phases:
- *   A. Schema       — assert migration v51 has run.
+ *   A. Schema       — assert migrations v51 and v125 have run.
  *   B. Fence facts  — backfill DB facts → entity-page fences (dry-run
  *                     by default; explicit --write required).
  *   C. Verify       — re-parse each touched page, count rows, compare
@@ -23,9 +23,10 @@
  * the user can review the diff before committing.
  *
  * Facts with NULL entity_slug are structurally unfenceable (no page to
- * fence onto). They're skipped with a warning; the operator decides
- * whether to hand-curate or delete them. Their row_num stays NULL
- * forever; they live in the legacy keyspace permanently.
+ * fence onto), so the cycle guard excludes them. Facts whose source has
+ * no local_path are explicitly recorded as retained_db_only. Their DB
+ * rows remain intact and can be fenced by rerunning this orchestrator
+ * after the source gains a local_path.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
@@ -39,6 +40,11 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
 import { upsertFactRow, parseFactsFence } from '../../core/facts-fence.ts';
+import {
+  countPendingFactFenceBackfills,
+  markFactFenced,
+  retainFactDbOnly,
+} from '../../core/facts/fence-backfill-resolution.ts';
 
 let testEngineOverride: BrainEngine | null = null;
 export function __setTestEngineOverride(engine: BrainEngine | null): void {
@@ -72,14 +78,17 @@ async function phaseASchema(
   try {
     const versionStr = await engine.getConfig('version');
     const v = parseInt(versionStr || '0', 10);
-    if (v < 51) {
+    if (v < 125) {
       return {
         name: 'schema',
         status: 'failed',
-        detail: `expected schema version >= 51 (facts_fence_columns); got ${v}. Run \`gbrain apply-migrations --yes\` to apply.`,
+        detail:
+          `expected schema version >= 125 (facts_fence_backfill_resolutions); got ${v}. ` +
+          `Run \`gbrain init --migrate-only\`, then retry this migration.`,
       };
     }
-    // Quick post-condition: row_num + source_markdown_slug exist on facts.
+    // Post-condition: both the fence coordinates and the explicit-resolution
+    // table exist before the data phase starts.
     const rows = await engine.executeRaw<{ column_name: string }>(
       `SELECT column_name FROM information_schema.columns
        WHERE table_name = 'facts' AND column_name IN ('row_num', 'source_markdown_slug')`,
@@ -89,6 +98,21 @@ async function phaseASchema(
         name: 'schema',
         status: 'failed',
         detail: `expected columns row_num + source_markdown_slug on facts; found ${rows.map(r => r.column_name).join(', ') || 'none'}`,
+      };
+    }
+    const resolutionTable = await engine.executeRaw<{ table_name: string }>(
+      `SELECT table_name
+         FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_name = 'facts_fence_backfill_resolutions'`,
+    );
+    if (resolutionTable.length !== 1) {
+      return {
+        name: 'schema',
+        status: 'failed',
+        detail:
+          'expected facts_fence_backfill_resolutions table. ' +
+          'Run `gbrain init --migrate-only`, then retry this migration.',
       };
     }
     return { name: 'schema', status: 'complete' };
@@ -123,7 +147,7 @@ interface PhaseBOutcome {
   scanned: number;
   fenced: number;
   skipped_no_entity: number;
-  skipped_no_local_path: number;
+  retained_db_only: number;
   pages_touched: number;
   failed_pages: string[];
 }
@@ -156,18 +180,30 @@ async function phaseBFenceFacts(
     // Dry-run: report what WOULD happen without touching FS or DB.
     if (!engine) return { name: 'fence_facts', status: 'skipped', detail: 'no_brain_configured' };
     try {
-      const counts = await engine.executeRaw<{ n: string }>(
-        `SELECT COUNT(*) AS n FROM facts WHERE row_num IS NULL`,
+      const counts = await engine.executeRaw<{
+        total: string;
+        no_entity: string;
+        no_local_path: string;
+      }>(
+        `SELECT COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE f.entity_slug IS NULL) AS no_entity,
+                COUNT(*) FILTER (
+                  WHERE f.entity_slug IS NOT NULL
+                    AND NULLIF(BTRIM(s.local_path), '') IS NULL
+                ) AS no_local_path
+           FROM facts f
+           LEFT JOIN sources s ON s.id = f.source_id
+          WHERE f.row_num IS NULL`,
       );
-      const total = parseInt(counts[0]?.n ?? '0', 10);
-      const noEntity = await engine.executeRaw<{ n: string }>(
-        `SELECT COUNT(*) AS n FROM facts WHERE row_num IS NULL AND entity_slug IS NULL`,
-      );
-      const noEntityCount = parseInt(noEntity[0]?.n ?? '0', 10);
+      const total = parseInt(counts[0]?.total ?? '0', 10);
+      const noEntityCount = parseInt(counts[0]?.no_entity ?? '0', 10);
+      const noLocalPathCount = parseInt(counts[0]?.no_local_path ?? '0', 10);
       return {
         name: 'fence_facts',
         status: 'skipped',
-        detail: `dry-run: would fence ${total - noEntityCount} rows; ${noEntityCount} unfenceable (NULL entity_slug)`,
+        detail:
+          `dry-run: would fence ${total - noEntityCount - noLocalPathCount} rows; ` +
+          `retain ${noLocalPathCount} DB-only; ${noEntityCount} unfenceable (NULL entity_slug)`,
       };
     } catch (e) {
       return { name: 'fence_facts', status: 'failed', detail: e instanceof Error ? e.message : String(e) };
@@ -211,7 +247,7 @@ async function phaseBFenceFacts(
       scanned: legacy.length,
       fenced: 0,
       skipped_no_entity: 0,
-      skipped_no_local_path: 0,
+      retained_db_only: 0,
       pages_touched: 0,
       failed_pages: [],
     };
@@ -224,9 +260,14 @@ async function phaseBFenceFacts(
         outcome.skipped_no_entity += 1;
         continue;
       }
-      const localPath = localPathById.get(row.source_id);
+      const localPath = localPathById.get(row.source_id)?.trim();
       if (!localPath) {
-        outcome.skipped_no_local_path += 1;
+        await retainFactDbOnly(engine, {
+          id: row.id,
+          source_id: row.source_id,
+          entity_slug: row.entity_slug,
+        });
+        outcome.retained_db_only += 1;
         continue;
       }
       const key = `${row.source_id}\0${row.entity_slug}`;
@@ -317,13 +358,18 @@ async function phaseBFenceFacts(
         }
         renameSync(tmpPath, filePath);
 
-        // UPDATE the DB rows with their new row_nums + source_markdown_slug.
-        for (const a of assignments) {
-          await engine.executeRaw(
-            `UPDATE facts SET row_num = $1, source_markdown_slug = $2 WHERE id = $3`,
-            [a.row_num, entitySlug, a.id],
-          );
-        }
+        // Keep the fence coordinates and any prior DB-only resolution in one
+        // transaction so a failed status update cannot leave contradictory
+        // audit state for a successfully linked fact.
+        await engine.transaction(async tx => {
+          for (const a of assignments) {
+            await tx.executeRaw(
+              `UPDATE facts SET row_num = $1, source_markdown_slug = $2 WHERE id = $3`,
+              [a.row_num, entitySlug, a.id],
+            );
+            await markFactFenced(tx, a.id);
+          }
+        });
         outcome.fenced += assignments.length;
         outcome.pages_touched += 1;
       } catch (err) {
@@ -334,7 +380,7 @@ async function phaseBFenceFacts(
 
     const detail = `scanned=${outcome.scanned} fenced=${outcome.fenced} ` +
       `pages=${outcome.pages_touched} skipped_no_entity=${outcome.skipped_no_entity} ` +
-      `skipped_no_local_path=${outcome.skipped_no_local_path}` +
+      `retained_db_only=${outcome.retained_db_only}` +
       (outcome.failed_pages.length > 0 ? ` failed=${outcome.failed_pages.length}` : '');
 
     if (outcome.failed_pages.length > 0) {
@@ -360,6 +406,15 @@ async function phaseCVerify(
   if (!engine) return { name: 'verify', status: 'skipped', detail: 'no_brain_configured' };
 
   try {
+    const pending = await countPendingFactFenceBackfills(engine);
+    if (pending > 0) {
+      return {
+        name: 'verify',
+        status: 'failed',
+        detail: `${pending} legacy fact row(s) remain without a fence or explicit DB-only resolution`,
+      };
+    }
+
     // Per touched page (= any page with a fenced row in the DB), re-parse
     // the fence from disk and compare row counts to the DB.
     const sources = await engine.executeRaw<SourceLookup>(

@@ -5671,6 +5671,25 @@ export const MIGRATIONS: Migration[] = [
 `);
     },
   },
+  {
+    version: 125,
+    name: 'facts_fence_backfill_resolutions',
+    // Legacy facts from sources without a local markdown checkout cannot be
+    // fenced. Keep a durable per-fact resolution so the extract_facts guard
+    // releases only after an explicit remediation run has examined the row.
+    sql: `
+      CREATE TABLE IF NOT EXISTS facts_fence_backfill_resolutions (
+        fact_id       BIGINT      PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE,
+        source_id     TEXT        NOT NULL,
+        entity_slug   TEXT        NOT NULL,
+        resolution    TEXT        NOT NULL
+                      CHECK (resolution IN ('retained_db_only', 'fenced')),
+        reason        TEXT        NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

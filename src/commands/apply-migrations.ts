@@ -174,6 +174,16 @@ interface Plan {
 }
 
 /**
+ * Select orchestrators for execution. An explicit --migration request is a
+ * force-run surface, so it includes the matching completed migration.
+ */
+function selectMigrationsToRun(plan: Plan, forceSpecific: boolean): Migration[] {
+  return forceSpecific
+    ? [...plan.applied, ...plan.partial, ...plan.pending]
+    : [...plan.partial, ...plan.pending];
+}
+
+/**
  * Build the run plan.
  *
  * - applied:  has a `status: "complete"` entry for its version.
@@ -417,7 +427,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
   if (cli.list) { printList(plan, installed); process.exit(0); }
   if (cli.dryRun) { printDryRun(plan, installed); process.exit(0); }
 
-  const toRun: Migration[] = [...plan.partial, ...plan.pending];
+  const toRun = selectMigrationsToRun(plan, cli.specificMigration !== undefined);
   if (toRun.length === 0) {
     console.log('All migrations up to date.');
     process.exit(0);
@@ -503,4 +513,5 @@ export const __testing = {
   buildPlan,
   indexCompleted,
   statusForVersion,
+  selectMigrationsToRun,
 };

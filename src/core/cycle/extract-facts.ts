@@ -24,13 +24,11 @@
  * because deleteFactsForPage targets source_markdown_slug = slug only.
  *
  * Empty-fence guard (Codex R2-#7): the phase refuses to do its
- * destructive reconciliation pass when legacy rows (row_num IS NULL,
- * entity_slug IS NOT NULL) still exist in the brain — they're the
- * v0.31 hot-memory facts pending the v0_32_2 backfill. Status returns
- * `warn` with a hint to run `gbrain apply-migrations --yes`. Without
- * the guard, an interrupted upgrade where v0_32_2 hasn't run could
- * leave the cycle silently misreporting "0 facts on people/alice"
- * while legacy rows linger in the DB.
+ * destructive reconciliation pass when unresolved legacy rows (row_num
+ * IS NULL, entity_slug IS NOT NULL) still exist in the brain. Rows that
+ * the v0_32_2 remediation explicitly records as retained_db_only are
+ * preserved outside fence reconciliation and do not block the phase.
+ * Status returns `warn` with the exact force-rerun command.
  */
 
 import type { BrainEngine } from '../engine.ts';
@@ -49,6 +47,7 @@ import {
 } from './phantom-redirect.ts';
 import { embed, isAvailable } from '../ai/gateway.ts';
 import { isAborted } from '../abort-check.ts';
+import { countPendingFactFenceBackfills } from '../facts/fence-backfill-resolution.ts';
 
 interface ExistingPageFact {
   fact: string;
@@ -164,20 +163,17 @@ export async function runExtractFacts(
   };
 
   // ── Empty-fence guard (Codex R2-#7) ────────────────────────────
-  // Pre-check: if any legacy fact rows exist (row_num NULL but
-  // entity_slug NOT NULL), refuse to run the destructive
-  // reconciliation pass. The v0_32_2 orchestrator must complete
-  // first.
-  const legacy = await engine.executeRaw<{ n: string }>(
-    `SELECT COUNT(*) AS n FROM facts WHERE row_num IS NULL AND entity_slug IS NOT NULL`,
-  );
-  const legacyCount = parseInt(legacy[0]?.n ?? '0', 10);
+  // Pre-check: refuse the destructive reconciliation pass while any
+  // legacy fact lacks both a fence coordinate and an explicit DB-only
+  // resolution from the v0_32_2 orchestrator.
+  const legacyCount = await countPendingFactFenceBackfills(engine);
   result.legacyRowsPending = legacyCount;
   if (legacyCount > 0) {
     result.guardTriggered = true;
     result.warnings.push(
       `extract_facts: ${legacyCount} legacy v0.31 fact rows pending fence backfill. ` +
-      `Run \`gbrain apply-migrations --yes\` to complete v0_32_2 before this phase ` +
+      `Run \`gbrain apply-migrations --migration 0.32.2 --yes\` to remediate them ` +
+      `before this phase ` +
       `can safely reconcile fence → DB.`,
     );
     return result;

@@ -17,6 +17,7 @@ import { join } from 'node:path';
 
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { v0_32_2, __setTestEngineOverride, __testing } from '../src/commands/migrations/v0_32_2.ts';
+import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
 import { parseFactsFence } from '../src/core/facts-fence.ts';
 
 let engine: PGLiteEngine;
@@ -73,8 +74,8 @@ async function seedLegacyFact(input: {
 }
 
 describe('phaseASchema', () => {
-  test('passes when schema is at v51', async () => {
-    // initSchema ran v51, so the version config + columns are set.
+  test('passes when fence columns and the resolution table exist', async () => {
+    // initSchema ran the full schema chain, including v51 and v125.
     const r = await __testing.phaseASchema(engine, OPTS);
     expect(r.status).toBe('complete');
   });
@@ -222,7 +223,7 @@ describe('phaseBFenceFacts — happy path backfill', () => {
     expect(rows.rows[1]).toMatchObject({ entity_slug: null, row_num: null });
   });
 
-  test('skips when source has no local_path', async () => {
+  test('explicitly retains facts when source has no local_path and releases the cycle guard', async () => {
     // Wipe default source's local_path.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (engine as any).db.query(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
@@ -230,11 +231,60 @@ describe('phaseBFenceFacts — happy path backfill', () => {
 
     const r = await __testing.phaseBFenceFacts(engine, OPTS);
     expect(r.status).toBe('complete');
-    expect(r.detail).toContain('skipped_no_local_path=1');
+    expect(r.detail).toContain('retained_db_only=1');
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rows = await (engine as any).db.query('SELECT row_num FROM facts');
-    expect(rows.rows[0].row_num).toBeNull();
+    const rows = await (engine as any).db.query(
+      `SELECT f.fact, f.row_num, r.resolution, r.reason
+         FROM facts f
+         JOIN facts_fence_backfill_resolutions r ON r.fact_id = f.id`,
+    );
+    expect(rows.rows[0]).toMatchObject({
+      fact: 'Whatever',
+      row_num: null,
+      resolution: 'retained_db_only',
+      reason: 'source_local_path_unavailable',
+    });
+
+    const phase = await runExtractFacts(engine, { slugs: [] });
+    expect(phase.guardTriggered).toBe(false);
+    expect(phase.legacyRowsPending).toBe(0);
+
+    // The resolution unblocks reconciliation without deleting the DB-only fact.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const preserved = await (engine as any).db.query(`SELECT fact FROM facts`);
+    expect(preserved.rows).toEqual([expect.objectContaining({ fact: 'Whatever' })]);
+  });
+
+  test('later fences a retained DB-only fact when the source gains a local_path', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(`UPDATE sources SET local_path = NULL WHERE id = 'default'`);
+    await seedLegacyFact({ entity_slug: 'people/alice', fact: 'Recoverable' });
+    await __testing.phaseBFenceFacts(engine, OPTS);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (engine as any).db.query(
+      `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+      [brainDir],
+    );
+    const rerun = await __testing.phaseBFenceFacts(engine, OPTS);
+
+    expect(rerun.status).toBe('complete');
+    expect(rerun.detail).toContain('fenced=1');
+    expect(readFileSync(join(brainDir, 'people/alice.md'), 'utf-8')).toContain('Recoverable');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (engine as any).db.query(
+      `SELECT f.row_num, f.source_markdown_slug, r.resolution, r.reason
+         FROM facts f
+         JOIN facts_fence_backfill_resolutions r ON r.fact_id = f.id`,
+    );
+    expect(rows.rows[0]).toMatchObject({
+      row_num: 1,
+      source_markdown_slug: 'people/alice',
+      resolution: 'fenced',
+      reason: 'backfilled_to_fence',
+    });
   });
 });
 
