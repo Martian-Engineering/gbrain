@@ -16,6 +16,7 @@ export interface SlugAliasAuditEvent {
   source_id: string;
   alias_slug: string;
   canonical_slug?: string;
+  notes?: string;
   outcome: SlugAliasAuditOutcome;
   reason?: string;
 }

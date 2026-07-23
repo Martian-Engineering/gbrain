@@ -528,7 +528,7 @@ function printCliOnlyHelp(command: string) {
 
 function printAliasHelp() {
   console.log(`Usage:
-  gbrain alias add <old> <canonical> [--soft-delete-old] [--remove-file] [--replace] [--source ID]
+  gbrain alias add <old> <canonical> [--soft-delete-old] [--remove-file] [--replace] [--notes TEXT] [--source ID]
   gbrain alias remove <old> [--source ID]
 
 Manage source-scoped slug redirects. Removing a redirect does not restore a page.`);
@@ -2367,7 +2367,7 @@ LINKS
 
 SLUG ALIASES
   alias add <old> <canonical>        Add a source-scoped slug redirect
-        [--soft-delete-old] [--remove-file] [--replace] [--source ID]
+        [--soft-delete-old] [--remove-file] [--replace] [--notes TEXT] [--source ID]
   alias remove <old>                 Remove a redirect (does not restore pages)
         [--source ID]
 

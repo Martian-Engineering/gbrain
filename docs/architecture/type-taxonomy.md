@@ -179,6 +179,8 @@ insert or replacement. Active facts attached to that page move to the canonical
 slug in the same transaction. `--replace` is required to change an existing
 mapping; adding the same mapping again returns an idempotent success. PostgreSQL
 and PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
+Optional `--notes` provenance is stored on insert or explicit replacement,
+returned by the operation, and included in its audit record.
 
 `alias remove` is source-scoped and idempotent. It removes only the redirect;
 page restoration remains an explicit `restore_page` operation. If a

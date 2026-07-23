@@ -99,6 +99,7 @@ describe('slug-alias operation registration', () => {
     expect(operationsByName.add_slug_alias.params).toHaveProperty('soft_delete_old');
     expect(operationsByName.add_slug_alias.params).toHaveProperty('remove_file');
     expect(operationsByName.add_slug_alias.params).toHaveProperty('replace');
+    expect(operationsByName.add_slug_alias.params).toHaveProperty('notes');
   });
 });
 
@@ -232,9 +233,13 @@ describe('addSlugAlias on PGLite', () => {
   test('replacement is gated and explicit replacement changes the resolver', async () => {
     await seedPage('canonical-a');
     await seedPage('canonical-b');
-    await addSlugAlias(engine, {
-      sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical-a',
+    const added = await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical-a',
+      notes: 'initial provenance',
     });
+    expect(added.notes).toBe('initial provenance');
     await expect(addSlugAlias(engine, {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical-b',
     })).rejects.toMatchObject({ code: 'alias_replacement_required' });
@@ -245,9 +250,16 @@ describe('addSlugAlias on PGLite', () => {
       aliasSlug: 'old',
       canonicalSlug: 'canonical-b',
       replace: true,
+      notes: 'replacement provenance',
     });
     expect(replaced.status).toBe('replaced');
+    expect(replaced.notes).toBe('replacement provenance');
     expect(await engine.resolveSlugWithAlias('old', 'default')).toBe('canonical-b');
+    const rows = await engine.executeRaw<{ notes: string | null }>(
+      `SELECT notes FROM slug_aliases
+        WHERE source_id = 'default' AND alias_slug = 'old'`,
+    );
+    expect(rows[0]?.notes).toBe('replacement provenance');
   });
 
   test('rejects a multi-hop cycle', async () => {
@@ -493,6 +505,7 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
           alias_slug: 'notes/old',
           canonical_slug: 'notes/canonical',
           soft_delete_old: true,
+          notes: 'merged duplicate note',
         }) as { facts_migrated: number; file_removed: boolean; warnings: string[] };
         expect(result.facts_migrated).toBe(0);
         expect(result.file_removed).toBe(false);
@@ -508,6 +521,7 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
           source_id: 'default',
           alias_slug: 'notes/old',
           canonical_slug: 'notes/canonical',
+          notes: 'merged duplicate note',
           outcome: 'added',
         });
       });

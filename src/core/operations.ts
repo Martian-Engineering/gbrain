@@ -1445,6 +1445,7 @@ const add_slug_alias: Operation = {
     soft_delete_old: { type: 'boolean', description: 'Atomically soft-delete an active page at alias_slug before creating the redirect' },
     remove_file: { type: 'boolean', description: 'Trusted local callers only: after commit, remove the old page source file when soft_delete_old removed it' },
     replace: { type: 'boolean', description: 'Allow replacing an existing alias mapping' },
+    notes: { type: 'string', description: 'Operator provenance for this alias mapping' },
     source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
     source: { type: 'string', description: 'CLI spelling of source_id (--source)' },
   },
@@ -1470,6 +1471,7 @@ const add_slug_alias: Operation = {
         canonicalSlug,
         softDeleteOld: p.soft_delete_old === true,
         replace: p.replace === true,
+        notes: p.notes as string | undefined,
       });
 
       const cache = result.status === 'unchanged' && !result.soft_deleted_old
@@ -1494,6 +1496,7 @@ const add_slug_alias: Operation = {
         source_id: sourceId,
         alias_slug: aliasSlug,
         canonical_slug: canonicalSlug,
+        notes: result.notes ?? undefined,
         outcome: result.status,
       });
       const { old_source_path: _oldSourcePath, ...publicResult } = result;
@@ -1510,6 +1513,7 @@ const add_slug_alias: Operation = {
         source_id: sourceId,
         alias_slug: aliasSlug,
         canonical_slug: canonicalSlug,
+        notes: p.notes as string | undefined,
         outcome: 'failure',
         reason: error instanceof SlugAliasError || error instanceof OperationError
           ? error.code

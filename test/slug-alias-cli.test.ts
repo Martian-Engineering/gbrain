@@ -34,6 +34,7 @@ describe('gbrain alias CLI', () => {
     expect(result.stdout).toContain('--soft-delete-old');
     expect(result.stdout).toContain('--remove-file');
     expect(result.stdout).toContain('--replace');
+    expect(result.stdout).toContain('--notes');
   });
 
   test('subcommand help renders shared-operation flags and positionals', async () => {
@@ -43,6 +44,7 @@ describe('gbrain alias CLI', () => {
     expect(add.stdout).toContain('--soft-delete-old');
     expect(add.stdout).toContain('--remove-file');
     expect(add.stdout).toContain('--replace');
+    expect(add.stdout).toContain('--notes');
 
     const remove = await runCli(['alias', 'remove', '--help']);
     expect(remove.exitCode).toBe(0);
@@ -52,13 +54,14 @@ describe('gbrain alias CLI', () => {
   test('argument parsing maps the requested CLI flags to operation params', () => {
     expect(parseOpArgs(operationsByName.add_slug_alias, [
       'old', 'canonical', '--soft-delete-old', '--remove-file', '--replace',
-      '--source', 'source-a',
+      '--notes', 'merged duplicate', '--source', 'source-a',
     ])).toEqual({
       alias_slug: 'old',
       canonical_slug: 'canonical',
       soft_delete_old: true,
       remove_file: true,
       replace: true,
+      notes: 'merged duplicate',
       source: 'source-a',
     });
     expect(parseOpArgs(operationsByName.remove_slug_alias, ['old', '--source', 'source-a'])).toEqual({

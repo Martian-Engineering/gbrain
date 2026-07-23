@@ -30,6 +30,7 @@ export interface AddSlugAliasOpts {
   canonicalSlug: string;
   softDeleteOld?: boolean;
   replace?: boolean;
+  notes?: string;
 }
 
 export interface AddSlugAliasResult {
@@ -39,6 +40,7 @@ export interface AddSlugAliasResult {
   canonical_slug: string;
   soft_deleted_old: boolean;
   facts_migrated: number;
+  notes: string | null;
   old_source_path: string | null;
 }
 
@@ -142,8 +144,11 @@ export async function addSlugAlias(
       );
     }
 
-    const existing = await tx.executeRaw<{ canonical_slug: string }>(
-      `SELECT canonical_slug FROM slug_aliases
+    const existing = await tx.executeRaw<{
+      canonical_slug: string;
+      notes: string | null;
+    }>(
+      `SELECT canonical_slug, notes FROM slug_aliases
         WHERE source_id = $1 AND alias_slug = $2
         LIMIT 1`,
       [sourceId, aliasSlug],
@@ -192,6 +197,7 @@ export async function addSlugAlias(
         canonical_slug: canonicalSlug,
         soft_deleted_old: softDeletedOld,
         facts_migrated: factsMigrated,
+        notes: existing[0]?.notes ?? null,
         old_source_path: oldPages[0]?.source_path ?? null,
       };
     }
@@ -220,17 +226,18 @@ export async function addSlugAlias(
     if (status === 'replaced') {
       const updated = await tx.executeRaw<{ id: number }>(
         `UPDATE slug_aliases
-            SET canonical_slug = $3
+            SET canonical_slug = $3,
+                notes = $4
           WHERE source_id = $1 AND alias_slug = $2
           RETURNING id`,
-        [sourceId, aliasSlug, canonicalSlug],
+        [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
       );
       if (updated.length !== 1) throw new Error(`Alias '${aliasSlug}' changed during replacement.`);
     } else {
       await tx.executeRaw(
-        `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug)
-         VALUES ($1, $2, $3)`,
-        [sourceId, aliasSlug, canonicalSlug],
+        `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug, notes)
+         VALUES ($1, $2, $3, $4)`,
+        [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
       );
     }
 
@@ -241,6 +248,7 @@ export async function addSlugAlias(
       canonical_slug: canonicalSlug,
       soft_deleted_old: softDeletedOld,
       facts_migrated: factsMigrated,
+      notes: opts.notes ?? null,
       old_source_path: oldPages[0]?.source_path ?? null,
     };
   });
