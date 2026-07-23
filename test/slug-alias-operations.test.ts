@@ -89,7 +89,7 @@ async function withAuditDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 describe('slug-alias operation registration', () => {
-  test('both operations are normal remote-capable write operations', () => {
+  test('alias operations are remote-capable with their expected scopes', () => {
     for (const name of ['add_slug_alias', 'remove_slug_alias']) {
       const op = operationsByName[name];
       expect(op).toBeDefined();
@@ -100,6 +100,9 @@ describe('slug-alias operation registration', () => {
     expect(operationsByName.add_slug_alias.params).toHaveProperty('remove_file');
     expect(operationsByName.add_slug_alias.params).toHaveProperty('replace');
     expect(operationsByName.add_slug_alias.params).toHaveProperty('notes');
+    expect(operationsByName.list_slug_aliases).toBeDefined();
+    expect(operationsByName.list_slug_aliases.scope).toBe('read');
+    expect(operationsByName.list_slug_aliases.localOnly).not.toBe(true);
   });
 });
 
@@ -381,6 +384,95 @@ describe('source isolation and removal', () => {
     expect(await engine.resolveSlugWithAlias('old', 'other')).toBe('canonical');
     const deleted = await engine.getPage('old', { sourceId: 'default', includeDeleted: true });
     expect(deleted?.deleted_at).not.toBeNull();
+  });
+});
+
+describe('list_slug_aliases read operation', () => {
+  beforeEach(async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name)
+       VALUES ('other', 'other') ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO slug_aliases (
+         source_id, alias_slug, canonical_slug, notes
+       ) VALUES
+         ('default', 'old-a', 'canonical-a', 'default a'),
+         ('default', 'old-b', 'canonical-b', 'default b'),
+         ('other', 'old-a', 'canonical-a', 'other a')`,
+    );
+  });
+
+  test('filters aliases within a scalar source scope', async () => {
+    const byCanonical = await operationsByName.list_slug_aliases.handler(ctx(), {
+      canonical_slug: 'canonical-a',
+    }) as {
+      schema_version: number;
+      count: number;
+      aliases: Array<Record<string, unknown>>;
+    };
+    expect(byCanonical.schema_version).toBe(1);
+    expect(byCanonical.count).toBe(1);
+    expect(byCanonical.aliases[0]).toMatchObject({
+      alias_slug: 'old-a',
+      canonical_slug: 'canonical-a',
+      notes: 'default a',
+      source_id: 'default',
+    });
+    expect(byCanonical.aliases[0]?.created_at).toBeDefined();
+
+    const byAlias = await operationsByName.list_slug_aliases.handler(ctx(), {
+      alias_slug: 'old-b',
+      limit: 0,
+    }) as { count: number; aliases: Array<{ alias_slug: string }> };
+    expect(byAlias.count).toBe(1);
+    expect(byAlias.aliases[0]?.alias_slug).toBe('old-b');
+  });
+
+  test('supports federated and trusted-local unscoped reads', async () => {
+    const auth = {
+      token: 't',
+      clientId: 'client',
+      scopes: ['read'],
+      sourceId: 'default',
+      allowedSources: ['default', 'other'],
+    };
+    const federated = await operationsByName.list_slug_aliases.handler(
+      ctx('default', true, auth),
+      { alias_slug: 'old-a' },
+    ) as { count: number; aliases: Array<{ source_id: string }> };
+    expect(federated.count).toBe(2);
+    expect(federated.aliases.map((row) => row.source_id)).toEqual(['default', 'other']);
+
+    const localUnscoped = await operationsByName.list_slug_aliases.handler(
+      { ...ctx(), sourceId: '' },
+      { limit: 2 },
+    ) as { count: number };
+    expect(localUnscoped.count).toBe(2);
+  });
+
+  test('fails soft when slug_aliases is unavailable on a pre-migration brain', async () => {
+    const originalExecuteRaw = engine.executeRaw;
+    engine.executeRaw = async <T = Record<string, unknown>>(
+      sql: string,
+      params?: unknown[],
+    ): Promise<T[]> => {
+      if (/FROM slug_aliases/.test(sql)) {
+        throw Object.assign(new Error('relation "slug_aliases" does not exist'), {
+          code: '42P01',
+        });
+      }
+      return originalExecuteRaw.call(engine, sql, params) as Promise<T[]>;
+    };
+    try {
+      await expect(operationsByName.list_slug_aliases.handler(ctx(), {})).resolves.toEqual({
+        schema_version: 1,
+        count: 0,
+        aliases: [],
+      });
+    } finally {
+      engine.executeRaw = originalExecuteRaw;
+    }
   });
 });
 

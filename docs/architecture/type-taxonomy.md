@@ -166,8 +166,9 @@ gbrain alias add <old> <canonical> --replace
 gbrain alias remove <old>
 ```
 
-The corresponding MCP operations are `add_slug_alias` and
-`remove_slug_alias`. They require the normal `write` scope. An authenticated
+The corresponding MCP operations are `add_slug_alias`, `remove_slug_alias`, and
+`list_slug_aliases`. The mutations require the normal `write` scope; listing
+requires `read` and follows scalar or federated source grants. An authenticated
 remote caller writes only to its OAuth-assigned source; federated read grants
 do not grant write access to the other sources in that array. Local CLI callers
 can select a source with `--source <id>`.
@@ -218,7 +219,7 @@ invalidate pre-v0.42 cache rows that don't reflect the new stage.
 - Pack-upgrade mechanism: `docs/architecture/pack-upgrade-mechanism.md`
 - Migration handler: `src/core/schema-pack/unify-types-handler.ts`
 - Supported mutation primitive: `src/core/slug-alias.ts`
-- Shared operations: `add_slug_alias`, `remove_slug_alias`
+- Shared operations: `add_slug_alias`, `remove_slug_alias`, `list_slug_aliases`
 - Onboard checks: `src/core/onboard/checks.ts`
 - Skill: `skills/schema-unify/SKILL.md`
 - Plan + decisions: `~/.claude/plans/system-instruction-you-are-working-transient-elephant.md`

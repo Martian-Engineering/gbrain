@@ -75,6 +75,7 @@ describe('gbrain alias CLI', () => {
     expect(result.exitCode).toBe(0);
     const names = (JSON.parse(result.stdout) as Array<{ name: string }>).map((tool) => tool.name);
     expect(names).toContain('add_slug_alias');
+    expect(names).toContain('list_slug_aliases');
     expect(names).toContain('remove_slug_alias');
     expect(names).not.toContain('rename_page');
   });

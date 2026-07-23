@@ -30,6 +30,7 @@ import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
+import { isUndefinedTableError } from './utils.ts';
 import {
   addSlugAlias,
   removeSyncedSourceFile,
@@ -1575,6 +1576,72 @@ const remove_slug_alias: Operation = {
     }
   },
   cliHints: { hidden: true, positional: ['alias_slug'] },
+};
+
+const list_slug_aliases: Operation = {
+  name: 'list_slug_aliases',
+  description: 'List source-scoped slug redirects with optional exact alias or canonical filters.',
+  params: {
+    canonical_slug: { type: 'string', description: 'Return aliases targeting this canonical slug' },
+    alias_slug: { type: 'string', description: 'Return the exact alias slug' },
+    limit: { type: 'number', description: 'Maximum aliases to return (default 100, max 1000)' },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    // Keep the caller-controlled LIMIT a literal only after numeric clamping;
+    // all filters remain bound parameters for both engines.
+    const requestedLimit = p.limit as number | undefined;
+    const limit = requestedLimit === undefined || !Number.isFinite(requestedLimit)
+      ? 100
+      : Math.max(1, Math.min(1000, Math.floor(requestedLimit)));
+    const scope = sourceScopeOpts(ctx);
+    const where: string[] = [];
+    const params: unknown[] = [];
+
+    // Preserve the shared read-scope precedence: federated grant, then scalar
+    // source, then the trusted-local unscoped form.
+    if (scope.sourceIds && scope.sourceIds.length > 0) {
+      params.push(scope.sourceIds);
+      where.push(`source_id = ANY($${params.length}::text[])`);
+    } else if (scope.sourceId) {
+      params.push(scope.sourceId);
+      where.push(`source_id = $${params.length}`);
+    }
+    if (typeof p.canonical_slug === 'string') {
+      params.push(p.canonical_slug);
+      where.push(`canonical_slug = $${params.length}`);
+    }
+    if (typeof p.alias_slug === 'string') {
+      params.push(p.alias_slug);
+      where.push(`alias_slug = $${params.length}`);
+    }
+
+    try {
+      // Migration 105 created notes and created_at with the table, so selecting
+      // both is safe whenever the table exists.
+      const rows = await ctx.engine.executeRaw<{
+        alias_slug: string;
+        canonical_slug: string;
+        notes: string | null;
+        source_id: string;
+        created_at: string | Date;
+      }>(
+        `SELECT alias_slug, canonical_slug, notes, source_id, created_at
+           FROM slug_aliases
+           ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+          ORDER BY source_id, alias_slug
+          LIMIT ${limit}`,
+        params,
+      );
+      return { schema_version: 1, count: rows.length, aliases: rows };
+    } catch (error) {
+      if (isUndefinedTableError(error)) {
+        return { schema_version: 1, count: 0, aliases: [] };
+      }
+      throw error;
+    }
+  },
+  cliHints: { hidden: true },
 };
 
 const restore_page: Operation = {
@@ -5610,7 +5677,7 @@ export const operations: Operation[] = [
   // Page CRUD
   get_page, validate_links, put_page, delete_page, list_pages,
   // Source-scoped slug redirects
-  add_slug_alias, remove_slug_alias,
+  add_slug_alias, remove_slug_alias, list_slug_aliases,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)
   restore_page, purge_deleted_pages,
   // Search
