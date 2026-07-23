@@ -184,7 +184,12 @@ and PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
 page restoration remains an explicit `restore_page` operation. If a
 soft-deleted page came from a file that still exists beneath the source's
 registered `local_path`, `alias add` warns that a later sync can recreate the
-page. The alias command never edits the file or Git history.
+page. `alias add --remove-file` instead removes that confined source file after
+the database transaction commits and best-effort commits the deletion when the
+source repository has hardened Git durability. The next sync's Git-diff
+deletion sweep hard-deletes the tombstone, collapsing the 72-hour restore
+window. Before that sync, undo by removing the alias and restoring the page;
+afterward, restore the file through Git.
 
 Alias changes clear `query_cache` rows for the affected source because the
 `alias_resolved_boost` search stage reads `slug_aliases`. Other caches are not

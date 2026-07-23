@@ -32,6 +32,7 @@ import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
 import {
   addSlugAlias,
+  removeSyncedSourceFile,
   removeSlugAlias,
   SlugAliasError,
   syncedFileWarning,
@@ -1437,11 +1438,12 @@ function requestedAliasSource(p: Record<string, unknown>): string | undefined {
 
 const add_slug_alias: Operation = {
   name: 'add_slug_alias',
-  description: 'Add a source-scoped old-slug to canonical-slug redirect. The canonical page must be active. Existing mappings and active old pages require explicit flags.',
+  description: 'Add a source-scoped old-slug to canonical-slug redirect. The canonical page must be active. Existing mappings and active old pages require explicit flags. For trusted local callers, remove_file deletes the merged page source file after commit; the next sync hard-deletes its tombstone and collapses the 72h restore window. Before then, undo with remove_slug_alias plus restore_page; afterward restore the file through Git.',
   params: {
     alias_slug: { type: 'string', required: true, description: 'Old slug that should redirect' },
     canonical_slug: { type: 'string', required: true, description: 'Existing active canonical page slug' },
     soft_delete_old: { type: 'boolean', description: 'Atomically soft-delete an active page at alias_slug before creating the redirect' },
+    remove_file: { type: 'boolean', description: 'Trusted local callers only: after commit, remove the old page source file when soft_delete_old removed it' },
     replace: { type: 'boolean', description: 'Allow replacing an existing alias mapping' },
     source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
     source: { type: 'string', description: 'CLI spelling of source_id (--source)' },
@@ -1456,6 +1458,12 @@ const add_slug_alias: Operation = {
       sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
       validatePageSlug(aliasSlug);
       validatePageSlug(canonicalSlug);
+      if (p.remove_file === true && ctx.remote !== false) {
+        throw new OperationError(
+          'permission_denied',
+          'remove_file is available only to trusted local callers.',
+        );
+      }
       const result = await addSlugAlias(ctx.engine, {
         sourceId,
         aliasSlug,
@@ -1467,7 +1475,17 @@ const add_slug_alias: Operation = {
       const cache = result.status === 'unchanged' && !result.soft_deleted_old
         ? { rows_invalidated: 0 }
         : await invalidateQueryCache(ctx.engine, sourceId);
-      const warning = result.soft_deleted_old
+      const fileRemoval = p.remove_file === true
+        && result.soft_deleted_old
+        && result.old_source_path
+        ? await removeSyncedSourceFile(
+          ctx.engine,
+          sourceId,
+          result.old_source_path,
+          aliasSlug,
+        )
+        : { file_removed: false };
+      const warning = result.soft_deleted_old && !fileRemoval.file_removed
         ? await syncedFileWarning(ctx.engine, sourceId, result.old_source_path).catch(() => null)
         : null;
       logSlugAliasAudit({
@@ -1481,6 +1499,7 @@ const add_slug_alias: Operation = {
       const { old_source_path: _oldSourcePath, ...publicResult } = result;
       return {
         ...publicResult,
+        ...fileRemoval,
         cache_rows_invalidated: cache.rows_invalidated,
         warnings: warning ? [warning] : [],
       };

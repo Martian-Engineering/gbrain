@@ -6,7 +6,14 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -90,6 +97,7 @@ describe('slug-alias operation registration', () => {
       expect(op.localOnly).not.toBe(true);
     }
     expect(operationsByName.add_slug_alias.params).toHaveProperty('soft_delete_old');
+    expect(operationsByName.add_slug_alias.params).toHaveProperty('remove_file');
     expect(operationsByName.add_slug_alias.params).toHaveProperty('replace');
   });
 });
@@ -401,6 +409,42 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     });
   });
 
+  test('remote callers cannot remove host source files', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remote-source-'));
+    const sourceFile = join(repo, 'old.md');
+    try {
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('old', 'default', 'old.md');
+      await seedPage('canonical');
+      const auth = {
+        token: 't',
+        clientId: 'client',
+        scopes: ['write'],
+        sourceId: 'default',
+      };
+
+      await withAuditDir(async () => {
+        await expect(operationsByName.add_slug_alias.handler(
+          ctx('default', true, auth),
+          {
+            alias_slug: 'old',
+            canonical_slug: 'canonical',
+            soft_delete_old: true,
+            remove_file: true,
+          },
+        )).rejects.toMatchObject({ code: 'permission_denied' });
+      });
+      expect(readFileSync(sourceFile, 'utf8')).toBe('# old\n');
+      expect((await engine.getPage('old', { sourceId: 'default' }))?.deleted_at).toBeNull();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   test('invalidates only the affected source query cache after a real change', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name) VALUES ('other', 'other') ON CONFLICT (id) DO NOTHING`,
@@ -449,8 +493,9 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
           alias_slug: 'notes/old',
           canonical_slug: 'notes/canonical',
           soft_delete_old: true,
-        }) as { facts_migrated: number; warnings: string[] };
+        }) as { facts_migrated: number; file_removed: boolean; warnings: string[] };
         expect(result.facts_migrated).toBe(0);
+        expect(result.file_removed).toBe(false);
         expect(result.warnings).toHaveLength(1);
         expect(result.warnings[0]).toContain('future sync can recreate');
         expect(result.warnings[0]).toContain('Git was not modified');
@@ -469,6 +514,73 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
       rmSync(audit, { recursive: true, force: true });
+    }
+  });
+
+  test('removes a confined source file when explicitly requested', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remove-source-'));
+    try {
+      mkdirSync(join(repo, 'notes'), { recursive: true });
+      const sourceFile = join(repo, 'notes', 'old.md');
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('notes/old', 'default', 'notes/old.md');
+      await seedPage('notes/canonical');
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          soft_delete_old: true,
+          remove_file: true,
+        }) as {
+          file_removed: boolean;
+          file_remove_error?: string;
+          warnings: string[];
+        };
+        expect(result.file_removed).toBe(true);
+        expect(result.file_remove_error).toBeUndefined();
+        expect(result.warnings).toEqual([]);
+        expect(existsSync(sourceFile)).toBe(false);
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses to remove a source path that escapes the source root', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-escape-source-'));
+    const repo = join(parent, 'repo');
+    const outsideFile = join(parent, 'outside.md');
+    try {
+      mkdirSync(repo);
+      writeFileSync(outsideFile, '# outside\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('old', 'default', '../outside.md');
+      await seedPage('canonical');
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'old',
+          canonical_slug: 'canonical',
+          soft_delete_old: true,
+          remove_file: true,
+        }) as {
+          file_removed: boolean;
+          file_remove_error?: string;
+        };
+        expect(result.file_removed).toBe(false);
+        expect(result.file_remove_error).toContain('escapes');
+        expect(readFileSync(outsideFile, 'utf8')).toBe('# outside\n');
+      });
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 

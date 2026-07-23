@@ -1,6 +1,11 @@
 import type { BrainEngine } from './engine.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
+import { isPathContained } from './path-confine.ts';
+import {
+  commitWriteThroughFile,
+  isDurabilityHardened,
+} from './brain-repo-durability.ts';
 
 export type SlugAliasErrorCode =
   | 'canonical_not_found'
@@ -41,6 +46,11 @@ export interface RemoveSlugAliasResult {
   status: 'removed' | 'not_found';
   source_id: string;
   alias_slug: string;
+}
+
+export interface RemoveSyncedSourceFileResult {
+  file_removed: boolean;
+  file_remove_error?: string;
 }
 
 export async function activePageExists(
@@ -255,6 +265,75 @@ export async function removeSlugAlias(
   };
 }
 
+/** Resolve the registered source root, including the legacy default fallback. */
+async function resolveSourceRoot(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<string | null> {
+  const sources = await engine.executeRaw<{ local_path: string | null }>(
+    `SELECT local_path FROM sources WHERE id = $1 LIMIT 1`,
+    [sourceId],
+  );
+  let localPath = sources[0]?.local_path;
+  // Pre-v0.18 default-source brains keep the synced repo in the legacy
+  // config key. Other sources cannot safely inherit that global path.
+  if (!localPath && sourceId === 'default') {
+    localPath = await engine.getConfig('sync.repo_path');
+  }
+  return localPath ? resolve(localPath) : null;
+}
+
+/**
+ * Remove one source-owned file after the alias transaction has committed.
+ * File handling is fail-soft and path-confined; a Git durability commit is
+ * best-effort and never changes the removal result.
+ */
+export async function removeSyncedSourceFile(
+  engine: BrainEngine,
+  sourceId: string,
+  sourcePath: string,
+  aliasSlug: string,
+): Promise<RemoveSyncedSourceFileResult> {
+  try {
+    const root = await resolveSourceRoot(engine, sourceId);
+    if (!root) {
+      return {
+        file_removed: false,
+        file_remove_error: `Source '${sourceId}' has no registered local path.`,
+      };
+    }
+
+    const file = resolve(root, sourcePath);
+    const rel = relative(root, file);
+    if (rel === '..' || rel.startsWith(`..${sep}`)) {
+      return {
+        file_removed: false,
+        file_remove_error: `Source path '${sourcePath}' escapes source root '${root}'.`,
+      };
+    }
+    if (!isPathContained(file, root)) {
+      return {
+        file_removed: false,
+        file_remove_error: `Source file '${sourcePath}' is missing or escapes source root '${root}'.`,
+      };
+    }
+
+    unlinkSync(file);
+    // The path-limited durability helper uses `git add -- <path>`, which
+    // stages removals as well as writes. Commit failure is intentionally
+    // fail-soft; host-level durability timers remain the fallback.
+    if (isDurabilityHardened(root)) {
+      commitWriteThroughFile(root, file, aliasSlug);
+    }
+    return { file_removed: true };
+  } catch (error) {
+    return {
+      file_removed: false,
+      file_remove_error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 /**
  * Return an operator warning when sync still owns an on-disk file for a page
  * that the alias operation soft-deleted. This is read-only: Git and the source
@@ -266,20 +345,9 @@ export async function syncedFileWarning(
   sourcePath: string | null,
 ): Promise<string | null> {
   if (!sourcePath) return null;
-  const sources = await engine.executeRaw<{ local_path: string | null }>(
-    `SELECT local_path FROM sources WHERE id = $1 LIMIT 1`,
-    [sourceId],
-  );
-  let localPath = sources[0]?.local_path;
-  // Pre-v0.18 default-source brains keep the synced repo in the legacy
-  // config key. Non-default sources must never fall through to that global
-  // path because it can belong to a different source.
-  if (!localPath && sourceId === 'default') {
-    localPath = await engine.getConfig('sync.repo_path');
-  }
-  if (!localPath) return null;
+  const root = await resolveSourceRoot(engine, sourceId);
+  if (!root) return null;
 
-  const root = resolve(localPath);
   const file = resolve(root, sourcePath);
   const rel = relative(root, file);
   if (rel === '..' || rel.startsWith(`..${sep}`) || !existsSync(file)) return null;

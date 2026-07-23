@@ -32,6 +32,7 @@ describe('gbrain alias CLI', () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain('gbrain alias add <old> <canonical>');
     expect(result.stdout).toContain('--soft-delete-old');
+    expect(result.stdout).toContain('--remove-file');
     expect(result.stdout).toContain('--replace');
   });
 
@@ -40,6 +41,7 @@ describe('gbrain alias CLI', () => {
     expect(add.exitCode).toBe(0);
     expect(add.stdout).toContain('Usage: gbrain alias add <alias_slug> <canonical_slug>');
     expect(add.stdout).toContain('--soft-delete-old');
+    expect(add.stdout).toContain('--remove-file');
     expect(add.stdout).toContain('--replace');
 
     const remove = await runCli(['alias', 'remove', '--help']);
@@ -49,11 +51,13 @@ describe('gbrain alias CLI', () => {
 
   test('argument parsing maps the requested CLI flags to operation params', () => {
     expect(parseOpArgs(operationsByName.add_slug_alias, [
-      'old', 'canonical', '--soft-delete-old', '--replace', '--source', 'source-a',
+      'old', 'canonical', '--soft-delete-old', '--remove-file', '--replace',
+      '--source', 'source-a',
     ])).toEqual({
       alias_slug: 'old',
       canonical_slug: 'canonical',
       soft_delete_old: true,
+      remove_file: true,
       replace: true,
       source: 'source-a',
     });
