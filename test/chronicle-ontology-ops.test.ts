@@ -21,6 +21,30 @@ afterAll(async () => { await engine.disconnect(); });
 beforeEach(async () => { await engine.executeRaw('DELETE FROM facts'); });
 
 describe('ontology ops', () => {
+  test('ontology_propose dry run returns a preview without writing a fact', async () => {
+    const result = await operationsByName.ontology_propose.handler(
+      { ...ctx(false), dryRun: true },
+      {
+        entity: SARAH,
+        dimension: 'role',
+        value: 'advisor',
+        source: 'meetings/a',
+      },
+    );
+    expect(result).toEqual({
+      dry_run: true,
+      action: 'ontology_propose',
+      entity: SARAH,
+      dimension: 'role',
+      value: 'advisor',
+    });
+
+    const rows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM facts`,
+    );
+    expect(rows[0]?.n).toBe(0);
+  });
+
   test('ontology_propose writes; ontology_get reads back', async () => {
     const r = await operationsByName.ontology_propose.handler(ctx(false), {
       entity: SARAH, dimension: 'role', value: 'advisor', source: 'meetings/a',

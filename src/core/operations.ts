@@ -1493,6 +1493,14 @@ const add_slug_alias: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    if (ctx.dryRun) {
+      return {
+        dry_run: true,
+        action: 'add_slug_alias',
+        alias_slug: p.alias_slug,
+        canonical_slug: p.canonical_slug,
+      };
+    }
     const aliasSlug = p.alias_slug as string;
     const canonicalSlug = p.canonical_slug as string;
     let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
@@ -1584,6 +1592,13 @@ const remove_slug_alias: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    if (ctx.dryRun) {
+      return {
+        dry_run: true,
+        action: 'remove_slug_alias',
+        alias_slug: p.alias_slug,
+      };
+    }
     const aliasSlug = p.alias_slug as string;
     let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
     try {
@@ -5719,6 +5734,15 @@ const ontology_propose: Operation = {
     visibility: { type: 'string', enum: ['private', 'world'], description: 'Default private.' },
   },
   handler: async (ctx, p) => {
+    if (ctx.dryRun) {
+      return {
+        dry_run: true,
+        action: 'ontology_propose',
+        entity: p.entity,
+        dimension: p.dimension,
+        value: p.value,
+      };
+    }
     return ctx.engine.mergeOntologyFact({
       entitySlug: String(p.entity),
       dimension: String(p.dimension),

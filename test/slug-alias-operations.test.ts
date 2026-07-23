@@ -107,6 +107,57 @@ describe('slug-alias operation registration', () => {
   });
 });
 
+describe('slug-alias operation dry runs', () => {
+  test('add_slug_alias returns a preview without inserting an alias', async () => {
+    await seedPage('canonical');
+
+    await withAuditDir(async () => {
+      const result = await operationsByName.add_slug_alias.handler(
+        { ...ctx(), dryRun: true },
+        { alias_slug: 'old', canonical_slug: 'canonical' },
+      );
+      expect(result).toEqual({
+        dry_run: true,
+        action: 'add_slug_alias',
+        alias_slug: 'old',
+        canonical_slug: 'canonical',
+      });
+    });
+
+    const rows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM slug_aliases`,
+    );
+    expect(rows[0]?.n).toBe(0);
+  });
+
+  test('remove_slug_alias returns a preview without removing an alias', async () => {
+    await seedPage('canonical');
+    await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical',
+    });
+
+    await withAuditDir(async () => {
+      const result = await operationsByName.remove_slug_alias.handler(
+        { ...ctx(), dryRun: true },
+        { alias_slug: 'old' },
+      );
+      expect(result).toEqual({
+        dry_run: true,
+        action: 'remove_slug_alias',
+        alias_slug: 'old',
+      });
+    });
+
+    const rows = await engine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM slug_aliases
+       WHERE source_id = 'default' AND alias_slug = 'old'`,
+    );
+    expect(rows[0]?.n).toBe(1);
+  });
+});
+
 describe('addSlugAlias on PGLite', () => {
   test('requires an active canonical page', async () => {
     await expect(addSlugAlias(engine, {
