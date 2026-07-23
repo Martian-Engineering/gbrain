@@ -32,7 +32,10 @@ interface CapturedSql {
   params: unknown[];
 }
 
-function buildMockEngine(opts: { scorecard: TakesScorecard }): {
+function buildMockEngine(opts: {
+  scorecard: TakesScorecard;
+  config?: Record<string, string>;
+}): {
   engine: BrainEngine;
   captured: CapturedSql[];
 } {
@@ -41,6 +44,9 @@ function buildMockEngine(opts: { scorecard: TakesScorecard }): {
     kind: 'pglite',
     async getScorecard() {
       return opts.scorecard;
+    },
+    async getConfig(key: string) {
+      return opts.config?.[key] ?? null;
     },
     async executeRaw<T>(sql: string, params?: unknown[]): Promise<T[]> {
       captured.push({ sql, params: params ?? [] });
@@ -276,6 +282,27 @@ describe('runPhaseCalibrationProfile — phase integration', () => {
     expect(insert!.params[9]).toBe(true); // voice_gate_passed
     expect(insert!.params[10]).toBe(1); // voice_gate_attempts
     expect(insert!.params[11]).toEqual(['over-confident-geography']); // active_bias_tags
+  });
+
+  test('configured holder is used before the legacy fallback', async () => {
+    const { engine, captured } = buildMockEngine({
+      scorecard: ENOUGH_RESOLVED_SCORECARD,
+      config: { 'cycle.calibration_profile.holder': 'alice-example' },
+    });
+    let generatedForHolder: string | undefined;
+
+    await runPhaseCalibrationProfile(buildCtx(engine), {
+      patternsGenerator: async input => {
+        generatedForHolder = input.holder;
+        return ['You call early-stage tactics well — 8 of 10 held up.'];
+      },
+      biasTagsGenerator: async () => [],
+      voiceGateJudge: passJudge,
+    });
+
+    const insert = captured.find(c => c.sql.includes('INSERT INTO calibration_profiles'));
+    expect(generatedForHolder).toBe('alice-example');
+    expect(insert?.params[1]).toBe('alice-example');
   });
 
   test('default model is a provider-prefixed id, persisted to model_id (#2451)', async () => {

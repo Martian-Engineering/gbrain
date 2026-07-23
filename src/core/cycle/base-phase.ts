@@ -136,6 +136,29 @@ export abstract class BaseCyclePhase {
   protected meter?: BudgetMeter;
 
   /**
+   * Resolve a non-empty string from file config, then the DB config plane.
+   * Subclasses use this for phase-specific knobs before their local fallback.
+   */
+  protected async resolveStringConfig(
+    engine: BrainEngine,
+    ctx: OperationContext,
+    key: string,
+  ): Promise<string | undefined> {
+    const raw = (ctx.config as unknown as Record<string, unknown>)[key];
+    if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim();
+
+    // `gbrain config set` writes the DB plane. Config read failures stay
+    // fail-soft so an older or partially initialized brain uses the fallback.
+    try {
+      const dbRaw = await engine.getConfig(key);
+      if (typeof dbRaw === 'string' && dbRaw.trim().length > 0) return dbRaw.trim();
+    } catch {
+      // Fall through to the phase default.
+    }
+    return undefined;
+  }
+
+  /**
    * Resolve the budget cap from config (or default). Override is the explicit
    * value passed via opts.budgetUsd. Otherwise: config[budgetUsdKey] → default.
    */
