@@ -110,13 +110,47 @@ describe('addSlugAlias on PGLite', () => {
   test('requires an active canonical page', async () => {
     await expect(addSlugAlias(engine, {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'missing',
-    })).rejects.toMatchObject({ code: 'canonical_not_found' });
+    })).rejects.toMatchObject({
+      code: 'canonical_not_found',
+      message: "Canonical page 'missing' does not exist or is soft-deleted in source 'default'.",
+    });
 
     await seedPage('canonical');
     await engine.softDeletePage('canonical', { sourceId: 'default' });
     await expect(addSlugAlias(engine, {
       sourceId: 'default', aliasSlug: 'old', canonicalSlug: 'canonical',
-    })).rejects.toMatchObject({ code: 'canonical_not_found' });
+    })).rejects.toMatchObject({
+      code: 'canonical_not_found',
+      message: "Canonical page 'canonical' does not exist or is soft-deleted in source 'default'.",
+    });
+  });
+
+  test('reports when the requested canonical slug is itself an alias', async () => {
+    await seedPage('canonical');
+    await addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'canonical-alias',
+      canonicalSlug: 'canonical',
+    });
+
+    await expect(addSlugAlias(engine, {
+      sourceId: 'default',
+      aliasSlug: 'old',
+      canonicalSlug: 'canonical-alias',
+    })).rejects.toMatchObject({
+      code: 'canonical_is_alias',
+      message: "'canonical-alias' is an alias of 'canonical' — alias to 'canonical' instead.",
+    });
+
+    await withAuditDir(async () => {
+      await expect(operationsByName.add_slug_alias.handler(ctx(), {
+        alias_slug: 'old',
+        canonical_slug: 'canonical-alias',
+      })).rejects.toMatchObject({
+        code: 'canonical_is_alias',
+        message: "'canonical-alias' is an alias of 'canonical' — alias to 'canonical' instead.",
+      });
+    });
   });
 
   test('rejects self aliases', async () => {

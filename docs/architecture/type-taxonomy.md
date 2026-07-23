@@ -173,13 +173,15 @@ remote caller writes only to its OAuth-assigned source; federated read grants
 do not grant write access to the other sources in that array. Local CLI callers
 can select a source with `--source <id>`.
 
-`alias add` requires an active canonical page. It rejects self-aliases, cycles,
-and an active page at the old slug. `--soft-delete-old` permits that collision
-by soft-deleting the old page in the same database transaction as the alias
-insert or replacement. Active facts attached to that page move to the canonical
-slug in the same transaction. `--replace` is required to change an existing
-mapping; adding the same mapping again returns an idempotent success. PostgreSQL
-and PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
+`alias add` requires an active canonical page. When that canonical slug is
+already an alias, the operation identifies its direct target so callers can
+write a single-hop mapping instead. It rejects self-aliases, cycles, and an
+active page at the old slug. `--soft-delete-old` permits that collision by
+soft-deleting the old page in the same database transaction as the alias insert
+or replacement. Active facts attached to that page move to the canonical slug
+in the same transaction. `--replace` is required to change an existing mapping;
+adding the same mapping again returns an idempotent success. PostgreSQL and
+PGLite use `BrainEngine.transaction` for the same all-or-nothing behavior.
 Optional `--notes` provenance is stored on insert or explicit replacement,
 returned by the operation, and included in its audit record.
 
@@ -189,10 +191,12 @@ soft-deleted page came from a file that still exists beneath the source's
 registered `local_path`, `alias add` warns that a later sync can recreate the
 page. `alias add --remove-file` instead removes that confined source file after
 the database transaction commits and best-effort commits the deletion when the
-source repository has hardened Git durability. The next sync's Git-diff
-deletion sweep hard-deletes the tombstone, collapsing the 72-hour restore
-window. Before that sync, undo by removing the alias and restoring the page;
-afterward, restore the file through Git.
+source repository has hardened Git durability. This host-filesystem option is
+available only to trusted local callers; remote callers can still perform the
+database alias mutation without it. The next sync's Git-diff deletion sweep
+hard-deletes the tombstone, collapsing the 72-hour restore window. Before that
+sync, undo by removing the alias and restoring the page; afterward, restore the
+file through Git.
 
 Alias changes clear `query_cache` rows for the affected source because the
 `alias_resolved_boost` search stage reads `slug_aliases`. Other caches are not

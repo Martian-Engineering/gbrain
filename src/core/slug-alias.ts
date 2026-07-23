@@ -9,6 +9,7 @@ import {
 
 export type SlugAliasErrorCode =
   | 'canonical_not_found'
+  | 'canonical_is_alias'
   | 'self_alias'
   | 'alias_cycle'
   | 'alias_page_collision'
@@ -138,6 +139,18 @@ export async function addSlugAlias(
       [sourceId],
     );
     if (!(await activePageExists(tx, canonicalSlug, sourceId))) {
+      const canonicalAlias = await tx.executeRaw<{ canonical_slug: string }>(
+        `SELECT canonical_slug FROM slug_aliases
+          WHERE source_id = $1 AND alias_slug = $2
+          LIMIT 1`,
+        [sourceId, canonicalSlug],
+      );
+      if (canonicalAlias[0]) {
+        throw new SlugAliasError(
+          'canonical_is_alias',
+          `'${canonicalSlug}' is an alias of '${canonicalAlias[0].canonical_slug}' — alias to '${canonicalAlias[0].canonical_slug}' instead.`,
+        );
+      }
       throw new SlugAliasError(
         'canonical_not_found',
         `Canonical page '${canonicalSlug}' does not exist or is soft-deleted in source '${sourceId}'.`,
