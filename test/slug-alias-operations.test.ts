@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -688,6 +689,105 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
       });
     } finally {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('removes the slug-derived source file when source_path is null', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remove-derived-'));
+    try {
+      mkdirSync(join(repo, 'notes'), { recursive: true });
+      const sourceFile = join(repo, 'notes', 'old.md');
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('notes/old');
+      await seedPage('notes/canonical');
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          soft_delete_old: true,
+          remove_file: true,
+        }) as {
+          file_removed: boolean;
+          file_remove_error?: string;
+          warnings: string[];
+        };
+        expect(result.file_removed).toBe(true);
+        expect(result.file_remove_error).toBeUndefined();
+        expect(result.warnings).toEqual([]);
+        expect(existsSync(sourceFile)).toBe(false);
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('warns for a slug-derived source file when source_path is null', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-warn-derived-'));
+    try {
+      mkdirSync(join(repo, 'notes'), { recursive: true });
+      const sourceFile = join(repo, 'notes', 'old.md');
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('notes/old');
+      await seedPage('notes/canonical');
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          soft_delete_old: true,
+        }) as { warnings: string[] };
+        expect(result.warnings).toHaveLength(1);
+        expect(result.warnings[0]).toContain('future sync can recreate');
+        expect(result.warnings[0]).toContain('notes/old.md');
+        expect(readFileSync(sourceFile, 'utf8')).toBe('# old\n');
+      });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('refuses a slug-derived source file that escapes through a symlink', async () => {
+    const parent = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-derived-escape-'));
+    const repo = join(parent, 'repo');
+    const outside = join(parent, 'outside');
+    const outsideFile = join(outside, 'old.md');
+    try {
+      mkdirSync(repo);
+      mkdirSync(outside);
+      writeFileSync(outsideFile, '# outside\n');
+      symlinkSync(outside, join(repo, 'notes'));
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('notes/old');
+      await seedPage('notes/canonical');
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(ctx(), {
+          alias_slug: 'notes/old',
+          canonical_slug: 'notes/canonical',
+          soft_delete_old: true,
+          remove_file: true,
+        }) as {
+          file_removed: boolean;
+          file_remove_error?: string;
+        };
+        expect(result.file_removed).toBe(false);
+        expect(result.file_remove_error).toContain('escapes');
+        expect(readFileSync(outsideFile, 'utf8')).toBe('# outside\n');
+      });
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
     }
   });
 

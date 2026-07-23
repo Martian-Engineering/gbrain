@@ -1480,7 +1480,6 @@ const add_slug_alias: Operation = {
         : await invalidateQueryCache(ctx.engine, sourceId);
       const fileRemoval = p.remove_file === true
         && result.soft_deleted_old
-        && result.old_source_path
         ? await removeSyncedSourceFile(
           ctx.engine,
           sourceId,
@@ -1489,7 +1488,12 @@ const add_slug_alias: Operation = {
         )
         : { file_removed: false };
       const warning = result.soft_deleted_old && !fileRemoval.file_removed
-        ? await syncedFileWarning(ctx.engine, sourceId, result.old_source_path).catch(() => null)
+        ? await syncedFileWarning(
+          ctx.engine,
+          sourceId,
+          result.old_source_path,
+          aliasSlug,
+        ).catch(() => null)
         : null;
       logSlugAliasAudit({
         op: 'add_slug_alias',

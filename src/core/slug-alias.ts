@@ -304,6 +304,42 @@ async function resolveSourceRoot(
   return localPath ? resolve(localPath) : null;
 }
 
+type ResolvedMergedPageFile =
+  | { root: string; file: string; sourcePath: string }
+  | { error: string };
+
+/** Resolve and confine the old page's recorded or slug-derived source file. */
+async function resolveMergedPageFile(
+  engine: BrainEngine,
+  sourceId: string,
+  sourcePath: string | null,
+  slug: string,
+): Promise<ResolvedMergedPageFile> {
+  const root = await resolveSourceRoot(engine, sourceId);
+  if (!root) {
+    return { error: `Source '${sourceId}' has no registered local path.` };
+  }
+
+  // Keep the fallback identical to writePageThrough's registered-local-path
+  // layout so pages written through put_page resolve back to the same file.
+  const resolvedSourcePath = sourcePath ?? `${slug}.md`;
+  const file = resolve(root, resolvedSourcePath);
+  // Reject lexical traversal first, then use realpath containment to catch
+  // an existing file reached through an escaping symlink.
+  const rel = relative(root, file);
+  if (rel === '..' || rel.startsWith(`..${sep}`)) {
+    return {
+      error: `Source path '${resolvedSourcePath}' escapes source root '${root}'.`,
+    };
+  }
+  if (!isPathContained(file, root)) {
+    return {
+      error: `Source file '${resolvedSourcePath}' is missing or escapes source root '${root}'.`,
+    };
+  }
+  return { root, file, sourcePath: resolvedSourcePath };
+}
+
 /**
  * Remove one source-owned file after the alias transaction has committed.
  * File handling is fail-soft and path-confined; a Git durability commit is
@@ -312,39 +348,29 @@ async function resolveSourceRoot(
 export async function removeSyncedSourceFile(
   engine: BrainEngine,
   sourceId: string,
-  sourcePath: string,
+  sourcePath: string | null,
   aliasSlug: string,
 ): Promise<RemoveSyncedSourceFileResult> {
   try {
-    const root = await resolveSourceRoot(engine, sourceId);
-    if (!root) {
+    const resolved = await resolveMergedPageFile(
+      engine,
+      sourceId,
+      sourcePath,
+      aliasSlug,
+    );
+    if ('error' in resolved) {
       return {
         file_removed: false,
-        file_remove_error: `Source '${sourceId}' has no registered local path.`,
+        file_remove_error: resolved.error,
       };
     }
 
-    const file = resolve(root, sourcePath);
-    const rel = relative(root, file);
-    if (rel === '..' || rel.startsWith(`..${sep}`)) {
-      return {
-        file_removed: false,
-        file_remove_error: `Source path '${sourcePath}' escapes source root '${root}'.`,
-      };
-    }
-    if (!isPathContained(file, root)) {
-      return {
-        file_removed: false,
-        file_remove_error: `Source file '${sourcePath}' is missing or escapes source root '${root}'.`,
-      };
-    }
-
-    unlinkSync(file);
+    unlinkSync(resolved.file);
     // The path-limited durability helper uses `git add -- <path>`, which
     // stages removals as well as writes. Commit failure is intentionally
     // fail-soft; host-level durability timers remain the fallback.
-    if (isDurabilityHardened(root)) {
-      commitWriteThroughFile(root, file, aliasSlug);
+    if (isDurabilityHardened(resolved.root)) {
+      commitWriteThroughFile(resolved.root, resolved.file, aliasSlug);
     }
     return { file_removed: true };
   } catch (error) {
@@ -364,13 +390,14 @@ export async function syncedFileWarning(
   engine: BrainEngine,
   sourceId: string,
   sourcePath: string | null,
+  aliasSlug: string,
 ): Promise<string | null> {
-  if (!sourcePath) return null;
-  const root = await resolveSourceRoot(engine, sourceId);
-  if (!root) return null;
-
-  const file = resolve(root, sourcePath);
-  const rel = relative(root, file);
-  if (rel === '..' || rel.startsWith(`..${sep}`) || !existsSync(file)) return null;
-  return `Source file '${sourcePath}' still exists for source '${sourceId}'. A future sync can recreate the soft-deleted page; update or remove that file separately. Git was not modified.`;
+  const resolved = await resolveMergedPageFile(
+    engine,
+    sourceId,
+    sourcePath,
+    aliasSlug,
+  );
+  if ('error' in resolved || !existsSync(resolved.file)) return null;
+  return `Source file '${resolved.sourcePath}' still exists for source '${sourceId}'. A future sync can recreate the soft-deleted page; update or remove that file separately. Git was not modified.`;
 }
