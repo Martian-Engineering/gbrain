@@ -6,10 +6,10 @@
  * `take_proposals` queue. User accepts/rejects via `gbrain takes propose`.
  *
  * Idempotency contract (D17 schema spec):
- *   The unique index on (source_id, page_slug, content_hash, prompt_version)
- *   means an unchanged page never re-spends LLM tokens. Bumping
- *   PROPOSE_TAKES_PROMPT_VERSION cleanly invalidates the cache so a tuned
- *   prompt re-runs proposals on every page.
+ *   The page-level lookup on (source_id, page_slug, content_hash,
+ *   prompt_version) prevents repeat LLM spend. The unique index adds
+ *   claim_hash so distinct claims from one page survive while duplicate
+ *   claims remain idempotent.
  *
  * F2 fence dedup:
  *   The phase reads the page's existing `<!-- gbrain:takes:begin -->` fence
@@ -151,6 +151,7 @@ export interface ProposeTakesResult {
   pages_scanned: number;
   cache_hits: number;
   cache_misses: number;
+  proposals_extracted: number;
   proposals_inserted: number;
   budget_exhausted: boolean;
   warnings: string[];
@@ -163,6 +164,13 @@ export interface ProposeTakesResult {
  */
 export function contentHash(pageBody: string): string {
   return createHash('sha256').update(pageBody).digest('hex');
+}
+
+/**
+ * Compute the per-claim proposal identity from normalized claim text.
+ */
+export function claimHash(claimText: string): string {
+  return createHash('sha256').update(claimText.trim()).digest('hex');
 }
 
 /**
@@ -313,6 +321,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
       pages_scanned: 0,
       cache_hits: 0,
       cache_misses: 0,
+      proposals_extracted: 0,
       proposals_inserted: 0,
       budget_exhausted: false,
       warnings: [],
@@ -391,17 +400,21 @@ class ProposeTakesPhase extends BaseCyclePhase {
         result.warnings.push(`extractor failed on ${page.slug}: ${msg}`);
         continue;
       }
+      result.proposals_extracted += proposals.length;
 
-      // Write proposals to take_proposals. Each row is a separate INSERT
-      // because the composite idempotency key is on the per-page tuple — a
-      // bulk UPSERT would collapse a same-page-multi-claim run into one row.
+      // Write proposals individually so each conflict result contributes to
+      // the honest inserted-row count.
       for (const p of proposals) {
-        await engine.executeRaw(
+        const inserted = await engine.executeRaw<{ id: number }>(
           `INSERT INTO take_proposals
              (source_id, page_slug, content_hash, prompt_version, proposal_run_id,
-              claim_text, kind, holder, weight, domain, dedup_against_fence_rows, model_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           ON CONFLICT (source_id, page_slug, content_hash, prompt_version) DO NOTHING`,
+              claim_text, kind, holder, weight, domain, dedup_against_fence_rows,
+              model_id, claim_hash)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           ON CONFLICT (
+             source_id, page_slug, content_hash, prompt_version, claim_hash
+           ) DO NOTHING
+           RETURNING id`,
           [
             sourceId,
             page.slug,
@@ -415,9 +428,10 @@ class ProposeTakesPhase extends BaseCyclePhase {
             p.domain ?? null,
             JSON.stringify(existingTakes),
             modelId,
+            claimHash(p.claim_text),
           ],
         );
-        result.proposals_inserted += 1;
+        result.proposals_inserted += inserted.length;
       }
     }
 
@@ -448,7 +462,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
           total_rows: result.proposals_inserted,
           cost_usd: 0, // tracker isn't exposed at this layer; cost tracked centrally
           summary:
-            `Proposed ${result.proposals_inserted} new takes from ${result.pages_scanned} pages ` +
+            `Extracted ${result.proposals_extracted} takes and created ` +
+            `${result.proposals_inserted} proposals from ${result.pages_scanned} pages ` +
             `(${result.cache_hits} cached).`,
         });
       } catch (err) {
@@ -463,7 +478,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
     });
 
     return {
-      summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
+      summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_extracted} extracted, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
       details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion },
       status: result.budget_exhausted ? 'warn' : 'ok',
     };

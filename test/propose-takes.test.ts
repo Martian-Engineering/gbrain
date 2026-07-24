@@ -59,7 +59,9 @@ function buildMockEngine(opts: {
         if (existing.has(key)) return [{ id: 1 } as unknown as T];
         return [];
       }
-      // INSERT — return nothing
+      if (sql.includes('INSERT INTO take_proposals')) {
+        return [{ id: captured.length } as unknown as T];
+      }
       return [];
     },
   } as unknown as BrainEngine;

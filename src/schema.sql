@@ -1269,9 +1269,9 @@ CREATE INDEX IF NOT EXISTS calibration_profiles_published_idx
   ON calibration_profiles (source_id, published, holder)
   WHERE published = true;
 
--- take_proposals: propose_takes phase queue. Idempotency cache via the
--- composite unique index (source_id, page_slug, content_hash, prompt_version)
--- mirrors v0.23 dream_verdicts. proposal_run_id supports --rollback by run.
+-- take_proposals: propose_takes phase queue. Per-claim idempotency via the
+-- composite unique index on the page tuple plus claim_hash.
+-- proposal_run_id supports --rollback by run.
 CREATE TABLE IF NOT EXISTS take_proposals (
   id                          BIGSERIAL PRIMARY KEY,
   source_id                   TEXT         NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -1284,6 +1284,7 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   status                      TEXT         NOT NULL DEFAULT 'pending'
                                            CHECK (status IN ('pending','accepted','rejected','superseded')),
   claim_text                  TEXT         NOT NULL,
+  claim_hash                  TEXT         NOT NULL,
   kind                        TEXT         NOT NULL,
   holder                      TEXT         NOT NULL,
   weight                      REAL         NOT NULL,
@@ -1293,11 +1294,12 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   acted_at                    TIMESTAMPTZ,
   acted_by                    TEXT,
   promoted_row_num            INTEGER,
+  resolution_note             TEXT,
   predicted_brier             REAL,
   predicted_brier_bucket_n    INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
-  ON take_proposals (source_id, page_slug, content_hash, prompt_version);
+  ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
 CREATE INDEX IF NOT EXISTS take_proposals_pending_idx
   ON take_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';

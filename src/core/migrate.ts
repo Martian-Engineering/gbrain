@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 import { slugifyPath } from './sync.ts';
 import { getFtsLanguage } from './fts-language.ts';
@@ -5689,6 +5690,65 @@ export const MIGRATIONS: Migration[] = [
         updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `,
+  },
+  {
+    version: 126,
+    name: 'take_proposals_per_claim_uniqueness',
+    // Proposals are queue rows, not page-level verdicts. Hashing the trimmed
+    // claim keeps identical claims idempotent while allowing every distinct
+    // claim extracted from the same unchanged page to survive.
+    idempotent: true,
+    sql: '',
+    handler: async (engine) => {
+      await engine.transaction(async (tx) => {
+        await tx.executeRaw(
+          `ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT`,
+        );
+        await tx.executeRaw(
+          `ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS resolution_note TEXT`,
+        );
+
+        const rows = await tx.executeRaw<{ id: number; claim_text: string }>(
+          `SELECT id, claim_text
+             FROM take_proposals
+            WHERE claim_hash IS NULL
+            ORDER BY id`,
+        );
+        // Batch the TypeScript SHA-256 backfill so PGLite and Postgres use
+        // claim_text.trim() identically without an N-query migration.
+        for (let start = 0; start < rows.length; start += 500) {
+          const batch = rows.slice(start, start + 500);
+          const values = batch
+            .map((_, index) => `($${index * 2 + 1}::bigint, $${index * 2 + 2}::text)`)
+            .join(', ');
+          const params = batch.flatMap(row => [
+            row.id,
+            createHash('sha256').update(row.claim_text.trim()).digest('hex'),
+          ]);
+          await tx.executeRaw(
+            `UPDATE take_proposals AS proposal
+                SET claim_hash = values.claim_hash
+               FROM (VALUES ${values}) AS values(id, claim_hash)
+              WHERE proposal.id = values.id
+                AND proposal.claim_hash IS NULL`,
+            params,
+          );
+        }
+
+        await tx.executeRaw(
+          `ALTER TABLE take_proposals ALTER COLUMN claim_hash SET NOT NULL`,
+        );
+        await tx.executeRaw(
+          `DROP INDEX IF EXISTS take_proposals_idempotency_idx`,
+        );
+        await tx.executeRaw(`
+          CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
+            ON take_proposals (
+              source_id, page_slug, content_hash, prompt_version, claim_hash
+            )
+        `);
+      });
+    },
   },
 ];
 
