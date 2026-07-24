@@ -564,4 +564,63 @@ describe('resolve_take_proposal', () => {
     );
     expect(takes[0]?.since_date).toBe('2026-07-20');
   });
+
+  test('accept writes into the source local_path working tree when configured', async () => {
+    // Multi-source deployments (e.g. sequid) configure per-source working
+    // trees on sources.local_path and never set sync.repo_path.
+    const sourceDir = mkdtempSync(join(import.meta.dir, '.take-proposals-src-'));
+    try {
+      await seedSource('source-a');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'source-a'`,
+        [sourceDir],
+      );
+      writeFileSync(join(sourceDir, 'tree-page.md'), '# tree-page\n', 'utf8');
+      await engine.putPage('tree-page', {
+        type: 'note',
+        title: 'tree-page',
+        compiled_truth: '# tree-page\n',
+        timeline: '',
+      }, { sourceId: 'source-a' });
+      const id = await seedProposal({
+        sourceId: 'source-a',
+        pageSlug: 'tree-page',
+        claimText: 'Tree-scoped claim',
+        proposedAt: '2026-07-20T10:00:00Z',
+      });
+
+      const result = await resolveProposal(ctx('source-a'), {
+        id,
+        action: 'accept',
+      });
+
+      expect(result).toMatchObject({ id, status: 'accepted' });
+      const fence = parseTakesFence(
+        readFileSync(join(sourceDir, 'tree-page.md'), 'utf8'),
+      );
+      expect(fence.takes).toHaveLength(1);
+      expect(fence.takes[0]).toMatchObject({
+        claim: 'Tree-scoped claim',
+        source: `proposal:${id}`,
+      });
+    } finally {
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  test('dry-run accept surfaces brain_dir_not_found on a misconfigured deployment', async () => {
+    // No sync.repo_path and no source local_path: the preview must fail the
+    // same way a real acceptance would instead of reporting success.
+    const id = await seedProposal({
+      pageSlug: 'missing-tree',
+      claimText: 'Unpromotable claim',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    await expect(resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+      dry_run: true,
+    })).rejects.toMatchObject({ code: 'brain_dir_not_found' });
+  });
 });

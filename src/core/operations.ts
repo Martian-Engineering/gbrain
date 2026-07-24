@@ -52,7 +52,7 @@ import {
 } from './slug-alias.ts';
 import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
 import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
-import { addTake, TakeAddError } from './take-add.ts';
+import { addTake, resolveTakeBrainDir, TakeAddError } from './take-add.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -2574,6 +2574,16 @@ const resolve_take_proposal: Operation = {
           id,
           resolution_note: notes,
         };
+      }
+      // Resolve the markdown working tree too, so a preview fails the same
+      // way a real acceptance would on a misconfigured deployment.
+      try {
+        await resolveTakeBrainDir(ctx.engine, { sourceId });
+      } catch (error) {
+        if (error instanceof TakeAddError) {
+          throw new OperationError(error.code, error.message);
+        }
+        throw error;
       }
       return {
         dry_run: true,

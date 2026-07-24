@@ -47,21 +47,46 @@ export interface AddTakeResult {
   rowNum: number;
 }
 
-async function resolveBrainDir(
+/**
+ * Resolve the markdown working tree that owns `sourceId`'s pages.
+ *
+ * Precedence mirrors the write-through topology rules (#2018): an explicit
+ * CLI --dir wins, then the source's own `local_path` working tree
+ * (multi-source deployments), then the single-brain `sync.repo_path` config.
+ */
+export async function resolveTakeBrainDir(
   engine: BrainEngine,
-  explicitDir?: string,
+  opts: { sourceId?: string; brainDir?: string } = {},
 ): Promise<string> {
   // An explicit CLI path retains precedence and the exact historical error.
-  if (explicitDir) {
-    if (!existsSync(explicitDir)) {
+  if (opts.brainDir) {
+    if (!existsSync(opts.brainDir)) {
       throw new TakeAddError(
         'brain_dir_not_found',
-        `--dir path does not exist: ${explicitDir}`,
+        `--dir path does not exist: ${opts.brainDir}`,
       );
     }
-    return explicitDir;
+    return opts.brainDir;
   }
-  // Operation callers use the same configured canonical checkout as the CLI.
+  // Multi-source deployments keep each source's markdown in its own working
+  // tree; writing a source's take anywhere else would pollute a sibling repo.
+  if (opts.sourceId) {
+    const rows = await engine.executeRaw<{ local_path: string | null }>(
+      `SELECT local_path FROM sources WHERE id = $1`,
+      [opts.sourceId],
+    );
+    const localPath = rows[0]?.local_path;
+    if (localPath) {
+      if (!existsSync(localPath)) {
+        throw new TakeAddError(
+          'brain_dir_not_found',
+          `Source '${opts.sourceId}' local_path does not exist: ${localPath}`,
+        );
+      }
+      return localPath;
+    }
+  }
+  // Single-brain setups use the same configured canonical checkout as the CLI.
   const configured = await engine.getConfig('sync.repo_path');
   if (configured && existsSync(configured)) return configured;
   throw new TakeAddError(
@@ -100,7 +125,10 @@ export async function addTake(
   engine: BrainEngine,
   input: AddTakeInput,
 ): Promise<AddTakeResult> {
-  const brainDir = await resolveBrainDir(engine, input.brainDir);
+  const brainDir = await resolveTakeBrainDir(engine, {
+    sourceId: input.sourceId,
+    brainDir: input.brainDir,
+  });
 
   // The lock spans both sinks so concurrent writers cannot reuse a row number
   // or mirror a fence state different from the file they observed.
