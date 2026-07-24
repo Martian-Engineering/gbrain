@@ -399,7 +399,7 @@ export interface OperationContext {
    *
    * When set (i.e., this OperationContext came from an MCP-bound token),
    * `takes_list`, `takes_search`, `takes_scorecard`, `takes_calibration`,
-   * `list_take_proposals`, and `query` (when it returns takes) MUST apply
+   * and `query` (when it returns takes) MUST apply
    * `WHERE holder = ANY($takesHoldersAllowList)`.
    * This is the server-side filter that backs the v0.28+ visibility model.
    *
@@ -2289,7 +2289,7 @@ const TAKE_PROPOSAL_STATUSES: readonly TakeProposalStatus[] = [
 
 const list_take_proposals: Operation = {
   name: 'list_take_proposals',
-  description: 'List source- and holder-visible take proposals for review.',
+  description: 'List source-visible take proposals for review.',
   scope: 'read',
   params: {
     status: {
@@ -2352,10 +2352,13 @@ const list_take_proposals: Operation = {
       params.push(p.proposal_run_id);
       where.push(`proposal_run_id = $${params.length}`);
     }
-    if (ctx.takesHoldersAllowList !== undefined) {
-      params.push(ctx.takesHoldersAllowList);
-      where.push(`holder = ANY($${params.length}::text[])`);
-    }
+    // No holder allow-list here, unlike takes_list: a proposal's claim is
+    // extracted from `compiled_truth` of pages the caller can already read
+    // under source scope, and its holder is unverified model attribution —
+    // acceptance is what grants a claim holder standing. Source scope is the
+    // privacy boundary for the review queue; holder-filtering it would only
+    // hide reviewable rows from the review surface (OAuth clients have no
+    // holder grants and default to ['world']).
 
     const predicate = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
     const countRows = await ctx.engine.executeRaw<{ total: number }>(

@@ -324,7 +324,7 @@ describe('list_take_proposals', () => {
     expect(federated.total).toBe(2);
   });
 
-  test('applies the takes holder allow-list to rows and total', async () => {
+  test('ignores the takes holder allow-list; source scope is the boundary', async () => {
     await seedProposal({
       pageSlug: 'writing/public',
       claimText: 'World claim',
@@ -338,12 +338,19 @@ describe('list_take_proposals', () => {
       proposedAt: '2026-07-21T10:00:00Z',
     });
 
+    // Review surfaces authenticate as OAuth clients, which carry no holder
+    // grants (['world'] fallback). Proposal claims derive from pages the
+    // caller can already read within its source scope, so the queue lists
+    // every holder rather than hiding reviewable rows.
     const result = await list(ctx('default', {
       takesHoldersAllowList: ['world'],
     }));
 
-    expect(result.total).toBe(1);
-    expect(result.proposals.map(row => row.holder)).toEqual(['world']);
+    expect(result.total).toBe(2);
+    expect(result.proposals.map(row => row.holder).sort()).toEqual([
+      'brain',
+      'world',
+    ]);
   });
 });
 
