@@ -8,26 +8,41 @@ import {
 } from 'bun:test';
 import { createHash } from 'node:crypto';
 import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import {
   operationsByName,
   type OperationContext,
 } from '../src/core/operations.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { parseTakesFence } from '../src/core/takes-fence.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let brainDir: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  brainDir = mkdtempSync(join(import.meta.dir, '.take-proposals-'));
 });
 
 afterAll(async () => {
   await engine.disconnect();
+  rmSync(brainDir, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  rmSync(brainDir, { recursive: true, force: true });
+  mkdirSync(brainDir, { recursive: true });
 });
 
 function ctx(
@@ -35,17 +50,20 @@ function ctx(
   opts: {
     allowedSources?: string[];
     takesHoldersAllowList?: string[];
+    auth?: OperationContext['auth'];
+    dryRun?: boolean;
+    remote?: boolean;
   } = {},
 ): OperationContext {
   return {
     engine,
     config: { engine: 'pglite' },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
-    dryRun: false,
-    remote: false,
+    dryRun: opts.dryRun ?? false,
+    remote: opts.remote ?? false,
     sourceId,
     takesHoldersAllowList: opts.takesHoldersAllowList,
-    auth: opts.allowedSources
+    auth: opts.auth ?? (opts.allowedSources
       ? {
           token: 'test-token',
           clientId: 'test-client',
@@ -53,7 +71,7 @@ function ctx(
           sourceId,
           allowedSources: opts.allowedSources,
         }
-      : undefined,
+      : undefined),
   };
 }
 
@@ -72,6 +90,8 @@ async function seedProposal(opts: {
   claimText: string;
   status?: 'pending' | 'accepted' | 'rejected' | 'superseded';
   holder?: string;
+  kind?: 'fact' | 'take' | 'bet' | 'hunch';
+  weight?: number;
   runId?: string;
   proposedAt: string;
 }): Promise<number> {
@@ -85,8 +105,8 @@ async function seedProposal(opts: {
        status, claim_text, claim_hash, kind, holder, weight, domain,
        dedup_against_fence_rows, model_id, proposed_at
      ) VALUES (
-       $1, $2, $3, 'prompt-v1', $4, $5, $6, $7, 'take', $8, 0.6,
-       'strategy', '[]'::jsonb, 'test-model', $9::timestamptz
+       $1, $2, $3, 'prompt-v1', $4, $5, $6, $7, $8, $9, $10,
+       'strategy', '[]'::jsonb, 'test-model', $11::timestamptz
      )
      RETURNING id`,
     [
@@ -97,11 +117,43 @@ async function seedProposal(opts: {
       opts.status ?? 'pending',
       opts.claimText,
       claimHash,
+      opts.kind ?? 'take',
       opts.holder ?? 'world',
+      opts.weight ?? 0.6,
       opts.proposedAt,
     ],
   );
   return rows[0]!.id;
+}
+
+async function seedProposalPage(
+  slug: string,
+  sourceId = 'default',
+  markdown = `# ${slug}\n`,
+): Promise<string> {
+  await engine.setConfig('sync.repo_path', brainDir);
+  await engine.putPage(slug, {
+    type: 'note',
+    title: slug,
+    compiled_truth: markdown,
+    timeline: '',
+  }, { sourceId });
+  const path = join(brainDir, `${slug}.md`);
+  writeFileSync(path, markdown, 'utf8');
+  return path;
+}
+
+async function resolveProposal(
+  operationCtx: OperationContext,
+  params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return withEnv(
+    { GBRAIN_HOME: brainDir },
+    () => operationsByName.resolve_take_proposal.handler(
+      operationCtx,
+      params,
+    ) as Promise<Record<string, unknown>>,
+  );
 }
 
 type ProposalListResult = {
@@ -130,12 +182,19 @@ async function list(
 }
 
 describe('take proposal operation registration', () => {
-  test('list_take_proposals is a remote-capable non-mutating read operation', () => {
+  test('proposal operations expose the frozen scopes and mutation metadata', () => {
     const op = operationsByName.list_take_proposals;
     expect(op).toBeDefined();
     expect(op.scope).toBe('read');
     expect(op.mutating).not.toBe(true);
     expect(op.localOnly).not.toBe(true);
+
+    const resolveOp = operationsByName.resolve_take_proposal;
+    expect(resolveOp).toBeDefined();
+    expect(resolveOp.scope).toBe('write');
+    expect(resolveOp.mutating).toBe(true);
+    expect(resolveOp.localOnly).not.toBe(true);
+    expect(resolveOp.params).toHaveProperty('dry_run');
   });
 });
 
@@ -285,5 +344,217 @@ describe('list_take_proposals', () => {
 
     expect(result.total).toBe(1);
     expect(result.proposals.map(row => row.holder)).toEqual(['world']);
+  });
+});
+
+describe('resolve_take_proposal', () => {
+  test('does not resolve a numeric id outside the caller write source', async () => {
+    await seedSource('source-a');
+    await seedSource('source-b');
+    const id = await seedProposal({
+      sourceId: 'source-a',
+      pageSlug: 'proposal-page',
+      claimText: 'Source A only',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    await expect(resolveProposal(ctx('source-b'), {
+      id,
+      action: 'reject',
+    })).rejects.toMatchObject({ code: 'not_found' });
+
+    const rows = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]?.status).toBe('pending');
+  });
+
+  test('reject stamps the proposal without creating a take', async () => {
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Reject this claim',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+    const operationCtx = ctx('default', {
+      remote: true,
+      auth: {
+        token: 'test-token',
+        clientId: 'review-client',
+        scopes: ['write'],
+        sourceId: 'default',
+        allowedSources: ['default'],
+      },
+    });
+
+    const result = await resolveProposal(operationCtx, {
+      id,
+      action: 'reject',
+      notes: 'Contradicted by the source material.',
+    });
+
+    expect(result).toMatchObject({
+      id,
+      status: 'rejected',
+      acted_by: 'review-client',
+      resolution_note: 'Contradicted by the source material.',
+    });
+    expect(result.acted_at).toBeTruthy();
+    const takes = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM takes`,
+    );
+    expect(Number(takes[0]?.count)).toBe(0);
+  });
+
+  test('accept writes exactly one fence row and one mirrored take, then stamps the proposal', async () => {
+    const pagePath = await seedProposalPage('proposal-page');
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Original proposal',
+      kind: 'take',
+      holder: 'world',
+      weight: 0.6,
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    const result = await resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+      claim_text: 'Edited accepted claim',
+      kind: 'fact',
+      holder: 'brain',
+      weight: 0.9,
+      since_date: '2026-07-19',
+      notes: 'Verified during review.',
+    });
+
+    expect(result).toMatchObject({
+      id,
+      status: 'accepted',
+      promoted_row_num: 1,
+      acted_by: 'local',
+      resolution_note: 'Verified during review.',
+    });
+    const fence = parseTakesFence(readFileSync(pagePath, 'utf8'));
+    expect(fence.takes).toHaveLength(1);
+    expect(fence.takes[0]).toMatchObject({
+      rowNum: 1,
+      claim: 'Edited accepted claim',
+      kind: 'fact',
+      holder: 'brain',
+      weight: 0.9,
+      sinceDate: '2026-07-19',
+      source: `proposal:${id}`,
+    });
+    const takes = await engine.executeRaw<{
+      row_num: number;
+      claim: string;
+      kind: string;
+      holder: string;
+      weight: number;
+      since_date: string;
+      source: string;
+    }>(
+      `SELECT row_num, claim, kind, holder, weight,
+              since_date::text AS since_date, source
+         FROM takes`,
+    );
+    expect(takes).toEqual([{
+      row_num: 1,
+      claim: 'Edited accepted claim',
+      kind: 'fact',
+      holder: 'brain',
+      weight: 0.9,
+      since_date: '2026-07-19',
+      source: `proposal:${id}`,
+    }]);
+  });
+
+  test('dry-run returns effective fields without mutating the file or database', async () => {
+    const originalMarkdown = '# Proposal page\n';
+    const pagePath = await seedProposalPage(
+      'proposal-page',
+      'default',
+      originalMarkdown,
+    );
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Original proposal',
+      kind: 'bet',
+      holder: 'world',
+      weight: 0.4,
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    const result = await resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+      claim_text: 'Preview edit',
+      dry_run: true,
+    });
+
+    expect(result).toEqual({
+      dry_run: true,
+      action: 'accept',
+      id,
+      claim_text: 'Preview edit',
+      kind: 'bet',
+      holder: 'world',
+      weight: 0.4,
+      since_date: '2026-07-20',
+      source: `proposal:${id}`,
+    });
+    expect(readFileSync(pagePath, 'utf8')).toBe(originalMarkdown);
+    const proposal = await engine.executeRaw<{
+      status: string;
+      acted_at: string | null;
+    }>(
+      `SELECT status, acted_at FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(proposal[0]).toMatchObject({ status: 'pending', acted_at: null });
+    const takes = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM takes`,
+    );
+    expect(Number(takes[0]?.count)).toBe(0);
+  });
+
+  test('a second resolution fails with the current non-pending status', async () => {
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Resolve once',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+    await resolveProposal(ctx(), { id, action: 'reject' });
+
+    try {
+      await resolveProposal(ctx(), { id, action: 'reject' });
+      throw new Error('Expected the second resolution to fail.');
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'not_pending',
+        status: 'rejected',
+      });
+      expect((error as { toJSON: () => unknown }).toJSON()).toMatchObject({
+        code: 'not_pending',
+        status: 'rejected',
+      });
+    }
+  });
+
+  test('accept defaults since_date to the proposal date', async () => {
+    await seedProposalPage('proposal-page');
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Gradeable by default',
+      proposedAt: '2026-07-20T23:59:59Z',
+    });
+
+    await resolveProposal(ctx(), { id, action: 'accept' });
+
+    const takes = await engine.executeRaw<{ since_date: string }>(
+      `SELECT since_date::text AS since_date FROM takes`,
+    );
+    expect(takes[0]?.since_date).toBe('2026-07-20');
   });
 });

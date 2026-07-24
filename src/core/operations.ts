@@ -52,6 +52,7 @@ import {
 } from './slug-alias.ts';
 import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
 import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
+import { addTake, TakeAddError } from './take-add.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -2377,6 +2378,263 @@ const list_take_proposals: Operation = {
       limit,
       offset,
     };
+  },
+};
+
+interface ResolvableTakeProposal {
+  id: number;
+  source_id: string;
+  page_slug: string;
+  proposed_date: string;
+  status: TakeProposalStatus;
+  claim_text: string;
+  kind: string;
+  holder: string;
+  weight: number;
+}
+
+interface EffectiveTakeProposal {
+  claim_text: string;
+  kind: 'fact' | 'take' | 'bet' | 'hunch';
+  holder: string;
+  weight: number;
+  since_date: string;
+  source: string;
+}
+
+class TakeProposalNotPendingError extends OperationError {
+  constructor(public status: TakeProposalStatus) {
+    super(
+      'not_pending',
+      `Take proposal is already ${status}.`,
+    );
+    this.name = 'TakeProposalNotPendingError';
+  }
+
+  override toJSON() {
+    return {
+      ...super.toJSON(),
+      code: this.code,
+      status: this.status,
+    };
+  }
+}
+
+function validCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime())
+    && parsed.toISOString().slice(0, 10) === value;
+}
+
+function effectiveTake(
+  proposal: ResolvableTakeProposal,
+  params: Record<string, unknown>,
+): EffectiveTakeProposal {
+  // Apply only explicitly supplied review edits over the immutable proposal.
+  const claimText = params.claim_text === undefined
+    ? proposal.claim_text
+    : String(params.claim_text);
+  const kind = params.kind === undefined ? proposal.kind : String(params.kind);
+  const holder = params.holder === undefined ? proposal.holder : String(params.holder);
+  const weight = params.weight === undefined
+    ? Number(proposal.weight)
+    : Number(params.weight);
+  const sinceDate = params.since_date === undefined
+    ? proposal.proposed_date
+    : String(params.since_date);
+
+  // Direct library callers bypass transport schema validation, so validate
+  // the complete effective take before previewing or writing either sink.
+  if (!claimText.trim()) {
+    throw new OperationError('invalid_params', 'claim_text must be non-empty.');
+  }
+  if (!['fact', 'take', 'bet', 'hunch'].includes(kind)) {
+    throw new OperationError(
+      'invalid_params',
+      `Unknown take kind '${kind}'. Expected fact, take, bet, or hunch.`,
+    );
+  }
+  if (!holder.trim()) {
+    throw new OperationError('invalid_params', 'holder must be non-empty.');
+  }
+  if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+    throw new OperationError('invalid_params', 'weight must be between 0 and 1.');
+  }
+  if (!validCalendarDate(sinceDate)) {
+    throw new OperationError(
+      'invalid_params',
+      'since_date must be a valid YYYY-MM-DD date.',
+    );
+  }
+
+  // Proposal provenance intentionally replaces any model-generated source.
+  return {
+    claim_text: claimText,
+    kind: kind as EffectiveTakeProposal['kind'],
+    holder,
+    weight,
+    since_date: sinceDate,
+    source: `proposal:${proposal.id}`,
+  };
+}
+
+async function findTakeProposal(
+  engine: BrainEngine,
+  id: number,
+  sourceId: string,
+  forUpdate = false,
+): Promise<ResolvableTakeProposal> {
+  const rows = await engine.executeRaw<ResolvableTakeProposal>(
+    `SELECT id, source_id, page_slug,
+            proposed_at::date::text AS proposed_date, status,
+            claim_text, kind, holder, weight
+       FROM take_proposals
+      WHERE id = $1 AND source_id = $2
+      ${forUpdate ? 'FOR UPDATE' : ''}`,
+    [id, sourceId],
+  );
+  if (!rows[0]) {
+    throw new OperationError(
+      'not_found',
+      `Take proposal ${id} was not found in the caller's write source.`,
+    );
+  }
+  return rows[0];
+}
+
+function assertPendingTakeProposal(
+  proposal: ResolvableTakeProposal,
+): void {
+  if (proposal.status !== 'pending') {
+    throw new TakeProposalNotPendingError(proposal.status);
+  }
+}
+
+const resolve_take_proposal: Operation = {
+  name: 'resolve_take_proposal',
+  description: 'Accept or reject one pending take proposal in the caller write source.',
+  scope: 'write',
+  mutating: true,
+  params: {
+    id: { type: 'number', required: true, description: 'Take proposal id' },
+    action: {
+      type: 'string',
+      enum: ['accept', 'reject'],
+      required: true,
+      description: 'Resolution action',
+    },
+    claim_text: { type: 'string', description: 'Accepted take claim override' },
+    kind: {
+      type: 'string',
+      enum: ['fact', 'take', 'bet', 'hunch'],
+      description: 'Accepted take kind override',
+    },
+    holder: { type: 'string', description: 'Accepted take holder override' },
+    weight: { type: 'number', description: 'Accepted take weight override (0-1)' },
+    since_date: {
+      type: 'string',
+      description: 'Accepted take start date (YYYY-MM-DD)',
+    },
+    notes: { type: 'string', description: 'Resolution note retained on the proposal' },
+    dry_run: { type: 'boolean', description: 'Preview without mutating the proposal or take' },
+  },
+  handler: async (ctx, p) => {
+    // Keep handler-level validation for direct operation consumers.
+    const id = Number(p.id);
+    const action = String(p.action);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new OperationError('invalid_params', 'id must be a positive integer.');
+    }
+    if (action !== 'accept' && action !== 'reject') {
+      throw new OperationError(
+        'invalid_params',
+        "action must be 'accept' or 'reject'.",
+      );
+    }
+    const sourceId = resolveWriteSourceId(ctx);
+    const notes = typeof p.notes === 'string' ? p.notes : null;
+    const actor = ctx.auth?.clientId ?? 'local';
+    const dryRun = ctx.dryRun || p.dry_run === true;
+
+    // Preview still reads and validates the source-scoped pending row so it
+    // reports the exact take that a real acceptance would promote.
+    if (dryRun) {
+      const proposal = await findTakeProposal(ctx.engine, id, sourceId);
+      assertPendingTakeProposal(proposal);
+      if (action === 'reject') {
+        return {
+          dry_run: true,
+          action,
+          id,
+          resolution_note: notes,
+        };
+      }
+      return {
+        dry_run: true,
+        action,
+        id,
+        ...effectiveTake(proposal, p),
+      };
+    }
+
+    // PostgreSQL's row lock serializes reviewers of the same proposal. PGLite
+    // runs through the same transaction path for engine parity.
+    return ctx.engine.transaction(async tx => {
+      const proposal = await findTakeProposal(tx, id, sourceId, true);
+      assertPendingTakeProposal(proposal);
+
+      if (action === 'reject') {
+        const rows = await tx.executeRaw(
+          `UPDATE take_proposals
+              SET status = 'rejected',
+                  acted_at = now(),
+                  acted_by = $3,
+                  resolution_note = $4
+            WHERE id = $1 AND source_id = $2 AND status = 'pending'
+          RETURNING id, status, acted_at, acted_by,
+                    promoted_row_num, resolution_note`,
+          [id, sourceId, actor, notes],
+        );
+        return rows[0];
+      }
+
+      // The shared service owns the canonical markdown-first promotion; the
+      // transaction-scoped engine keeps its database mirror in this commit.
+      const effective = effectiveTake(proposal, p);
+      let rowNum: number;
+      try {
+        ({ rowNum } = await addTake(tx, {
+          slug: proposal.page_slug,
+          claim: effective.claim_text,
+          kind: effective.kind,
+          holder: effective.holder,
+          weight: effective.weight,
+          sinceDate: effective.since_date,
+          source: effective.source,
+          sourceId,
+        }));
+      } catch (error) {
+        if (error instanceof TakeAddError) {
+          throw new OperationError(error.code, error.message);
+        }
+        throw error;
+      }
+      // Stamp the audit row only after both take sinks have succeeded.
+      const rows = await tx.executeRaw(
+        `UPDATE take_proposals
+            SET status = 'accepted',
+                promoted_row_num = $3,
+                acted_at = now(),
+                acted_by = $4,
+                resolution_note = $5
+          WHERE id = $1 AND source_id = $2 AND status = 'pending'
+        RETURNING id, status, acted_at, acted_by,
+                  promoted_row_num, resolution_note`,
+        [id, sourceId, rowNum, actor, notes],
+      );
+      return rows[0];
+    });
   },
 };
 
@@ -6065,7 +6323,7 @@ export const operations: Operation[] = [
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
   get_calibration_profile,
   // v0.28: Takes + think
-  list_take_proposals, takes_list, takes_search, think,
+  list_take_proposals, resolve_take_proposal, takes_list, takes_search, think,
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management

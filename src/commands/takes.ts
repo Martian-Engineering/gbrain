@@ -23,12 +23,12 @@ import { join, dirname } from 'node:path';
 import type { BrainEngine, TakeKind } from '../core/engine.ts';
 import {
   parseTakesFence,
-  upsertTakeRow,
   supersedeRow,
   type ParsedTake,
 } from '../core/takes-fence.ts';
 import { withPageLock } from '../core/page-lock.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
+import { addTake, TakeAddError } from '../core/take-add.ts';
 
 // --- Helpers ---
 
@@ -204,24 +204,26 @@ async function cmdAdd(engine: BrainEngine, args: string[], sourceId?: string): P
   const source = flagValue(args, '--source');
   const since = flagValue(args, '--since');
   const dirArg = flagValue(args, '--dir');
-  const brainDir = await resolveBrainDir(engine, dirArg ?? null);
-
-  await withPageLock(slug, async () => {
-    const path = pageFilePath(brainDir, slug);
-    const body = readBodyOrEmpty(path);
-    const { body: nextBody, rowNum } = upsertTakeRow(body, {
-      claim, kind, holder, weight, source, sinceDate: since, active: true,
+  try {
+    const { rowNum } = await addTake(engine, {
+      slug,
+      claim,
+      kind,
+      holder,
+      weight,
+      source,
+      sinceDate: since,
+      sourceId,
+      brainDir: dirArg,
     });
-    writeBody(path, nextBody);
-
-    // Mirror to DB. Page may not be in DB yet if not synced — caller must run sync first.
-    const pageId = await getPageId(engine, slug, sourceId);
-    await engine.addTakesBatch([{
-      page_id: pageId, row_num: rowNum, claim, kind, holder, weight,
-      since_date: since, source, active: true, superseded_by: null,
-    }]);
     console.log(`Added take #${rowNum} to ${slug}.`);
-  });
+  } catch (error) {
+    if (error instanceof TakeAddError) {
+      console.error(error.message);
+      process.exit(1);
+    }
+    throw error;
+  }
 }
 
 async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
