@@ -599,7 +599,51 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     });
   });
 
-  test('remote callers cannot remove host source files', async () => {
+  test('remote admin caller can remove the confined merged-page source file', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-admin-source-'));
+    const sourceFile = join(repo, 'old.md');
+    try {
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('old', 'default', 'old.md');
+      await seedPage('canonical');
+      const auth = {
+        token: 't',
+        clientId: 'admin-client',
+        scopes: ['admin'],
+        sourceId: 'default',
+      };
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(
+          ctx('default', true, auth),
+          {
+            alias_slug: 'old',
+            canonical_slug: 'canonical',
+            soft_delete_old: true,
+            remove_file: true,
+          },
+        );
+        expect(result).toMatchObject({
+          status: 'added',
+          source_id: 'default',
+          alias_slug: 'old',
+          canonical_slug: 'canonical',
+          soft_deleted_old: true,
+          file_removed: true,
+          warnings: [],
+        });
+      });
+      expect(existsSync(sourceFile)).toBe(false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('remote write-only caller cannot remove host source files', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remote-source-'));
     const sourceFile = join(repo, 'old.md');
     try {
@@ -626,10 +670,52 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
             soft_delete_old: true,
             remove_file: true,
           },
-        )).rejects.toMatchObject({ code: 'permission_denied' });
+        )).rejects.toMatchObject({
+          code: 'permission_denied',
+          message: 'remove_file is available only to trusted local callers.',
+        });
       });
       expect(readFileSync(sourceFile, 'utf8')).toBe('# old\n');
       expect((await engine.getPage('old', { sourceId: 'default' }))?.deleted_at).toBeNull();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('remote admin caller without remove_file leaves the source file untouched', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-admin-no-remove-'));
+    const sourceFile = join(repo, 'old.md');
+    try {
+      writeFileSync(sourceFile, '# old\n');
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage('old', 'default', 'old.md');
+      await seedPage('canonical');
+      const auth = {
+        token: 't',
+        clientId: 'admin-client',
+        scopes: ['admin'],
+        sourceId: 'default',
+      };
+
+      await withAuditDir(async () => {
+        const result = await operationsByName.add_slug_alias.handler(
+          ctx('default', true, auth),
+          {
+            alias_slug: 'old',
+            canonical_slug: 'canonical',
+            soft_delete_old: true,
+          },
+        );
+        expect(result).toMatchObject({
+          status: 'added',
+          soft_deleted_old: true,
+          file_removed: false,
+        });
+      });
+      expect(readFileSync(sourceFile, 'utf8')).toBe('# old\n');
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
@@ -709,7 +795,7 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     }
   });
 
-  test('removes a confined source file when explicitly requested', async () => {
+  test('trusted local caller still removes a confined source file when explicitly requested', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remove-source-'));
     try {
       mkdirSync(join(repo, 'notes'), { recursive: true });

@@ -41,6 +41,7 @@ import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
+import { hasScope } from './scope.ts';
 import { isUndefinedTableError } from './utils.ts';
 import {
   addSlugAlias,
@@ -1479,12 +1480,12 @@ function requestedAliasSource(p: Record<string, unknown>): string | undefined {
 
 const add_slug_alias: Operation = {
   name: 'add_slug_alias',
-  description: 'Add a source-scoped old-slug to canonical-slug redirect. The canonical page must be active. Existing mappings and active old pages require explicit flags. For trusted local callers, remove_file deletes the merged page source file after commit; the next sync hard-deletes its tombstone and collapses the 72h restore window. Before then, undo with remove_slug_alias plus restore_page; afterward restore the file through Git.',
+  description: 'Add a source-scoped old-slug to canonical-slug redirect. The canonical page must be active. Existing mappings and active old pages require explicit flags. For trusted local or admin-scoped remote callers, remove_file deletes the merged page source file after commit; the next sync hard-deletes its tombstone and collapses the 72h restore window. Before then, undo with remove_slug_alias plus restore_page; afterward restore the file through Git.',
   params: {
     alias_slug: { type: 'string', required: true, description: 'Old slug that should redirect' },
     canonical_slug: { type: 'string', required: true, description: 'Existing active canonical page slug' },
     soft_delete_old: { type: 'boolean', description: 'Atomically soft-delete an active page at alias_slug before creating the redirect' },
-    remove_file: { type: 'boolean', description: 'Trusted local callers only: after commit, remove the old page source file when soft_delete_old removed it' },
+    remove_file: { type: 'boolean', description: 'Trusted local or admin-scoped remote callers only: after commit, remove the old page source file when soft_delete_old removed it' },
     replace: { type: 'boolean', description: 'Allow replacing an existing alias mapping' },
     notes: { type: 'string', description: 'Operator provenance for this alias mapping' },
     source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
@@ -1508,7 +1509,14 @@ const add_slug_alias: Operation = {
       sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
       validatePageSlug(aliasSlug);
       validatePageSlug(canonicalSlug);
-      if (p.remove_file === true && ctx.remote !== false) {
+      // Remote put_page already performs confined writes through writePageThrough,
+      // while removeSyncedSourceFile only targets the merged page's registered
+      // source_path inside the source root. Admin gating keeps leaked plain-write tokens harmless.
+      if (
+        p.remove_file === true
+        && ctx.remote !== false
+        && !hasScope(ctx.auth?.scopes ?? [], 'admin')
+      ) {
         throw new OperationError(
           'permission_denied',
           'remove_file is available only to trusted local callers.',
