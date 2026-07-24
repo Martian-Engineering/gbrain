@@ -541,7 +541,11 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='timeline_entries') AS timeline_entries_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='timeline_entries' AND column_name='event_page_id') AS timeline_event_page_id_exists
+                WHERE table_schema='public' AND table_name='timeline_entries' AND column_name='event_page_id') AS timeline_event_page_id_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='take_proposals') AS take_proposals_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='take_proposals' AND column_name='claim_hash') AS take_proposals_claim_hash_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -586,6 +590,8 @@ export class PGLiteEngine implements BrainEngine {
       pages_links_extracted_at_exists: boolean;
       timeline_entries_exists: boolean;
       timeline_event_page_id_exists: boolean;
+      take_proposals_exists: boolean;
+      take_proposals_claim_hash_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -664,6 +670,10 @@ export class PGLiteEngine implements BrainEngine {
     const needsPagesLinksExtractedAt = probe.pages_exists && !probe.pages_links_extracted_at_exists;
     // v121: schema-blob indexes reference event_page_id before migrations run.
     const needsTimelineEventPageId = probe.timeline_entries_exists && !probe.timeline_event_page_id_exists;
+    // v126: take_proposals_idempotency_idx in the schema blob references
+    // claim_hash before migrations run on an existing brain.
+    const needsTakeProposalsClaimHash = probe.take_proposals_exists
+      && !probe.take_proposals_claim_hash_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -676,7 +686,8 @@ export class PGLiteEngine implements BrainEngine {
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
         && !needsPagesLinksExtractedAt
-        && !needsTimelineEventPageId) return;
+        && !needsTimelineEventPageId
+        && !needsTakeProposalsClaimHash) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -929,6 +940,15 @@ export class PGLiteEngine implements BrainEngine {
       // source of truth for the FK and indexes and runs idempotently afterward.
       await this.db.exec(`
         ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER;
+      `);
+    }
+
+    if (needsTakeProposalsClaimHash) {
+      // Add only the forward-referenced column, nullable. Migration v126
+      // remains the source of truth for the backfill, NOT NULL constraint,
+      // and idempotency-index swap and runs idempotently afterward.
+      await this.db.exec(`
+        ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT;
       `);
     }
   }

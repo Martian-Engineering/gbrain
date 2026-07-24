@@ -171,6 +171,11 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // v121 — referenced by the timeline event lookup and dedup indexes before
   // the numbered migration can add the column on an existing brain.
   { kind: 'column', table: 'timeline_entries', column: 'event_page_id' },
+  // v126 — forward-referenced by `CREATE UNIQUE INDEX
+  // take_proposals_idempotency_idx ON take_proposals (..., claim_hash)`.
+  // Pre-v126 brains crash on schema replay without the column; migration
+  // v126 backfills, sets NOT NULL, and swaps the index afterward.
+  { kind: 'column', table: 'take_proposals', column: 'claim_hash' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -256,6 +261,9 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages DROP COLUMN IF EXISTS generation;
       ALTER TABLE pages DROP COLUMN IF EXISTS contextual_retrieval_mode;
       ALTER TABLE pages DROP COLUMN IF EXISTS corpus_generation;
+
+      DROP INDEX IF EXISTS take_proposals_idempotency_idx;
+      ALTER TABLE take_proposals DROP COLUMN IF EXISTS claim_hash;
     `);
 
     // Note: we don't strip sources.archived* here because they're inline in the

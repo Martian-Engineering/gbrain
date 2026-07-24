@@ -467,6 +467,8 @@ export class PostgresEngine implements BrainEngine {
    *     (indexed by `idx_mcp_log_agent_time`) — v0.26.3
    *   - `subagent_messages.provider_id` column (indexed by
    *     `idx_subagent_messages_provider`) — v0.27
+   *   - `take_proposals.claim_hash` column (indexed by
+   *     `take_proposals_idempotency_idx`) — v126
    *
    * Keep this in sync with the PGLite version; covered by
    * `test/schema-bootstrap-coverage.test.ts` (PGLite side) and
@@ -597,7 +599,11 @@ export class PostgresEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'timeline_entries') AS timeline_entries_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema = current_schema() AND table_name = 'timeline_entries' AND column_name = 'event_page_id') AS timeline_event_page_id_exists
+                WHERE table_schema = current_schema() AND table_name = 'timeline_entries' AND column_name = 'event_page_id') AS timeline_event_page_id_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'take_proposals') AS take_proposals_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'take_proposals' AND column_name = 'claim_hash') AS take_proposals_claim_hash_exists
     `;
     const probe = probeRows[0]!;
 
@@ -676,6 +682,8 @@ export class PostgresEngine implements BrainEngine {
       pages_links_extracted_at_exists?: boolean;
       timeline_entries_exists?: boolean;
       timeline_event_page_id_exists?: boolean;
+      take_proposals_exists?: boolean;
+      take_proposals_claim_hash_exists?: boolean;
     };
     const needsContextualRetrievalColumns = (probe.pages_exists
         && (!probeCr.pages_cr_mode_exists || !probeCr.pages_corpus_generation_exists))
@@ -698,6 +706,12 @@ export class PostgresEngine implements BrainEngine {
     // v121: schema-blob indexes reference event_page_id before migrations run.
     const needsTimelineEventPageId = probeCr.timeline_entries_exists === true
       && !probeCr.timeline_event_page_id_exists;
+    // v126: take_proposals_idempotency_idx in SCHEMA_SQL references claim_hash.
+    // Pre-v126 brains crash on schema replay without the column; bootstrap adds
+    // it before the index statement is analyzed. v126 runs later via
+    // runMigrations (backfill + NOT NULL + index swap) and is idempotent.
+    const needsTakeProposalsClaimHash = probeCr.take_proposals_exists === true
+      && !probeCr.take_proposals_claim_hash_exists;
 
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
@@ -709,7 +723,8 @@ export class PostgresEngine implements BrainEngine {
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
         && !needsPagesLinksExtractedAt
-        && !needsTimelineEventPageId) return;
+        && !needsTimelineEventPageId
+        && !needsTakeProposalsClaimHash) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -962,6 +977,15 @@ export class PostgresEngine implements BrainEngine {
       // source of truth for the FK and indexes and runs idempotently afterward.
       await conn.unsafe(`
         ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS event_page_id INTEGER;
+      `);
+    }
+
+    if (needsTakeProposalsClaimHash) {
+      // Add only the forward-referenced column, nullable. Migration v126
+      // remains the source of truth for the backfill, NOT NULL constraint,
+      // and idempotency-index swap and runs idempotently afterward.
+      await conn.unsafe(`
+        ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT;
       `);
     }
   }
