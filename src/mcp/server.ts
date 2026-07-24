@@ -37,9 +37,10 @@ export async function startMcpServer(engine: BrainEngine) {
     const { name, arguments: params } = request.params;
     // v0.28: stdio MCP has no per-token auth (local pipe). Default the
     // takes-holder allow-list to ['world'] so agent-facing callers don't
-    // see private hunches via takes_list / takes_search / query. Operators
-    // who want stdio to see everything should call ops directly via
-    // `gbrain call <op>` (sets remote=false in src/cli.ts).
+    // see private hunches via takes_list / takes_search /
+    // list_take_proposals / query. Operators who want stdio to see
+    // everything should call ops directly via `gbrain call <op>`
+    // (sets remote=false in src/cli.ts).
     return dispatchToolCall(engine, name, params, {
       remote: true,
       takesHoldersAllowList: ['world'],

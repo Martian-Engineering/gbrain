@@ -398,7 +398,8 @@ export interface OperationContext {
    *
    * When set (i.e., this OperationContext came from an MCP-bound token),
    * `takes_list`, `takes_search`, `takes_scorecard`, `takes_calibration`,
-   * and `query` (when it returns takes) MUST apply `WHERE holder = ANY($takesHoldersAllowList)`.
+   * `list_take_proposals`, and `query` (when it returns takes) MUST apply
+   * `WHERE holder = ANY($takesHoldersAllowList)`.
    * This is the server-side filter that backs the v0.28+ visibility model.
    *
    * v0.30.0: aggregate ops (`takes_scorecard`, `takes_calibration`) require
@@ -2243,6 +2244,141 @@ const query: Operation = {
 };
 
 // --- v0.28: Takes ---
+
+/** Status values persisted by the take proposal review queue. */
+export type TakeProposalStatus =
+  | 'pending'
+  | 'accepted'
+  | 'rejected'
+  | 'superseded';
+
+/** Complete take proposal row returned by list_take_proposals. */
+export interface TakeProposal {
+  id: number;
+  source_id: string;
+  page_slug: string;
+  content_hash: string;
+  prompt_version: string;
+  wave_version: string;
+  proposed_at: Date | string;
+  proposal_run_id: string;
+  status: TakeProposalStatus;
+  claim_text: string;
+  claim_hash: string;
+  kind: string;
+  holder: string;
+  weight: number;
+  domain: string | null;
+  dedup_against_fence_rows: unknown;
+  model_id: string;
+  acted_at: Date | string | null;
+  acted_by: string | null;
+  promoted_row_num: number | null;
+  resolution_note: string | null;
+  predicted_brier: number | null;
+  predicted_brier_bucket_n: number | null;
+}
+
+const TAKE_PROPOSAL_STATUSES: readonly TakeProposalStatus[] = [
+  'pending',
+  'accepted',
+  'rejected',
+  'superseded',
+];
+
+const list_take_proposals: Operation = {
+  name: 'list_take_proposals',
+  description: 'List source- and holder-visible take proposals for review.',
+  scope: 'read',
+  params: {
+    status: {
+      type: 'string',
+      enum: [...TAKE_PROPOSAL_STATUSES, 'all'],
+      default: 'pending',
+      description: 'pending (default), accepted, rejected, superseded, or all',
+    },
+    page_slug: { type: 'string', description: 'Filter to an exact page slug' },
+    proposal_run_id: { type: 'string', description: 'Filter to one proposal run' },
+    limit: { type: 'number', default: 50, description: 'Page size (default 50, clamp 1-200)' },
+    offset: { type: 'number', default: 0, description: 'Rows to skip (default 0)' },
+  },
+  handler: async (ctx, p) => {
+    // Validate direct library callers too; MCP/CLI schema validation is not
+    // the only way operations are invoked.
+    const rawStatus = (p.status as string | undefined) ?? 'pending';
+    if (
+      rawStatus !== 'all'
+      && !(TAKE_PROPOSAL_STATUSES as readonly string[]).includes(rawStatus)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        `Unknown take proposal status '${rawStatus}'.`,
+      );
+    }
+
+    // Normalize pagination once so the response reports the effective values
+    // used by SQL.
+    const requestedLimit = typeof p.limit === 'number' && Number.isFinite(p.limit)
+      ? Math.trunc(p.limit)
+      : 50;
+    const requestedOffset = typeof p.offset === 'number' && Number.isFinite(p.offset)
+      ? Math.trunc(p.offset)
+      : 0;
+    const limit = Math.min(200, Math.max(1, requestedLimit));
+    const offset = Math.max(0, requestedOffset);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    const scope = sourceScopeOpts(ctx);
+
+    // Build one parameterized predicate and reuse it for the full count and
+    // the paginated rows. This keeps total honest as filters evolve.
+    if (scope.sourceIds !== undefined) {
+      params.push(scope.sourceIds);
+      where.push(`source_id = ANY($${params.length}::text[])`);
+    } else if (scope.sourceId !== undefined) {
+      params.push(scope.sourceId);
+      where.push(`source_id = $${params.length}`);
+    }
+    if (rawStatus !== 'all') {
+      params.push(rawStatus);
+      where.push(`status = $${params.length}`);
+    }
+    if (typeof p.page_slug === 'string') {
+      params.push(p.page_slug);
+      where.push(`page_slug = $${params.length}`);
+    }
+    if (typeof p.proposal_run_id === 'string') {
+      params.push(p.proposal_run_id);
+      where.push(`proposal_run_id = $${params.length}`);
+    }
+    if (ctx.takesHoldersAllowList !== undefined) {
+      params.push(ctx.takesHoldersAllowList);
+      where.push(`holder = ANY($${params.length}::text[])`);
+    }
+
+    const predicate = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const countRows = await ctx.engine.executeRaw<{ total: number }>(
+      `SELECT COUNT(*)::int AS total FROM take_proposals ${predicate}`,
+      params,
+    );
+    const pageParams = [...params, limit, offset];
+    const proposals = await ctx.engine.executeRaw<TakeProposal>(
+      `SELECT *
+         FROM take_proposals
+         ${predicate}
+        ORDER BY proposed_at DESC, id DESC
+        LIMIT $${pageParams.length - 1}
+       OFFSET $${pageParams.length}`,
+      pageParams,
+    );
+    return {
+      proposals,
+      total: Number(countRows[0]?.total ?? 0),
+      limit,
+      offset,
+    };
+  },
+};
 
 const takes_list: Operation = {
   name: 'takes_list',
@@ -5929,7 +6065,7 @@ export const operations: Operation[] = [
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
   get_calibration_profile,
   // v0.28: Takes + think
-  takes_list, takes_search, think,
+  list_take_proposals, takes_list, takes_search, think,
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
