@@ -2373,7 +2373,9 @@ const list_take_proposals: Operation = {
       pageParams,
     );
     return {
-      proposals,
+      // BIGSERIAL ids arrive from the Postgres driver as strings; the
+      // operation contract promises numeric ids on both engines.
+      proposals: proposals.map(row => ({ ...row, id: Number(row.id) })),
       total: Number(countRows[0]?.total ?? 0),
       limit,
       offset,
@@ -2596,7 +2598,7 @@ const resolve_take_proposal: Operation = {
                     promoted_row_num, resolution_note`,
           [id, sourceId, actor, notes],
         );
-        return rows[0];
+        return { ...rows[0], id };
       }
 
       // The shared service owns the canonical markdown-first promotion; the
@@ -2633,7 +2635,7 @@ const resolve_take_proposal: Operation = {
                   promoted_row_num, resolution_note`,
         [id, sourceId, rowNum, actor, notes],
       );
-      return rows[0];
+      return { ...rows[0], id };
     });
   },
 };
