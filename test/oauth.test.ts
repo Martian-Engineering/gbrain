@@ -11,6 +11,12 @@ import {
 } from '../src/core/oauth-provider.ts';
 import { hashToken, generateToken } from '../src/core/utils.ts';
 import { PGLITE_SCHEMA_SQL } from '../src/core/pglite-schema.ts';
+import { MIGRATIONS } from '../src/core/migrate.ts';
+import {
+  operationsByName,
+  type OperationContext,
+} from '../src/core/operations.ts';
+import { hasScope } from '../src/core/scope.ts';
 import { InvalidTokenError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthInfo as CoreAuthInfo } from '../src/core/operations.ts';
 
@@ -21,6 +27,31 @@ import type { AuthInfo as CoreAuthInfo } from '../src/core/operations.ts';
 let db: PGlite;
 let sql: (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any>;
 let provider: GBrainOAuthProvider;
+
+const operationEngine = {
+  kind: 'pglite',
+  executeRaw: async (query: string, params: unknown[] = []) => {
+    const result = await db.query(query, params as any[]);
+    return result.rows;
+  },
+  transaction: async (fn: (engine: any) => Promise<unknown>) => fn(operationEngine),
+};
+
+function operationContext(clientId = 'gbrain_cl_admin'): OperationContext {
+  return {
+    engine: operationEngine as any,
+    config: {} as any,
+    logger: { info() {}, warn() {}, error() {} },
+    dryRun: false,
+    remote: true,
+    sourceId: 'default',
+    auth: {
+      token: 'test-admin-token',
+      clientId,
+      scopes: ['admin'],
+    },
+  };
+}
 
 beforeAll(async () => {
   db = new PGlite({ extensions: { vector, pg_trgm } });
@@ -164,6 +195,369 @@ describe('client registration', () => {
     expect(Number(rows[0].bound_max_concurrent)).toBe(2);
     expect(rows[0].budget).toBe('7.50');
   });
+
+  test('registerClientManual persists bound_principal when supplied', async () => {
+    const { clientId } = await provider.registerClientManual(
+      'principal-bound-agent',
+      ['client_credentials'],
+      'read',
+      [],
+      'default',
+      undefined,
+      undefined,
+      undefined,
+      'people/alice-example',
+    );
+
+    const rows = await sql`
+      SELECT bound_principal
+        FROM oauth_clients
+       WHERE client_id = ${clientId}
+    `;
+    expect(rows[0].bound_principal).toBe('people/alice-example');
+  });
+
+  test('v128 adds bound_principal and registration is defensive before migration', async () => {
+    const migration = MIGRATIONS.find(candidate => candidate.version === 128);
+    expect(migration?.name).toBe('oauth_clients_bound_principal');
+    expect(migration?.sqlFor?.pglite).toBeTruthy();
+
+    await db.exec('ALTER TABLE oauth_clients DROP COLUMN IF EXISTS bound_principal');
+    try {
+      await expect(provider.registerClientManual(
+        'pre-v128-unbound',
+        ['client_credentials'],
+        'read',
+      )).resolves.toMatchObject({
+        clientId: expect.stringContaining('gbrain_cl_'),
+      });
+
+      await expect(provider.registerClientManual(
+        'pre-v128-bound',
+        ['client_credentials'],
+        'read',
+        [],
+        'default',
+        undefined,
+        undefined,
+        undefined,
+        'people/alice-example',
+      )).rejects.toThrow(/apply-migrations/);
+    } finally {
+      if (migration?.sqlFor?.pglite) {
+        await db.exec(migration.sqlFor.pglite);
+      }
+    }
+
+    const columns = await db.query<{ column_name: string }>(`
+      SELECT column_name
+        FROM information_schema.columns
+       WHERE table_name = 'oauth_clients'
+         AND column_name = 'bound_principal'
+    `);
+    expect(columns.rows).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin client provisioning operations
+// ---------------------------------------------------------------------------
+
+describe('admin client provisioning operations', () => {
+  test('provision_client returns one-time credentials for a usable scoped client', async () => {
+    await sql`
+      INSERT INTO sources (id, name)
+      VALUES (${'provision-source'}, ${'Provision Source'})
+      ON CONFLICT (id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO sources (id, name)
+      VALUES (${'provision-shared'}, ${'Provision Shared'})
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    const result = await operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'viewer-client',
+        scopes: ['read'],
+        source_id: 'provision-source',
+        federated_read: ['provision-source', 'provision-shared'],
+        bound_principal: 'people/alice-example',
+      },
+    ) as any;
+
+    expect(result.client_id).toStartWith('gbrain_cl_');
+    expect(result.client_secret).toStartWith('gbrain_cs_');
+    expect(result).toMatchObject({
+      client_name: 'viewer-client',
+      scopes: ['read'],
+      source_id: 'provision-source',
+      federated_read: ['provision-source', 'provision-shared'],
+      bound_principal: 'people/alice-example',
+    });
+
+    const rows = await sql`
+      SELECT client_secret_hash, scope, source_id, federated_read, bound_principal
+        FROM oauth_clients
+       WHERE client_id = ${result.client_id}
+    `;
+    expect(rows[0]).toMatchObject({
+      client_secret_hash: hashToken(result.client_secret),
+      scope: 'read',
+      source_id: 'provision-source',
+      federated_read: ['provision-source', 'provision-shared'],
+      bound_principal: 'people/alice-example',
+    });
+    expect(rows[0].client_secret_hash).not.toBe(result.client_secret);
+
+    const tokens = await provider.exchangeClientCredentials(
+      result.client_id,
+      result.client_secret,
+      'read',
+    );
+    const auth = await provider.verifyAccessToken(tokens.access_token) as CoreAuthInfo;
+    expect(auth.clientId).toBe(result.client_id);
+    expect(auth.sourceId).toBe('provision-source');
+    expect(auth.allowedSources).toEqual(['provision-source', 'provision-shared']);
+  });
+
+  test('provision_client folds the write source into the read grant', async () => {
+    await sql`
+      INSERT INTO sources (id, name)
+      VALUES (${'provision-write-only'}, ${'Provision Write Only'})
+      ON CONFLICT (id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO sources (id, name)
+      VALUES (${'provision-shared'}, ${'Provision Shared'})
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    const result = await operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'write-outside-read',
+        scopes: ['read'],
+        source_id: 'provision-write-only',
+        federated_read: ['provision-shared'],
+      },
+    ) as any;
+
+    expect(result.federated_read).toEqual([
+      'provision-shared',
+      'provision-write-only',
+    ]);
+    const rows = await sql`
+      SELECT federated_read FROM oauth_clients WHERE client_id = ${result.client_id}
+    `;
+    expect(rows[0]!.federated_read).toEqual([
+      'provision-shared',
+      'provision-write-only',
+    ]);
+  });
+
+  test('provision_client rejects invalid scope and source grants', async () => {
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'bad-scope',
+        scopes: ['read', 'unknown'],
+        source_id: 'default',
+        federated_read: ['default'],
+      },
+    )).rejects.toMatchObject({ code: 'invalid_scope' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'bad-source',
+        scopes: ['read'],
+        source_id: 'missing-source',
+        federated_read: ['default'],
+      },
+    )).rejects.toMatchObject({ code: 'invalid_source' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'bad-federated-source',
+        scopes: ['read'],
+        source_id: 'default',
+        federated_read: ['missing-source'],
+      },
+    )).rejects.toMatchObject({ code: 'invalid_source' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'empty-federated-read',
+        scopes: ['read'],
+        source_id: 'default',
+        federated_read: [],
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'empty-principal',
+        scopes: ['read'],
+        source_id: 'default',
+        federated_read: ['default'],
+        bound_principal: '',
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  test('read-only dispatch rejects both provisioning operations', () => {
+    for (const name of ['provision_client', 'revoke_client']) {
+      const op = operationsByName[name];
+      expect(op.scope).toBe('admin');
+      expect(op.localOnly).toBeFalsy();
+      expect(hasScope(['read'], op.scope!)).toBe(false);
+
+      const dispatchResult = hasScope(['read'], op.scope ?? 'read')
+        ? { ok: true }
+        : { error: 'insufficient_scope' };
+      expect(dispatchResult).toEqual({ error: 'insufficient_scope' });
+    }
+  });
+
+  test('revoke_client soft-deletes the client and invalidates outstanding tokens', async () => {
+    const provisioned = await operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'revoke-target',
+        scopes: ['read'],
+        source_id: 'default',
+        federated_read: ['default'],
+      },
+    ) as any;
+    expect(provisioned.bound_principal).toBeNull();
+    const tokens = await provider.exchangeClientCredentials(
+      provisioned.client_id,
+      provisioned.client_secret,
+      'read',
+    );
+    await expect(provider.verifyAccessToken(tokens.access_token)).resolves.toMatchObject({
+      clientId: provisioned.client_id,
+    });
+
+    const result = await operationsByName.revoke_client.handler(
+      operationContext(),
+      { client_id: provisioned.client_id },
+    );
+    expect(result).toEqual({ client_id: provisioned.client_id, revoked: true });
+
+    const clients = await sql`
+      SELECT deleted_at
+        FROM oauth_clients
+       WHERE client_id = ${provisioned.client_id}
+    `;
+    expect(clients[0].deleted_at).not.toBeNull();
+    const tokensRemaining = await sql`
+      SELECT COUNT(*)::int AS count
+        FROM oauth_tokens
+       WHERE client_id = ${provisioned.client_id}
+    `;
+    expect(tokensRemaining[0].count).toBe(0);
+    await expect(provider.verifyAccessToken(tokens.access_token)).rejects.toThrow('Invalid token');
+
+    await expect(operationsByName.revoke_client.handler(
+      operationContext(),
+      { client_id: provisioned.client_id },
+    )).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  test('revoke_client invalidates outstanding authorization codes', async () => {
+    const { clientId, clientSecret } = await provider.registerClientManual(
+      'revoke-code-target',
+      ['authorization_code'],
+      'read',
+      ['http://localhost:3000/callback'],
+      'default',
+      undefined,
+      'none',
+    );
+    expect(clientSecret).toBeUndefined();
+    const client = (await provider.clientsStore.getClient(clientId))!;
+
+    let redirectUrl = '';
+    const mockRes = {
+      redirect: (url: string) => { redirectUrl = url; },
+    } as any;
+    await provider.authorize(client, {
+      codeChallenge: 'revoke-code-challenge',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: ['read'],
+    }, mockRes);
+    const code = new URL(redirectUrl).searchParams.get('code')!;
+
+    // A second authorized code is exchanged before revocation so the client
+    // holds a live refresh token going into the revoke.
+    await provider.authorize(client, {
+      codeChallenge: 'revoke-code-challenge-refresh',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: ['read'],
+    }, mockRes);
+    const exchangedCode = new URL(redirectUrl).searchParams.get('code')!;
+    const preRevokeTokens = await provider.exchangeAuthorizationCode(
+      client,
+      exchangedCode,
+      undefined,
+      'http://localhost:3000/callback',
+    );
+    expect(preRevokeTokens.refresh_token).toBeDefined();
+
+    const codesBeforeRevoke = await sql`
+      SELECT COUNT(*)::int AS count
+        FROM oauth_codes
+       WHERE client_id = ${clientId}
+    `;
+    expect(codesBeforeRevoke[0].count).toBe(1);
+
+    await operationsByName.revoke_client.handler(
+      operationContext(),
+      { client_id: clientId },
+    );
+
+    await expect(provider.exchangeAuthorizationCode(client, code))
+      .rejects.toThrow('Client has been revoked');
+
+    await expect(provider.exchangeRefreshToken(
+      client,
+      preRevokeTokens.refresh_token!,
+    )).rejects.toThrow('Client has been revoked');
+
+    // A revoked client must also be refused a fresh authorization flow, not
+    // just lose its outstanding codes.
+    await expect(provider.authorize(client, {
+      codeChallenge: 'revoke-code-challenge-2',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: ['read'],
+    }, mockRes)).rejects.toThrow('Client has been revoked');
+    const codesAfterRevoke = await sql`
+      SELECT COUNT(*)::int AS count
+        FROM oauth_codes
+       WHERE client_id = ${clientId}
+    `;
+    expect(codesAfterRevoke[0].count).toBe(0);
+  });
+
+  test('revoke_client rejects self-revocation and unknown clients', async () => {
+    const ownClientId = 'gbrain_cl_self_test';
+    await expect(operationsByName.revoke_client.handler(
+      operationContext(ownClientId),
+      { client_id: ownClientId },
+    )).rejects.toMatchObject({ code: 'cannot_revoke_self' });
+
+    await expect(operationsByName.revoke_client.handler(
+      operationContext(),
+      { client_id: 'gbrain_cl_missing' },
+    )).rejects.toMatchObject({ code: 'not_found' });
+  });
+
 });
 
 // ---------------------------------------------------------------------------

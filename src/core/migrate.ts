@@ -5760,6 +5760,23 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS owner TEXT;
     `,
   },
+  {
+    version: 128,
+    name: 'oauth_clients_bound_principal',
+    // Registration-time identity binding for headless viewer clients.
+    // Nullable so existing clients remain unchanged; no backfill is required.
+    idempotent: true,
+    sql: `
+      ALTER TABLE oauth_clients
+        ADD COLUMN IF NOT EXISTS bound_principal TEXT NULL;
+    `,
+    sqlFor: {
+      pglite: `
+        ALTER TABLE oauth_clients
+          ADD COLUMN IF NOT EXISTS bound_principal TEXT NULL;
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

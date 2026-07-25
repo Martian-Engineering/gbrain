@@ -411,11 +411,25 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   // Authorization Code Flow
   // -------------------------------------------------------------------------
 
+  // Refuse grant traffic from a soft-deleted client. Same defensive probe
+  // shape as exchangeClientCredentials: pre-migration brains lack the
+  // deleted_at column, and only that one failure mode is tolerated.
+  private async assertClientNotRevoked(clientId: string): Promise<void> {
+    try {
+      const [revoked] = await this.sql`SELECT deleted_at FROM oauth_clients WHERE client_id = ${clientId} AND deleted_at IS NOT NULL`;
+      if (revoked) throw new Error('Client has been revoked');
+    } catch (e) {
+      if (e instanceof Error && e.message === 'Client has been revoked') throw e;
+      if (!isUndefinedColumnError(e, 'deleted_at')) throw e;
+    }
+  }
+
   async authorize(
     client: OAuthClientInformationFull,
     params: AuthorizationParams,
     res: Response,
   ): Promise<void> {
+    await this.assertClientNotRevoked(client.client_id);
     const code = generateToken('gbrain_code_');
     const codeHash = hashToken(code);
     const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 minute TTL
@@ -483,6 +497,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
+    await this.assertClientNotRevoked(client.client_id);
     const codeHash = hashToken(authorizationCode);
     const now = Math.floor(Date.now() / 1000);
 
@@ -534,6 +549,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
+    await this.assertClientNotRevoked(client.client_id);
     const tokenHash = hashToken(refreshToken);
     const now = Math.floor(Date.now() / 1000);
 
@@ -895,6 +911,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     federatedRead?: string[],
     tokenEndpointAuthMethod?: string,
     agentBindings?: AgentClientBindings,
+    boundPrincipal?: string,
   ): Promise<{ clientId: string; clientSecret?: string }> {
     // v0.28: ALLOWED_SCOPES allowlist. Reject `--scopes "read flying-unicorn"`
     // at registration so meaningless scope strings can't pile up in the DB.
@@ -927,7 +944,35 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     //                    has read scope == write scope, the v0.33 default)
     const federated = federatedRead && federatedRead.length > 0 ? federatedRead : [sourceId];
     try {
-      if (agentBindings) {
+      if (boundPrincipal !== undefined && !agentBindings) {
+        await this.sql`
+          INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                      grant_types, scope, token_endpoint_auth_method,
+                                      client_id_issued_at,
+                                      source_id, federated_read, bound_principal)
+          VALUES (${clientId}, ${secretHash}, ${name},
+                  ${pgArray(redirectUris)}, ${pgArray(grantTypes)}, ${scopes}, ${authMethod}, ${now},
+                  ${sourceId}, ${pgArray(federated)}, ${boundPrincipal})
+        `;
+      } else if (boundPrincipal !== undefined) {
+        await this.sql`
+          INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
+                                      grant_types, scope, token_endpoint_auth_method,
+                                      client_id_issued_at,
+                                      source_id, federated_read,
+                                      bound_tools, bound_source_id, bound_brain_id,
+                                      bound_slug_prefixes, bound_max_concurrent, budget_usd_per_day,
+                                      bound_principal)
+          VALUES (${clientId}, ${secretHash}, ${name},
+                  ${pgArray(redirectUris)}, ${pgArray(grantTypes)}, ${scopes}, ${authMethod}, ${now},
+                  ${sourceId}, ${pgArray(federated)},
+                  ${agentBindings?.boundTools ? pgArray(agentBindings.boundTools) : null},
+                  ${agentBindings?.boundSourceId ?? null}, ${agentBindings?.boundBrainId ?? null},
+                  ${agentBindings?.boundSlugPrefixes ? pgArray(agentBindings.boundSlugPrefixes) : null},
+                  ${agentBindings?.boundMaxConcurrent ?? 1}, ${agentBindings?.budgetUsdPerDay ?? null},
+                  ${boundPrincipal})
+        `;
+      } else if (agentBindings) {
         await this.sql`
           INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, redirect_uris,
                                       grant_types, scope, token_endpoint_auth_method,
@@ -955,6 +1000,9 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         `;
       }
     } catch (err) {
+      if (boundPrincipal !== undefined && isUndefinedColumnError(err, 'bound_principal')) {
+        throw new Error('register-client --bound-principal requires an up-to-date OAuth schema; run `gbrain apply-migrations --yes` and retry.');
+      }
       if (agentBindings && (
         isUndefinedColumnError(err, 'bound_tools') ||
         isUndefinedColumnError(err, 'bound_source_id') ||
@@ -964,6 +1012,15 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         isUndefinedColumnError(err, 'budget_usd_per_day')
       )) {
         throw new Error('register-client --bound-* flags require an up-to-date OAuth schema; run `gbrain apply-migrations --yes` and retry.');
+      }
+      // A requested principal binding must never survive into a legacy
+      // projection: a schema old enough to lack source columns also lacks
+      // bound_principal, and the error may name either missing column.
+      if (boundPrincipal !== undefined && (
+        isUndefinedColumnError(err, 'federated_read') ||
+        isUndefinedColumnError(err, 'source_id')
+      )) {
+        throw new Error('register-client --bound-principal requires an up-to-date OAuth schema; run `gbrain apply-migrations --yes` and retry.');
       }
       // Pre-v60 / pre-v61 brain: column missing. Fall back through both
       // projections so registration still works until apply-migrations.

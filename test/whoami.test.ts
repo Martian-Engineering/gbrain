@@ -62,9 +62,17 @@ describe('whoami op contract', () => {
       clientName: 'gstack-test',
       scopes: ['read', 'sources_admin'],
       expiresAt: 1234567890,
+      sourceId: 'viewer-source',
+      allowedSources: ['viewer-source', 'shared-source'],
     };
     const result = (await whoami.handler(
-      ctxWith({ remote: true, auth }),
+      ctxWith({
+        remote: true,
+        auth,
+        engine: {
+          executeRaw: async () => [{ bound_principal: 'people/alice-example' }],
+        } as any,
+      }),
       {},
     )) as any;
     expect(result.transport).toBe('oauth');
@@ -72,6 +80,55 @@ describe('whoami op contract', () => {
     expect(result.client_name).toBe('gstack-test');
     expect(result.scopes).toEqual(['read', 'sources_admin']);
     expect(result.expires_at).toBe(1234567890);
+    expect(result.source_id).toBe('viewer-source');
+    expect(result.federated_read).toEqual(['viewer-source', 'shared-source']);
+    expect(result.bound_principal).toBe('people/alice-example');
+  });
+
+  test('oauth transport tolerates a pre-v128 schema', async () => {
+    const auth: AuthInfo = {
+      token: 'gbrain_at_xxx',
+      clientId: 'gbrain_cl_pre_v128',
+      clientName: 'pre-v128-client',
+      scopes: ['read'],
+      sourceId: 'default',
+    };
+    const missingColumn = Object.assign(
+      new Error('column "bound_principal" does not exist'),
+      { code: '42703' },
+    );
+    const result = (await whoami.handler(
+      ctxWith({
+        remote: true,
+        auth,
+        engine: {
+          executeRaw: async () => { throw missingColumn; },
+        } as any,
+      }),
+      {},
+    )) as any;
+    expect(result.source_id).toBe('default');
+    expect(result.federated_read).toEqual([]);
+    expect(result.bound_principal).toBeNull();
+  });
+
+  test('oauth transport returns null principal when the client row is missing', async () => {
+    const auth: AuthInfo = {
+      token: 'gbrain_at_xxx',
+      clientId: 'gbrain_cl_missing_row',
+      scopes: ['read'],
+    };
+    const result = (await whoami.handler(
+      ctxWith({
+        remote: true,
+        auth,
+        engine: { executeRaw: async () => [] } as any,
+      }),
+      {},
+    )) as any;
+    expect(result.source_id).toBeUndefined();
+    expect(result.federated_read).toEqual([]);
+    expect(result.bound_principal).toBeNull();
   });
 
   test('legacy transport (token name as clientId, no gbrain_cl_ prefix)', async () => {

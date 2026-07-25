@@ -352,6 +352,7 @@ interface RegisterClientArgs {
   boundSlugPrefixes: string[] | undefined;
   boundMaxConcurrent: number | undefined;
   budgetUsdPerDay: string | undefined;
+  boundPrincipal: string | undefined;
 }
 
 export function parseRegisterClientArgs(args: string[]): RegisterClientArgs {
@@ -368,6 +369,7 @@ export function parseRegisterClientArgs(args: string[]): RegisterClientArgs {
     boundSlugPrefixes: undefined,
     boundMaxConcurrent: undefined,
     budgetUsdPerDay: undefined,
+    boundPrincipal: undefined,
   };
   let i = 0;
   let grantTypesSet = false;
@@ -408,6 +410,7 @@ export function parseRegisterClientArgs(args: string[]): RegisterClientArgs {
       }
       case '--bound-source': out.boundSourceId = requireValue(); i += 2; break;
       case '--bound-brain': out.boundBrainId = requireValue(); i += 2; break;
+      case '--bound-principal': out.boundPrincipal = requireValue(); i += 2; break;
       case '--bound-slug-prefixes': {
         const v = requireValue();
         out.boundSlugPrefixes = v.split(',').map(s => s.trim()).filter(Boolean);
@@ -445,7 +448,7 @@ export function parseRegisterClientArgs(args: string[]): RegisterClientArgs {
 
 async function registerClient(name: string, args: string[]) {
   if (!name) {
-    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...] [--redirect-uri URI ...] [--token-endpoint-auth-method client_secret_post|client_secret_basic|none] [--bound-tools T1,T2] [--bound-source SOURCE] [--bound-brain BRAIN] [--bound-slug-prefixes P1,P2] [--bound-max-concurrent N] [--budget-usd-per-day USD]');
+    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...] [--redirect-uri URI ...] [--token-endpoint-auth-method client_secret_post|client_secret_basic|none] [--bound-tools T1,T2] [--bound-source SOURCE] [--bound-brain BRAIN] [--bound-principal SLUG] [--bound-slug-prefixes P1,P2] [--bound-max-concurrent N] [--budget-usd-per-day USD]');
     process.exit(1);
   }
   let parsed: RegisterClientArgs;
@@ -453,7 +456,7 @@ async function registerClient(name: string, args: string[]) {
     parsed = parseRegisterClientArgs(args);
   } catch (e: any) {
     console.error(`Error: ${e.message}`);
-    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...] [--redirect-uri URI ...] [--token-endpoint-auth-method client_secret_post|client_secret_basic|none] [--bound-tools T1,T2] [--bound-source SOURCE] [--bound-brain BRAIN] [--bound-slug-prefixes P1,P2] [--bound-max-concurrent N] [--budget-usd-per-day USD]');
+    console.error('Usage: auth register-client <name> [--grant-types G] [--scopes S] [--source SOURCE] [--federated-read SRC1,SRC2,...] [--redirect-uri URI ...] [--token-endpoint-auth-method client_secret_post|client_secret_basic|none] [--bound-tools T1,T2] [--bound-source SOURCE] [--bound-brain BRAIN] [--bound-principal SLUG] [--bound-slug-prefixes P1,P2] [--bound-max-concurrent N] [--budget-usd-per-day USD]');
     process.exit(1);
   }
   const { grantTypes, scopes, sourceId, federatedRead, redirectUris, tokenEndpointAuthMethod } = parsed;
@@ -474,7 +477,8 @@ async function registerClient(name: string, args: string[]) {
       const { GBrainOAuthProvider } = await import('../core/oauth-provider.ts');
       const provider = new GBrainOAuthProvider({ sql });
       const { clientId, clientSecret } = await provider.registerClientManual(
-        name, grantTypes, scopes, redirectUris, sourceId, federatedRead, tokenEndpointAuthMethod, agentBindings,
+        name, grantTypes, scopes, redirectUris, sourceId, federatedRead,
+        tokenEndpointAuthMethod, agentBindings, parsed.boundPrincipal,
       );
       const effectiveFederated = federatedRead && federatedRead.length > 0 ? federatedRead : [sourceId];
       const effectiveAuthMethod = tokenEndpointAuthMethod || 'client_secret_post';
@@ -493,6 +497,7 @@ async function registerClient(name: string, args: string[]) {
       }
       console.log(`  Write source:        ${sourceId}`);
       console.log(`  Federated reads:     ${effectiveFederated.join(', ')}`);
+      console.log(`  Bound principal:     ${parsed.boundPrincipal ?? '<none>'}`);
       if (agentBindings) {
         console.log(`  Bound tools:         ${(parsed.boundTools ?? []).join(', ') || '<none>'}`);
         console.log(`  Bound source:        ${parsed.boundSourceId ?? '<none>'}`);
@@ -590,6 +595,7 @@ Usage:
      --bound-tools <tool1,tool2>                           Bind submit_agent to an allow-list of tools
      --bound-source <id>                                   Bind submit_agent jobs to a source id
      --bound-brain <id>                                    Bind submit_agent jobs to a brain id
+     --bound-principal <slug>                              Bind the client to a person slug
      --bound-slug-prefixes <prefix1,prefix2>               Bind submit_agent writes to slug prefixes
      --bound-max-concurrent <n>                            Bound submit_agent concurrency (default: 1)
      --budget-usd-per-day <usd>                            Bound submit_agent daily spend cap

@@ -41,8 +41,8 @@ import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
-import { hasScope } from './scope.ts';
-import { isUndefinedTableError } from './utils.ts';
+import { assertAllowedScopes, hasScope } from './scope.ts';
+import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
 import {
   addSlugAlias,
   removeSyncedSourceFile,
@@ -4897,11 +4897,183 @@ const get_recent_transcripts: Operation = {
 
 // --- v0.28: whoami + sources management ---
 
+const provision_client: Operation = {
+  name: 'provision_client',
+  description:
+    'Provision a headless OAuth client-credentials client with fixed scopes, ' +
+    'write source, federated read sources, and an optional bound principal. ' +
+    'The plaintext client secret is returned exactly once.',
+  params: {
+    client_name: { type: 'string', required: true, description: 'Human-readable client name' },
+    scopes: {
+      type: 'array',
+      required: true,
+      description: 'OAuth scopes granted to the client',
+      items: { type: 'string' },
+    },
+    source_id: { type: 'string', required: true, description: 'Write-authority source id' },
+    federated_read: {
+      type: 'array',
+      required: true,
+      description: 'Non-empty source allow-list for reads',
+      items: { type: 'string' },
+    },
+    bound_principal: {
+      type: 'string',
+      description: 'Optional person slug this client acts for',
+    },
+  },
+  mutating: true,
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    const scopes = p.scopes as string[];
+    try {
+      assertAllowedScopes(scopes);
+    } catch (err) {
+      throw new OperationError(
+        'invalid_scope',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    const sourceId = p.source_id as string;
+    // Read dispatch prefers a non-empty federated array over the scalar
+    // source, so the write source must always be part of the read grant.
+    const requestedFederatedRead = p.federated_read as string[];
+    if (requestedFederatedRead.length === 0) {
+      throw new OperationError('invalid_params', 'federated_read must be non-empty.');
+    }
+    const federatedRead = requestedFederatedRead.includes(sourceId)
+      ? requestedFederatedRead
+      : [...requestedFederatedRead, sourceId];
+    const boundPrincipal = p.bound_principal as string | undefined;
+    if (boundPrincipal !== undefined && boundPrincipal.length === 0) {
+      throw new OperationError('invalid_params', 'bound_principal must be non-empty when provided.');
+    }
+
+    const requestedSources = Array.from(new Set([sourceId, ...federatedRead]));
+    const placeholders = requestedSources.map((_, index) => `$${index + 1}`).join(', ');
+    const sourceRows = await ctx.engine.executeRaw<{ id: string }>(
+      `SELECT id FROM sources WHERE id IN (${placeholders})`,
+      requestedSources,
+    );
+    const existingSources = new Set(sourceRows.map(row => row.id));
+    const missingSource = requestedSources.find(id => !existingSources.has(id));
+    if (missingSource) {
+      throw new OperationError('invalid_source', `Source not found: ${missingSource}`);
+    }
+
+    const { sqlQueryForEngine } = await import('./sql-query.ts');
+    const { GBrainOAuthProvider } = await import('./oauth-provider.ts');
+    const provider = new GBrainOAuthProvider({ sql: sqlQueryForEngine(ctx.engine) });
+    const { clientId, clientSecret } = await provider.registerClientManual(
+      p.client_name as string,
+      ['client_credentials'],
+      scopes.join(' '),
+      [],
+      sourceId,
+      federatedRead,
+      'client_secret_post',
+      undefined,
+      boundPrincipal,
+    );
+    if (!clientSecret) {
+      throw new OperationError('internal', 'Confidential client registration did not issue a secret.');
+    }
+
+    // Postcondition: registerClientManual degrades to legacy column
+    // projections on pre-v60/v61 schemas, which would silently store a
+    // client without the promised source grants. Read the row back and
+    // refuse to hand out credentials that do not match the request.
+    const sql = sqlQueryForEngine(ctx.engine);
+    let storedGrants: { source_id?: unknown; federated_read?: unknown } | undefined;
+    try {
+      const rows = await sql`
+        SELECT source_id, federated_read
+          FROM oauth_clients
+         WHERE client_id = ${clientId}
+      `;
+      storedGrants = rows[0] as typeof storedGrants;
+    } catch (err) {
+      if (!isUndefinedColumnError(err, 'source_id') && !isUndefinedColumnError(err, 'federated_read')) {
+        throw err;
+      }
+    }
+    const storedFederated = Array.isArray(storedGrants?.federated_read)
+      ? [...storedGrants.federated_read].sort()
+      : undefined;
+    if (
+      storedGrants?.source_id !== sourceId ||
+      storedFederated === undefined ||
+      storedFederated.join('\n') !== [...federatedRead].sort().join('\n')
+    ) {
+      await sql`DELETE FROM oauth_clients WHERE client_id = ${clientId}`;
+      throw new OperationError(
+        'migration_required',
+        'provision_client requires the source-scope OAuth schema; run `gbrain apply-migrations --yes` and retry.',
+      );
+    }
+
+    return {
+      client_id: clientId,
+      client_secret: clientSecret,
+      client_name: p.client_name as string,
+      scopes,
+      source_id: sourceId,
+      federated_read: federatedRead,
+      bound_principal: boundPrincipal ?? null,
+    };
+  },
+};
+
+const revoke_client: Operation = {
+  name: 'revoke_client',
+  description:
+    'Soft-revoke an OAuth client and immediately invalidate all of its access tokens.',
+  params: {
+    client_id: { type: 'string', required: true, description: 'OAuth client id to revoke' },
+  },
+  mutating: true,
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    const clientId = p.client_id as string;
+    if (ctx.auth?.clientId === clientId) {
+      throw new OperationError('cannot_revoke_self', 'The calling client cannot revoke itself.');
+    }
+
+    const revoked = await ctx.engine.transaction(async (tx) => {
+      const rows = await tx.executeRaw<{ client_id: string }>(
+        `UPDATE oauth_clients
+            SET deleted_at = now()
+          WHERE client_id = $1
+            AND deleted_at IS NULL
+        RETURNING client_id`,
+        [clientId],
+      );
+      if (rows.length === 0) return false;
+      await tx.executeRaw(
+        'DELETE FROM oauth_tokens WHERE client_id = $1',
+        [clientId],
+      );
+      await tx.executeRaw(
+        'DELETE FROM oauth_codes WHERE client_id = $1',
+        [clientId],
+      );
+      return true;
+    });
+    if (!revoked) {
+      throw new OperationError('not_found', `Active OAuth client not found: ${clientId}`);
+    }
+    return { client_id: clientId, revoked: true };
+  },
+};
+
 const whoami: Operation = {
   name: 'whoami',
   description:
     'Introspect the calling identity. Returns one of three transport shapes: ' +
-    '{transport: "oauth", client_id, client_name, scopes, expires_at}, ' +
+    '{transport: "oauth", client_id, client_name, scopes, expires_at, ' +
+    'source_id, federated_read, bound_principal}, ' +
     '{transport: "legacy", token_name, scopes, expires_at: null}, or ' +
     '{transport: "local", scopes: []}. Throws unknown_transport when the ' +
     'context is ambiguous (remote=true without auth) — fail-closed posture ' +
@@ -4930,12 +5102,28 @@ const whoami: Operation = {
     // at oauth-provider.ts:417-430). Detect by inspecting the prefix.
     const isOauth = ctx.auth.clientId.startsWith('gbrain_cl_');
     if (isOauth) {
+      const { sqlQueryForEngine } = await import('./sql-query.ts');
+      const sql = sqlQueryForEngine(ctx.engine);
+      let boundPrincipal: string | null = null;
+      try {
+        const rows = await sql`
+          SELECT bound_principal
+            FROM oauth_clients
+           WHERE client_id = ${ctx.auth.clientId}
+        `;
+        boundPrincipal = (rows[0]?.bound_principal as string | null | undefined) ?? null;
+      } catch (err) {
+        if (!isUndefinedColumnError(err, 'bound_principal')) throw err;
+      }
       return {
         transport: 'oauth',
         client_id: ctx.auth.clientId,
         client_name: ctx.auth.clientName ?? ctx.auth.clientId,
         scopes: ctx.auth.scopes,
         expires_at: ctx.auth.expiresAt ?? null,
+        source_id: ctx.auth.sourceId,
+        federated_read: ctx.auth.allowedSources ?? [],
+        bound_principal: boundPrincipal,
       };
     }
     return {
@@ -6610,6 +6798,7 @@ export const operations: Operation[] = [
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
+  provision_client, revoke_client,
   whoami, sources_add, sources_list, sources_remove, sources_status,
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,

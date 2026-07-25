@@ -28,6 +28,7 @@ describe('parseRegisterClientArgs', () => {
     expect(out.boundSlugPrefixes).toBeUndefined();
     expect(out.boundMaxConcurrent).toBeUndefined();
     expect(out.budgetUsdPerDay).toBeUndefined();
+    expect(out.boundPrincipal).toBeUndefined();
   });
 
   test('--grant-types comma-separated → array', () => {
@@ -163,6 +164,7 @@ describe('parseRegisterClientArgs', () => {
         '--bound-slug-prefixes', 'wiki/agents/alice/,notes/',
         '--bound-max-concurrent', '3',
         '--budget-usd-per-day', '12.50',
+        '--bound-principal', 'people/alice-example',
       ]);
       expect(out.boundTools).toEqual(['search', 'get_page', 'put_page']);
       expect(out.boundSourceId).toBe('dept-x');
@@ -170,6 +172,7 @@ describe('parseRegisterClientArgs', () => {
       expect(out.boundSlugPrefixes).toEqual(['wiki/agents/alice/', 'notes/']);
       expect(out.boundMaxConcurrent).toBe(3);
       expect(out.budgetUsdPerDay).toBe('12.50');
+      expect(out.boundPrincipal).toBe('people/alice-example');
     });
   });
 
