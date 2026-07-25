@@ -59,6 +59,10 @@ import {
   TakeAddError,
 } from './take-add.ts';
 import {
+  supersedeTake,
+  TakeSupersedeError,
+} from './take-supersede.ts';
+import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
   FIND_EXPERTS_DESCRIPTION,
@@ -2412,6 +2416,25 @@ interface EffectiveTakeProposal {
   source: string;
 }
 
+/** Database projection used to validate and report one take supersession. */
+interface SupersedeTakeOperationRow {
+  id: number | string;
+  page_id: number;
+  page_slug: string;
+  source_id: string;
+  row_num: number;
+  claim: string;
+  kind: string;
+  holder: string;
+  weight: number;
+  since_date: string | null;
+  until_date: string | null;
+  source: string | null;
+  active: boolean;
+  superseded_by: number | null;
+  resolved_at: string | Date | null;
+}
+
 class TakeProposalNotPendingError extends OperationError {
   constructor(public status: TakeProposalStatus) {
     super(
@@ -2669,6 +2692,232 @@ const resolve_take_proposal: Operation = {
       };
     });
   },
+};
+
+/**
+ * Resolve a takes.id primary key inside one write source. Joining through
+ * pages preserves source isolation while still allowing a clear slug mismatch.
+ */
+async function findTakeForSupersession(
+  engine: BrainEngine,
+  takeId: number,
+  sourceId: string,
+): Promise<SupersedeTakeOperationRow> {
+  const rows = await engine.executeRaw<SupersedeTakeOperationRow>(
+    `SELECT t.id, t.page_id, p.slug AS page_slug, p.source_id,
+            t.row_num, t.claim, t.kind, t.holder, t.weight,
+            t.since_date, t.until_date, t.source, t.active, t.superseded_by,
+            t.resolved_at
+       FROM takes t
+       JOIN pages p ON p.id = t.page_id
+      WHERE t.id = $1
+        AND p.source_id = $2
+        AND p.deleted_at IS NULL
+      LIMIT 1`,
+    [takeId, sourceId],
+  );
+  if (!rows[0]) {
+    throw new OperationError(
+      'take_not_found',
+      `Take id ${takeId} was not found in the caller's write source.`,
+    );
+  }
+  return rows[0];
+}
+
+/** Reject values that could escape their canonical Markdown table cell. */
+function validateTakeTableCell(value: string, paramName: string): void {
+  if (/[\r\n]/.test(value)) {
+    throw new OperationError(
+      'invalid_params',
+      `${paramName} must not contain line breaks.`,
+    );
+  }
+}
+
+const supersede_take: Operation = {
+  name: 'supersede_take',
+  description: 'Supersede one active take by its takes.id primary key within the page slug and caller write source. The canonical markdown fence and database mirror are updated together. The current takes engine always appends a replacement row, so replacement is required; retirement without replacement is not supported. Optional reason is recorded in the replacement take source provenance.',
+  params: {
+    slug: {
+      type: 'string',
+      required: true,
+      description: 'Page slug that owns the take',
+    },
+    take_id: {
+      type: 'number',
+      required: true,
+      description: 'takes.id primary key of the take to supersede',
+    },
+    replacement: {
+      type: 'string',
+      required: true,
+      description: 'Replacement take text (required by the current takes engine)',
+    },
+    reason: {
+      type: 'string',
+      description: 'Optional audit reason recorded in replacement source provenance',
+    },
+    dry_run: {
+      type: 'boolean',
+      description: 'Preview the validated supersession without writing',
+    },
+  },
+  scope: 'write',
+  mutating: true,
+  handler: async (ctx, p) => {
+    const slug = typeof p.slug === 'string' ? p.slug.trim() : '';
+    const takeId = Number(p.take_id);
+    const replacement = typeof p.replacement === 'string'
+      ? p.replacement.trim()
+      : '';
+    const reason = typeof p.reason === 'string' && p.reason.trim()
+      ? p.reason.trim()
+      : null;
+    if (!slug) {
+      throw new OperationError('invalid_params', 'slug must be non-empty.');
+    }
+    validatePageSlug(slug);
+    if (!Number.isSafeInteger(takeId) || takeId <= 0) {
+      throw new OperationError('invalid_params', 'take_id must be a positive safe integer.');
+    }
+    if (!replacement) {
+      throw new OperationError(
+        'invalid_params',
+        'replacement must be non-empty; the current takes engine cannot retire a take without a replacement.',
+      );
+    }
+    validateTakeTableCell(replacement, 'replacement');
+    if (reason !== null) validateTakeTableCell(reason, 'reason');
+
+    const sourceId = resolveWriteSourceId(ctx);
+    const target = await findTakeForSupersession(ctx.engine, takeId, sourceId);
+    if (target.page_slug !== slug) {
+      throw new OperationError(
+        'take_slug_mismatch',
+        `Take id ${takeId} belongs to slug '${target.page_slug}', not '${slug}'.`,
+      );
+    }
+    if (!target.active || target.superseded_by !== null) {
+      throw new OperationError(
+        'take_already_superseded',
+        `Take id ${takeId} is already inactive or superseded.`,
+      );
+    }
+    if (target.resolved_at !== null) {
+      throw new OperationError(
+        'take_resolved_immutable',
+        `Take id ${takeId} is resolved and immutable.`,
+      );
+    }
+
+    const supersededTake = {
+      id: Number(target.id),
+      page_id: Number(target.page_id),
+      row_num: Number(target.row_num),
+      slug: target.page_slug,
+    };
+    const replacementSource = reason
+      ? target.source
+        ? `${target.source}; supersession reason: ${reason}`
+        : `supersession reason: ${reason}`
+      : target.source ?? undefined;
+    const replacementInput = {
+      claim: replacement,
+      kind: target.kind,
+      holder: target.holder,
+      weight: Math.max(0, Number(target.weight) - 0.1),
+      since_date: target.since_date ?? undefined,
+      until_date: target.until_date ?? undefined,
+      source: replacementSource,
+      active: true,
+    };
+    let supersedeResult: Awaited<ReturnType<typeof supersedeTake>>;
+    try {
+      supersedeResult = await supersedeTake(ctx.engine, {
+        slug,
+        takeId,
+        pageId: Number(target.page_id),
+        rowNum: Number(target.row_num),
+        expected: {
+          claim: target.claim,
+          kind: target.kind,
+          holder: target.holder,
+          weight: Number(target.weight),
+          sinceDate: target.since_date ?? undefined,
+          untilDate: target.until_date ?? undefined,
+          source: target.source ?? undefined,
+          active: target.active,
+        },
+        replacement: replacementInput,
+        sourceId,
+        dryRun: ctx.dryRun || p.dry_run === true,
+      });
+    } catch (error) {
+      if (error instanceof TakeAddError || error instanceof TakeSupersedeError) {
+        throw new OperationError(error.code, error.message);
+      }
+      throw error;
+    }
+    if (ctx.dryRun || p.dry_run === true) {
+      return {
+        dry_run: true,
+        action: 'supersede_take',
+        slug,
+        source_id: sourceId,
+        reason,
+        superseded_take: supersededTake,
+        replacement_take: {
+          id: null,
+          page_id: Number(target.page_id),
+          row_num: supersedeResult.newRow,
+          slug,
+          ...replacementInput,
+        },
+      };
+    }
+
+    const replacementRows = await ctx.engine.executeRaw<SupersedeTakeOperationRow>(
+      `SELECT t.id, t.page_id, p.slug AS page_slug, p.source_id,
+              t.row_num, t.claim, t.kind, t.holder, t.weight,
+              t.since_date, t.until_date, t.source, t.active, t.superseded_by,
+              t.resolved_at
+         FROM takes t
+         JOIN pages p ON p.id = t.page_id
+        WHERE t.page_id = $1 AND t.row_num = $2 AND p.source_id = $3
+        LIMIT 1`,
+      [Number(target.page_id), supersedeResult.newRow, sourceId],
+    );
+    const newRow = replacementRows[0];
+    if (!newRow) {
+      throw new OperationError(
+        'database_error',
+        `Replacement take row ${supersedeResult.newRow} was not found after supersession.`,
+      );
+    }
+    return {
+      slug,
+      source_id: sourceId,
+      reason,
+      superseded_take: supersededTake,
+      replacement_take: {
+        id: Number(newRow.id),
+        page_id: Number(newRow.page_id),
+        row_num: Number(newRow.row_num),
+        slug: newRow.page_slug,
+        claim: newRow.claim,
+        kind: newRow.kind,
+        holder: newRow.holder,
+        weight: Number(newRow.weight),
+        since_date: newRow.since_date,
+        until_date: newRow.until_date,
+        source: newRow.source,
+        active: newRow.active,
+        superseded_by: newRow.superseded_by,
+      },
+    };
+  },
+  cliHints: { hidden: true },
 };
 
 const takes_list: Operation = {
@@ -6356,7 +6605,8 @@ export const operations: Operation[] = [
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
   get_calibration_profile,
   // v0.28: Takes + think
-  list_take_proposals, resolve_take_proposal, takes_list, takes_search, think,
+  list_take_proposals, resolve_take_proposal, supersede_take,
+  takes_list, takes_search, think,
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
