@@ -1322,6 +1322,7 @@ export interface ChronicleTimelineRow {
   event_slug: string | null;  // the type:event page, when this is an event projection
   effective_date: string | null; // event page effective_date — drives intra-day order
   kind: string | null;        // event.kind from the event page frontmatter
+  owner: string | null;       // accountable person for commitment/intro events
 }
 
 export interface ChronicleTimelineOpts {

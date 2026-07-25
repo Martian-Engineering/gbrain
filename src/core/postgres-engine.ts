@@ -62,7 +62,7 @@ import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import * as db from './db.ts';
 import { ConnectionManager } from './connection-manager.ts';
 import { logConnectionEvent } from './connection-audit.ts';
-import { validateSlug, contentHash, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, takeRowToTake, takeHitRowToHit, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
+import { validateSlug, contentHash, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, takeRowToTake, takeHitRowToHit, isUndefinedColumnError, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery } from './search/sql-ranking.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
@@ -3798,7 +3798,8 @@ export class PostgresEngine implements BrainEngine {
              te.page_id, p.slug AS page_slug,
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
-             ep.frontmatter->'event'->>'kind' AS kind
+             ep.frontmatter->'event'->>'kind' AS kind,
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3819,7 +3820,8 @@ export class PostgresEngine implements BrainEngine {
              te.page_id, p.slug AS page_slug,
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
-             ep.frontmatter->'event'->>'kind' AS kind
+             ep.frontmatter->'event'->>'kind' AS kind,
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3841,7 +3843,8 @@ export class PostgresEngine implements BrainEngine {
              te.page_id, p.slug AS page_slug,
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
-             ep.frontmatter->'event'->>'kind' AS kind
+             ep.frontmatter->'event'->>'kind' AS kind,
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3888,19 +3891,47 @@ export class PostgresEngine implements BrainEngine {
     return finalizeLastSeen(entitySlug, row?.last_date ?? null, row?.last_event_slug ?? null, opts?.asof);
   }
 
-  async upsertEventProjection(opts: { depthSlug: string; eventSlug: string; date: string; summary: string; detail?: string; sourceId?: string }): Promise<{ projected: boolean }> {
+  async upsertEventProjection(opts: {
+    depthSlug: string;
+    eventSlug: string;
+    date: string;
+    summary: string;
+    detail?: string;
+    owner?: string | null;
+    sourceId?: string;
+  }): Promise<{ projected: boolean }> {
     const sql = this.sql;
     const sourceId = opts.sourceId ?? 'default';
-    const rows = await sql`
-      INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id)
-      SELECT dp.id, ${opts.date}::date, ${'life-chronicle:event:' + opts.eventSlug}, ${opts.summary}, ${opts.detail ?? ''}, ep.id
-      FROM pages dp, pages ep
-      WHERE dp.slug = ${opts.depthSlug} AND dp.source_id = ${sourceId}
-        AND ep.slug = ${opts.eventSlug} AND ep.source_id = ${sourceId}
-      ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
-      DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
-                    page_id = EXCLUDED.page_id, source = EXCLUDED.source
-      RETURNING id`;
+    let rows;
+    try {
+      rows = await sql`
+        INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id, owner)
+        SELECT dp.id, ${opts.date}::date, ${'life-chronicle:event:' + opts.eventSlug},
+               ${opts.summary}, ${opts.detail ?? ''}, ep.id, ${opts.owner ?? null}
+        FROM pages dp, pages ep
+        WHERE dp.slug = ${opts.depthSlug} AND dp.source_id = ${sourceId}
+          AND ep.slug = ${opts.eventSlug} AND ep.source_id = ${sourceId}
+        ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+        DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
+                      page_id = EXCLUDED.page_id, source = EXCLUDED.source,
+                      owner = EXCLUDED.owner
+        RETURNING id`;
+    } catch (error) {
+      // A deployed binary can briefly run before migration v127 lands. Keep
+      // projection writes available; event.owner remains durable frontmatter.
+      if (!isUndefinedColumnError(error, 'owner')) throw error;
+      rows = await sql`
+        INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id)
+        SELECT dp.id, ${opts.date}::date, ${'life-chronicle:event:' + opts.eventSlug},
+               ${opts.summary}, ${opts.detail ?? ''}, ep.id
+        FROM pages dp, pages ep
+        WHERE dp.slug = ${opts.depthSlug} AND dp.source_id = ${sourceId}
+          AND ep.slug = ${opts.eventSlug} AND ep.source_id = ${sourceId}
+        ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+        DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
+                      page_id = EXCLUDED.page_id, source = EXCLUDED.source
+        RETURNING id`;
+    }
     return { projected: rows.length > 0 };
   }
 

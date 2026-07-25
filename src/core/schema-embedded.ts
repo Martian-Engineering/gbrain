@@ -547,6 +547,8 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
   -- keys dedup on (event_page_id, date) so re-extraction with a changed summary
   -- updates the row instead of double-inserting.
   event_page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE,
+  -- Accountable person for commitment/intro event projections.
+  owner TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -5750,6 +5750,16 @@ export const MIGRATIONS: Migration[] = [
       });
     },
   },
+  {
+    version: 127,
+    name: 'timeline_entries_event_owner',
+    // Nullable: ordinary timeline rows and events without a clearly inferred
+    // accountable person remain unchanged. No backfill is required.
+    idempotent: true,
+    sql: `
+      ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS owner TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

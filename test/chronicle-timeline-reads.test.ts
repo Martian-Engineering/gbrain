@@ -26,11 +26,17 @@ async function insertPage(opts: {
   return rows[0].id;
 }
 
-async function insertProjection(depthId: number, eventId: number, date: string, summary: string): Promise<void> {
+async function insertProjection(
+  depthId: number,
+  eventId: number,
+  date: string,
+  summary: string,
+  owner: string | null = null,
+): Promise<void> {
   await engine.executeRaw(
-    `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id)
-     VALUES ($1, $2::date, $3, $4, '', $5)`,
-    [depthId, date, `life-chronicle:event:${eventId}`, summary, eventId],
+    `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id, owner)
+     VALUES ($1, $2::date, $3, $4, '', $5, $6)`,
+    [depthId, date, `life-chronicle:event:${eventId}`, summary, eventId, owner],
   );
 }
 
@@ -46,7 +52,7 @@ beforeAll(async () => {
   ids.e2 = await insertPage({ slug: 'life/events/2026-06-18-002', type: 'event', effectiveDate: '2026-06-18T09:00:00Z', frontmatter: '{"event":{"who":["people/bob"],"kind":"meeting"}}' });
   // 06-20 (same ISO week as 06-18): event3 (Sarah, decision).
   ids.e3 = await insertPage({ slug: 'life/events/2026-06-20-001', type: 'event', effectiveDate: '2026-06-20T10:00:00Z', frontmatter: '{"event":{"who":["people/sarah-chen"],"kind":"decision"}}' });
-  await insertProjection(ids.meeting, ids.e1, '2026-06-18', 'Sarah committed to Q3');
+  await insertProjection(ids.meeting, ids.e1, '2026-06-18', 'Sarah committed to Q3', 'people/sarah-chen');
   await insertProjection(ids.meeting, ids.e2, '2026-06-18', 'Bob standup');
   await insertProjection(ids.meeting, ids.e3, '2026-06-20', 'Decision on launch');
 
@@ -83,6 +89,7 @@ describe('Life Chronicle timeline reads', () => {
     expect(since19.map(r => r.event_slug)).toEqual(['life/events/2026-06-20-001']);
     const commitments = await engine.getSince('2026-06-18', { kind: 'commitment', sourceId: 'default' });
     expect(commitments.map(r => r.event_slug)).toEqual(['life/events/2026-06-18-001']);
+    expect(commitments[0].owner).toBe('people/sarah-chen');
   });
 
   test('getLastSeen finds the entity via event who, with days_ago', async () => {
@@ -133,5 +140,31 @@ describe('Life Chronicle timeline reads', () => {
     expect(since19.length).toBe(0); // event3 hidden
     const seen = await engine.getLastSeen('people/sarah-chen', { asof: '2026-06-25', sourceId: 'default' });
     expect(seen.last_date).toBe('2026-06-18'); // falls back to event1
+  });
+
+  test('owner write and read fall back on a pre-migration brain', async () => {
+    await engine.executeRaw('ALTER TABLE timeline_entries DROP COLUMN owner');
+    try {
+      const legacyEvent = await insertPage({
+        slug: 'life/events/2026-06-21-legacy',
+        type: 'event',
+        effectiveDate: '2026-06-21T10:00:00Z',
+        frontmatter: '{"event":{"who":["people/bob"],"owner":"people/bob","kind":"commitment"}}',
+      });
+      const projection = await engine.upsertEventProjection({
+        depthSlug: 'meetings/2026-06-18-sync',
+        eventSlug: 'life/events/2026-06-21-legacy',
+        date: '2026-06-21',
+        summary: 'Bob owns the follow-up',
+        owner: 'people/bob',
+        sourceId: 'default',
+      });
+      expect(projection.projected).toBe(true);
+
+      const rows = await engine.getSince('2026-06-21', { sourceId: 'default' });
+      expect(rows.find(row => row.event_page_id === legacyEvent)?.owner).toBe('people/bob');
+    } finally {
+      await engine.executeRaw('ALTER TABLE timeline_entries ADD COLUMN owner TEXT');
+    }
   });
 });

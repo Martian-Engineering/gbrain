@@ -16,6 +16,7 @@ export interface ChronicleEventProposal {
   who: string[];           // entity slugs / names
   what: string;            // one-clause summary
   where?: string | null;
+  owner?: string | null;   // single accountable person for commitment/intro
   kind: string;            // meeting|call|commitment|decision|… (open vocab)
 }
 export interface ChronicleJudgeInput {
@@ -88,6 +89,7 @@ export function isValidProposal(e: unknown): e is ChronicleEventProposal {
     !Number.isNaN(new Date(o.when).getTime()) &&
     typeof o.what === 'string' && o.what.trim().length > 0 &&
     Array.isArray(o.who) && o.who.every((w) => typeof w === 'string') &&
+    (o.owner === undefined || o.owner === null || typeof o.owner === 'string') &&
     typeof o.kind === 'string'
   );
 }
@@ -165,14 +167,15 @@ export async function runChronicleExtract(
         type: 'event',
         event: {
           when, who, what: ev.what, where: ev.where ?? null,
-          kind: normalizeKind(ev.kind), depth: opts.slug,
+          owner: ev.owner ?? null, kind: normalizeKind(ev.kind), depth: opts.slug,
         },
         captured_via: 'life-chronicle:auto',
       },
       effective_date: safeDate(when),
     }, { sourceId });
     await engine.upsertEventProjection({
-      depthSlug: opts.slug, eventSlug, date: day, summary: ev.what, sourceId,
+      depthSlug: opts.slug, eventSlug, date: day, summary: ev.what,
+      owner: ev.owner ?? null, sourceId,
     });
     written++;
   }
@@ -180,8 +183,10 @@ export async function runChronicleExtract(
 }
 
 const JUDGE_SYSTEM = `You segment a meeting/transcript page into discrete timeline EVENTS.
-Return ONLY a JSON array. Each element: {"when": ISO datetime or YYYY-MM-DD, "who": [entity slugs/names], "what": one-clause summary, "where": optional string, "kind": one of meeting|call|meal|solo|travel|work|commitment|decision|intro|conflict|milestone|event}.
-Prefer the page's known date for "when" when the text gives no explicit time. Use the provided attendee slugs for "who" when the text does not name participants. No prose, no markdown — just the JSON array.`;
+Return ONLY a JSON array. Each element: {"when": ISO datetime or YYYY-MM-DD, "who": [entity slugs/names], "what": one-clause summary, "where": optional string, "owner": optional entity slug/name, "kind": one of meeting|call|meal|solo|travel|work|commitment|decision|intro|conflict|milestone|event}.
+Prefer the page's known date for "when" when the text gives no explicit time. Use the provided attendee slugs for "who" when the text does not name participants.
+For commitment and intro events, set "owner" to the SINGLE person accountable for following through, using a known attendee slug when possible. Omit "owner" for other event kinds or when accountability is unclear.
+No prose, no markdown — just the JSON array.`;
 
 /**
  * #2606: default output-token cap for the judge. Raised from the original

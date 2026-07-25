@@ -1433,7 +1433,15 @@ export interface BrainEngine {
    * with a changed summary UPDATEs (no duplicate). Returns projected=false when
    * either slug is missing in the source. Idempotent.
    */
-  upsertEventProjection(opts: { depthSlug: string; eventSlug: string; date: string; summary: string; detail?: string; sourceId?: string }): Promise<{ projected: boolean }>;
+  upsertEventProjection(opts: {
+    depthSlug: string;
+    eventSlug: string;
+    date: string;
+    summary: string;
+    detail?: string;
+    owner?: string | null;
+    sourceId?: string;
+  }): Promise<{ projected: boolean }>;
 
   // v0.42.x — Life Chronicle (#2390) per-entity ontology (rides `facts`).
   /**

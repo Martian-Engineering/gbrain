@@ -374,6 +374,8 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
   -- v0.42.x (Life Chronicle #2390): event-projection pointer. NULL for
   -- ordinary rows. See src/schema.sql for the full rationale.
   event_page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE,
+  -- Accountable person for commitment/intro event projections.
+  owner TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

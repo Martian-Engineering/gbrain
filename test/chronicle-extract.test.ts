@@ -8,7 +8,12 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { isChronicleEligible } from '../src/core/chronicle/eligibility.ts';
-import { runChronicleExtract, parseJudgeJson, type ChronicleJudge } from '../src/core/chronicle/extract-events.ts';
+import {
+  isValidProposal,
+  parseJudgeJson,
+  runChronicleExtract,
+  type ChronicleJudge,
+} from '../src/core/chronicle/extract-events.ts';
 import { runChronicleBackstop } from '../src/core/chronicle/backstop.ts';
 
 let engine: PGLiteEngine;
@@ -53,7 +58,13 @@ describe('isChronicleEligible', () => {
 
 describe('runChronicleExtract', () => {
   const oneEvent: ChronicleJudge = async () => ({
-    events: [{ when: '2026-06-18T15:30:00Z', who: ['people/sarah-chen'], what: 'Sarah committed to Q3', kind: 'commitment' }],
+    events: [{
+      when: '2026-06-18T15:30:00Z',
+      who: ['people/sarah-chen', 'people/bob'],
+      owner: 'people/sarah-chen',
+      what: 'Sarah committed to Q3',
+      kind: 'commitment',
+    }],
   });
 
   beforeEach(async () => {
@@ -78,6 +89,9 @@ describe('runChronicleExtract', () => {
     expect(day[0].page_slug).toBe('meetings/2026-06-18-sync'); // projection keyed to depth
     expect(day[0].event_slug?.startsWith('life/events/2026-06-18-')).toBe(true);
     expect(day[0].kind).toBe('commitment');
+    expect(day[0].owner).toBe('people/sarah-chen');
+    const event = await engine.getPage(day[0].event_slug!, { sourceId: 'default' });
+    expect((event?.frontmatter.event as Record<string, unknown>).owner).toBe('people/sarah-chen');
   });
 
   test('is idempotent: running twice yields one event + one projection', async () => {
@@ -127,6 +141,26 @@ describe('runChronicleExtract', () => {
     const r = await runChronicleExtract(engine, { slug: 'meetings/2026-06-18-sync', judge: parseFailed });
     expect(r.status).toBe('skipped');
     expect(r.reason).toBe('judge_parse_failed');
+  });
+});
+
+describe('isValidProposal owner', () => {
+  const proposal = {
+    when: '2026-06-18',
+    who: ['people/sarah-chen', 'people/bob'],
+    what: 'Sarah committed to Q3',
+    kind: 'commitment',
+  };
+
+  test('accepts absent, string, or null owner', () => {
+    expect(isValidProposal(proposal)).toBe(true);
+    expect(isValidProposal({ ...proposal, owner: 'people/sarah-chen' })).toBe(true);
+    expect(isValidProposal({ ...proposal, owner: null })).toBe(true);
+  });
+
+  test('rejects non-string owner', () => {
+    expect(isValidProposal({ ...proposal, owner: ['people/sarah-chen'] })).toBe(false);
+    expect(isValidProposal({ ...proposal, owner: 42 })).toBe(false);
   });
 });
 
