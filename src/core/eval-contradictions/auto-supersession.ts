@@ -113,8 +113,8 @@ export function renderResolutionCommand(
     case 'takes_supersede': {
       // Prefer the slug of the take side (intra_page) or the curated side.
       const takeSide = pair.b.take_id !== null ? pair.b : (pair.a.take_id !== null ? pair.a : pair.a);
-      const takeId = takeSide.take_id ?? '<row>';
-      return `gbrain takes supersede ${takeSide.slug} --row ${takeId}`;
+      const takeId = takeSide.take_id ?? '<id>';
+      return `gbrain takes supersede ${takeSide.slug} --id ${takeId}`;
     }
     case 'dream_synthesize': {
       const curatedSide = isCuratedEntitySlug(pair.a.slug)
@@ -124,8 +124,8 @@ export function renderResolutionCommand(
     }
     case 'takes_mark_debate': {
       const takeSide = pair.b.take_id !== null ? pair.b : (pair.a.take_id !== null ? pair.a : pair.a);
-      const takeId = takeSide.take_id ?? '<row>';
-      return `gbrain takes mark-debate ${takeSide.slug} --row ${takeId}`;
+      const takeId = takeSide.take_id ?? '<take_id>';
+      return `# takes mark-debate is not yet implemented — treat as manual review (${takeSide.slug} row ${takeId})`;
     }
     case 'temporal_supersede': {
       // v0.34 / Lane A2: pick the newer-dated side as the survivor; render a
@@ -139,7 +139,7 @@ export function renderResolutionCommand(
         const newerDate = aDate < bDate ? bDate : aDate;
         const olderTakeId = olderSide.take_id;
         if (olderTakeId !== null) {
-          return `gbrain takes supersede ${olderSide.slug} --row ${olderTakeId} --since ${newerDate}`;
+          return `gbrain takes supersede ${olderSide.slug} --id ${olderTakeId} --since ${newerDate}`;
         }
         return `# temporal_supersession: ${olderSide.slug} (${aDate < bDate ? aDate : bDate}) superseded by ${newerDate}`;
       }

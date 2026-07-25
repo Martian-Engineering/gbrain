@@ -48,7 +48,14 @@ async function seedPage(slug: string, title: string, body = ''): Promise<number>
 }
 
 /** Build a SearchResult helper for stubbed search. */
-function mkResult(slug: string, page_id: number, chunk_id: number, text: string, score = 1.0): SearchResult {
+function mkResult(
+  slug: string,
+  page_id: number,
+  chunk_id: number,
+  text: string,
+  score = 1.0,
+  source_id?: string,
+): SearchResult {
   return {
     slug, page_id, chunk_id, chunk_index: 0,
     title: slug,
@@ -57,6 +64,7 @@ function mkResult(slug: string, page_id: number, chunk_id: number, text: string,
     chunk_source: 'compiled_truth',
     score,
     stale: false,
+    source_id,
   };
 }
 
@@ -130,6 +138,8 @@ describe('runContradictionProbe', () => {
     expect(out.report.total_contradictions_flagged).toBe(1);
     expect(out.report.queries_with_contradiction).toBe(1);
     expect(out.report.per_query[0].pairs_judged).toBe(1);
+    expect(out.report.per_query[0].contradictions[0].a.source_id).toBeNull();
+    expect(out.report.per_query[0].contradictions[0].b.source_id).toBeNull();
   });
 
   test('metadata-only NOT evidence downgrades contradiction to negation_artifact', async () => {
@@ -250,6 +260,29 @@ describe('runContradictionProbe', () => {
     expect(finding.kind).toBe('intra_page_chunk_take');
     expect(finding.b.take_id).not.toBeNull();
     expect(finding.b.holder).toBe('garry');
+  });
+
+  test('findings carry source_id for chunk and take members', async () => {
+    const id1 = await seedPage('people/alice', 'Alice');
+    await engine.addTakesBatch([
+      {
+        page_id: id1, row_num: 1, claim: 'Alice is the CTO', kind: 'fact',
+        holder: 'garry', weight: 1, active: true, superseded_by: null,
+      },
+    ]);
+    const out = await runContradictionProbe({
+      engine,
+      queries: ['what is alice role'],
+      judgeFn: stubJudge({ contradicts: true, severity: 'high' }),
+      searchFn: async () => [
+        mkResult('people/alice', id1, 1, 'Alice is the CFO of acme', 1, 'team-notes'),
+      ],
+      budgetUsd: 5,
+      noCache: true,
+    });
+    const finding = out.report.per_query[0].contradictions[0];
+    expect(finding.a.source_id).toBe('team-notes');
+    expect(finding.b.source_id).toBe('team-notes');
   });
 
   test('same-slug pairs are NOT generated (cross_slug skip rule)', async () => {

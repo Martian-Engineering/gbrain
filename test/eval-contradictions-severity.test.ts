@@ -20,6 +20,7 @@ function mkFinding(opts: {
     kind: 'cross_slug_chunks',
     a: {
       slug: opts.slugA,
+      source_id: null,
       chunk_id: 1,
       take_id: null,
       source_tier: 'curated',
@@ -30,6 +31,7 @@ function mkFinding(opts: {
     },
     b: {
       slug: opts.slugB,
+      source_id: null,
       chunk_id: 2,
       take_id: null,
       source_tier: 'bulk',

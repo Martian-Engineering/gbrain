@@ -6,7 +6,7 @@
  *   takes search "<query>" [--who h]       — keyword search across all takes
  *   takes add <slug> ...flags              — append a take (markdown + DB)
  *   takes update <slug> --row N ...flags   — update mutable fields
- *   takes supersede <slug> --row N ...     — strikethrough old + append new
+ *   takes supersede <slug> --row N|--id ID — strikethrough old + append new
  *   takes resolve <slug> --row N --outcome true|false [--value N --unit u]
  *
  * Markdown is canonical. Every mutate command:
@@ -40,6 +40,13 @@ function flagValue(args: string[], name: string): string | undefined {
 
 function flagPresent(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+function parsePositiveTakeId(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 async function resolveBrainDir(engine: BrainEngine | null, explicitDir: string | null): Promise<string> {
@@ -99,6 +106,24 @@ async function getPageId(engine: BrainEngine, slug: string, sourceId?: string): 
     process.exit(1);
   }
   return rows[0].id;
+}
+
+// Resolve a take's database primary key within the requested page. The
+// supersede engine method remains row_num-based, so only the CLI translates.
+async function getTakeRowNumById(
+  engine: BrainEngine,
+  pageId: number,
+  takeId: number,
+): Promise<number> {
+  const rows = await engine.executeRaw<{ row_num: number }>(
+    `SELECT row_num FROM takes WHERE id = $1 AND page_id = $2 LIMIT 1`,
+    [takeId, pageId],
+  );
+  if (!rows[0]) {
+    console.error(`Take id #${takeId} not found on page id ${pageId}.`);
+    process.exit(1);
+  }
+  return rows[0].row_num;
 }
 
 // Fail-closed (#2698 residual, TODOS.md): `resolveSourceId` only ever
@@ -279,11 +304,20 @@ async function cmdUpdate(engine: BrainEngine, args: string[], sourceId?: string)
 async function cmdSupersede(engine: BrainEngine, args: string[], sourceId?: string): Promise<void> {
   const slug = args[0];
   const rowNumStr = flagValue(args, '--row');
-  if (!slug || !rowNumStr) {
-    console.error('Usage: gbrain takes supersede <slug> --row N --claim "..." [--kind k] [--who h] [--weight 0.5] [--source "..."]');
+  const takeIdStr = flagValue(args, '--id');
+  if (!slug || (!rowNumStr && !takeIdStr)) {
+    console.error('Usage: gbrain takes supersede <slug> (--row N | --id ID) --claim "..." [--kind k] [--who h] [--weight 0.5] [--source "..."]');
     process.exit(1);
   }
-  const rowNum = parseInt(rowNumStr, 10);
+  if (rowNumStr && takeIdStr) {
+    console.error('Error: --row and --id are mutually exclusive (choose one).');
+    process.exit(1);
+  }
+  const takeId = takeIdStr ? parsePositiveTakeId(takeIdStr) : null;
+  if (takeIdStr && takeId === null) {
+    console.error(`Invalid --id "${takeIdStr}". Expected a positive integer.`);
+    process.exit(1);
+  }
   const claim = flagValue(args, '--claim');
   if (!claim) { console.error('Missing --claim'); process.exit(1); }
   const dirArg = flagValue(args, '--dir');
@@ -291,9 +325,12 @@ async function cmdSupersede(engine: BrainEngine, args: string[], sourceId?: stri
 
   await withPageLock(slug, async () => {
     const pageId = await getPageId(engine, slug, sourceId);
+    const rowNum = rowNumStr
+      ? parseInt(rowNumStr, 10)
+      : await getTakeRowNumById(engine, pageId, takeId!);
 
-    // Read existing row to inherit kind/holder unless overridden
-    const existing = await engine.listTakes({ page_id: pageId, active: false, limit: 500 });
+    // Read the active row to inherit kind/holder unless overridden.
+    const existing = await engine.listTakes({ page_id: pageId, active: true, limit: 500 });
     const target = existing.find(t => t.row_num === rowNum);
     if (!target) {
       console.error(`Row #${rowNum} not found on ${slug}.`);
@@ -563,7 +600,7 @@ Subcommands:
                                           Append a take (markdown + DB)
   takes update <slug> --row N [--weight 0.7] [--source "..."] [--since YYYY-MM]
                                           Update mutable fields
-  takes supersede <slug> --row N --claim "..." [--kind k] [--who h] [--weight 0.5] [--source "..."]
+  takes supersede <slug> (--row N | --id ID) --claim "..." [--kind k] [--who h] [--weight 0.5] [--source "..."]
                                           Strikethrough old + append new
   takes resolve <slug> --row N --quality correct|incorrect|partial
                        [--evidence "..."] [--value N --unit usd|pct|count] [--by <slug>]
@@ -710,3 +747,5 @@ async function cmdRevisit(_engine: BrainEngine, rest: string[]): Promise<void> {
   }
   void execFileSync;
 }
+
+export const __testing = { parsePositiveTakeId };

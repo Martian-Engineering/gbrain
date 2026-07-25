@@ -56,6 +56,7 @@ describe('R2: contradictions probe UNCHANGED when no calibration profile', () =>
       kind: 'cross_slug_chunks' as const,
       a: {
         slug: 'wiki/companies/x',
+        source_id: null,
         chunk_id: 1,
         take_id: null,
         source_tier: 'curated' as const,
@@ -66,6 +67,7 @@ describe('R2: contradictions probe UNCHANGED when no calibration profile', () =>
       },
       b: {
         slug: 'wiki/companies/y',
+        source_id: null,
         chunk_id: 1,
         take_id: null,
         source_tier: 'curated' as const,

@@ -115,6 +115,8 @@ export interface JudgeErrorsCounts {
 /** One end of a pair (chunk or take). Shape unified across kinds. */
 export interface PairMember {
   slug: string;
+  /** Source containing the page; null when the retrieval result omitted it. */
+  source_id: string | null;
   /** Present for cross_slug_chunks; null when this end is a take. */
   chunk_id: number | null;
   /** Present for intra_page_chunk_take when this end is a take. */

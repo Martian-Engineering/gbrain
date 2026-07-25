@@ -25,6 +25,7 @@ import type { CalibrationProfileRow } from '../src/commands/calibration.ts';
 function buildMember(slug: string, holder: string | null = 'garry'): PairMember {
   return {
     slug,
+    source_id: null,
     chunk_id: 1,
     take_id: null,
     source_tier: 'curated',

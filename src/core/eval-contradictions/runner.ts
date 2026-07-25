@@ -114,6 +114,7 @@ function pairId(pair: ContradictionPair): string {
 function searchResultToMember(r: SearchResult): PairMember {
   return {
     slug: r.slug,
+    source_id: r.source_id ?? null,
     chunk_id: r.chunk_id,
     take_id: null,
     source_tier: classifySlugTier(r.slug),
@@ -137,11 +138,13 @@ function searchResultToMember(r: SearchResult): PairMember {
 function takeToMember(
   take: { id: number; page_slug: string; claim: string; holder: string },
   source_tier: ReturnType<typeof classifySlugTier>,
+  source_id: string | null,
   effective_date: string | null,
   effective_date_source: string | null,
 ): PairMember {
   return {
     slug: take.page_slug,
+    source_id,
     chunk_id: null,
     take_id: take.id,
     source_tier,
@@ -196,6 +199,7 @@ async function generateIntraPagePairs(
       const takeMember = takeToMember(
         t,
         chunkMember.source_tier,
+        chunkMember.source_id,
         chunkMember.effective_date,
         chunkMember.effective_date_source,
       );

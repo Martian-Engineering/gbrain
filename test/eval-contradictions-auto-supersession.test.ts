@@ -17,8 +17,8 @@ import type {
 function mkCrossSlugPair(slugA: string, slugB: string): ContradictionPair {
   return {
     kind: 'cross_slug_chunks',
-    a: { slug: slugA, chunk_id: 1, take_id: null, source_tier: 'curated', holder: null, text: 'a', effective_date: null, effective_date_source: null },
-    b: { slug: slugB, chunk_id: 2, take_id: null, source_tier: 'bulk', holder: null, text: 'b', effective_date: null, effective_date_source: null },
+    a: { slug: slugA, source_id: 'source-a', chunk_id: 1, take_id: null, source_tier: 'curated', holder: null, text: 'a', effective_date: null, effective_date_source: null },
+    b: { slug: slugB, source_id: 'source-b', chunk_id: 2, take_id: null, source_tier: 'bulk', holder: null, text: 'b', effective_date: null, effective_date_source: null },
     combined_score: 1,
   };
 }
@@ -26,8 +26,8 @@ function mkCrossSlugPair(slugA: string, slugB: string): ContradictionPair {
 function mkIntraPagePair(pageSlug: string, takeId: number): ContradictionPair {
   return {
     kind: 'intra_page_chunk_take',
-    a: { slug: pageSlug, chunk_id: 5, take_id: null, source_tier: 'curated', holder: null, text: 'chunk text', effective_date: null, effective_date_source: null },
-    b: { slug: pageSlug, chunk_id: null, take_id: takeId, source_tier: 'curated', holder: 'garry', text: 'take claim', effective_date: null, effective_date_source: null },
+    a: { slug: pageSlug, source_id: 'source-a', chunk_id: 5, take_id: null, source_tier: 'curated', holder: null, text: 'chunk text', effective_date: null, effective_date_source: null },
+    b: { slug: pageSlug, source_id: 'source-a', chunk_id: null, take_id: takeId, source_tier: 'curated', holder: 'garry', text: 'take claim', effective_date: null, effective_date_source: null },
     combined_score: 1,
   };
 }
@@ -67,10 +67,10 @@ describe('classifyResolution', () => {
 });
 
 describe('renderResolutionCommand', () => {
-  test('takes_supersede emits gbrain takes supersede with row id', () => {
+  test('takes_supersede emits gbrain takes supersede with take id', () => {
     const pair = mkIntraPagePair('people/alice', 7);
     const cmd = renderResolutionCommand(pair, 'takes_supersede');
-    expect(cmd).toBe('gbrain takes supersede people/alice --row 7');
+    expect(cmd).toBe('gbrain takes supersede people/alice --id 7');
   });
 
   test('dream_synthesize targets the curated entity side', () => {
@@ -79,10 +79,18 @@ describe('renderResolutionCommand', () => {
     expect(cmd).toBe('gbrain dream --phase synthesize --slug companies/acme');
   });
 
-  test('takes_mark_debate emits mark-debate with row id', () => {
+  test('takes_mark_debate renders an explicit manual-review comment', () => {
     const pair = mkIntraPagePair('people/alice', 12);
     const cmd = renderResolutionCommand(pair, 'takes_mark_debate');
-    expect(cmd).toBe('gbrain takes mark-debate people/alice --row 12');
+    expect(cmd).toBe('# takes mark-debate is not yet implemented — treat as manual review (people/alice row 12)');
+  });
+
+  test('temporal_supersede uses the older take id', () => {
+    const pair = mkIntraPagePair('people/alice', 12);
+    pair.a.effective_date = '2026-01-01';
+    pair.b.effective_date = '2025-01-01';
+    const cmd = renderResolutionCommand(pair, 'temporal_supersede');
+    expect(cmd).toBe('gbrain takes supersede people/alice --id 12 --since 2026-01-01');
   });
 
   test('manual_review emits a no-op comment naming both slugs', () => {
@@ -93,10 +101,10 @@ describe('renderResolutionCommand', () => {
     expect(cmd).toContain('openclaw/chat/y');
   });
 
-  test('takes_supersede with missing take_id falls back to row placeholder', () => {
+  test('takes_supersede with missing take_id falls back to id placeholder', () => {
     const pair = mkCrossSlugPair('companies/acme', 'people/alice');
     const cmd = renderResolutionCommand(pair, 'takes_supersede');
-    expect(cmd).toContain('<row>');
+    expect(cmd).toContain('<id>');
   });
 });
 
@@ -105,7 +113,7 @@ describe('proposeResolution (classify + render combined)', () => {
     const pair = mkIntraPagePair('people/alice', 42);
     const p = proposeResolution(pair, null);
     expect(p.resolution_kind).toBe('takes_supersede');
-    expect(p.resolution_command).toBe('gbrain takes supersede people/alice --row 42');
+    expect(p.resolution_command).toBe('gbrain takes supersede people/alice --id 42');
   });
 
   test('cross_slug curated → dream_synthesize on curated slug', () => {
