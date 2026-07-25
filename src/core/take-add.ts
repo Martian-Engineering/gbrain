@@ -16,7 +16,10 @@ import type { BrainEngine, TakeKind } from './engine.ts';
 import { withPageLock } from './page-lock.ts';
 import { upsertTakeRow } from './takes-fence.ts';
 
-export type TakeAddErrorCode = 'brain_dir_not_found' | 'page_not_found';
+export type TakeAddErrorCode =
+  | 'brain_dir_not_found'
+  | 'page_not_found'
+  | 'page_deleted';
 
 /** Expected configuration or page-resolution failure during take insertion. */
 export class TakeAddError extends Error {
@@ -45,6 +48,14 @@ export interface AddTakeInput {
 /** Result of writing a take to markdown and its database mirror. */
 export interface AddTakeResult {
   rowNum: number;
+  pageSlug: string;
+}
+
+/** Canonical page and holder resolved before a take write begins. */
+export interface ResolvedTakeTarget {
+  slug: string;
+  holder: string;
+  pageId: number;
 }
 
 /**
@@ -102,20 +113,53 @@ async function resolvePageId(
 ): Promise<number> {
   const rows = sourceId
     ? await engine.executeRaw<{ id: number }>(
-        `SELECT id FROM pages WHERE slug = $1 AND source_id = $2 LIMIT 1`,
+        `SELECT id FROM pages
+          WHERE slug = $1 AND source_id = $2 AND deleted_at IS NULL
+          LIMIT 1`,
         [slug, sourceId],
       )
     : await engine.executeRaw<{ id: number }>(
-        `SELECT id FROM pages WHERE slug = $1 LIMIT 1`,
+        `SELECT id FROM pages
+          WHERE slug = $1 AND deleted_at IS NULL
+          LIMIT 1`,
         [slug],
       );
-  if (!rows[0]) {
-    throw new TakeAddError(
-      'page_not_found',
-      `Page not found in brain: ${slug}${sourceId ? ` (source=${sourceId})` : ''}. Run \`gbrain sync\` first.`,
-    );
+  if (rows[0]) return rows[0].id;
+
+  // Distinguish a tombstone from a never-ingested slug without weakening the
+  // active-row lookup that protects the file write below.
+  const deletedRows = sourceId
+    ? await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM pages
+          WHERE slug = $1 AND source_id = $2 AND deleted_at IS NOT NULL
+          LIMIT 1`,
+        [slug, sourceId],
+      )
+    : await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM pages
+          WHERE slug = $1 AND deleted_at IS NOT NULL
+          LIMIT 1`,
+        [slug],
+      );
+  if (deletedRows[0]) {
+    throw new TakeAddError('page_deleted', `Page is soft-deleted: ${slug}`);
   }
-  return rows[0].id;
+  throw new TakeAddError(
+    'page_not_found',
+    `Page not found in brain: ${slug}${sourceId ? ` (source=${sourceId})` : ''}. Run \`gbrain sync\` first.`,
+  );
+}
+
+/** Resolve slug aliases and verify the canonical page is active. */
+export async function resolveTakeTarget(
+  engine: BrainEngine,
+  input: Pick<AddTakeInput, 'slug' | 'holder' | 'sourceId'>,
+): Promise<ResolvedTakeTarget> {
+  const aliasSourceId = input.sourceId ?? 'default';
+  const slug = await engine.resolveSlugWithAlias(input.slug, aliasSourceId);
+  const holder = await engine.resolveSlugWithAlias(input.holder, aliasSourceId);
+  const pageId = await resolvePageId(engine, slug, input.sourceId);
+  return { slug, holder, pageId };
 }
 
 /**
@@ -129,16 +173,17 @@ export async function addTake(
     sourceId: input.sourceId,
     brainDir: input.brainDir,
   });
+  const target = await resolveTakeTarget(engine, input);
 
   // The lock spans both sinks so concurrent writers cannot reuse a row number
   // or mirror a fence state different from the file they observed.
-  return withPageLock(input.slug, async () => {
-    const path = join(brainDir, `${input.slug}.md`);
+  return withPageLock(target.slug, async () => {
+    const path = join(brainDir, `${target.slug}.md`);
     const body = existsSync(path) ? readFileSync(path, 'utf8') : '';
     const { body: nextBody, rowNum } = upsertTakeRow(body, {
       claim: input.claim,
       kind: input.kind,
-      holder: input.holder,
+      holder: target.holder,
       weight: input.weight,
       source: input.source,
       sinceDate: input.sinceDate,
@@ -148,19 +193,21 @@ export async function addTake(
     // Preserve the established markdown-first command sequence.
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, nextBody, 'utf8');
-    const pageId = await resolvePageId(engine, input.slug, input.sourceId);
     await engine.addTakesBatch([{
-      page_id: pageId,
+      page_id: target.pageId,
       row_num: rowNum,
       claim: input.claim,
       kind: input.kind,
-      holder: input.holder,
+      holder: target.holder,
       weight: input.weight,
       since_date: input.sinceDate,
       source: input.source,
       active: true,
       superseded_by: null,
     }]);
-    return { rowNum };
+    return {
+      rowNum,
+      pageSlug: target.slug,
+    };
   });
 }

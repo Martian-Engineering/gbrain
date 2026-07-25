@@ -8,13 +8,14 @@ import {
 } from 'bun:test';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   operationsByName,
   type OperationContext,
@@ -139,8 +140,21 @@ async function seedProposalPage(
     timeline: '',
   }, { sourceId });
   const path = join(brainDir, `${slug}.md`);
+  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, markdown, 'utf8');
   return path;
+}
+
+async function seedSlugAlias(
+  aliasSlug: string,
+  canonicalSlug: string,
+  sourceId = 'default',
+): Promise<void> {
+  await engine.executeRaw(
+    `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug)
+     VALUES ($1, $2, $3)`,
+    [sourceId, aliasSlug, canonicalSlug],
+  );
 }
 
 async function resolveProposal(
@@ -477,6 +491,153 @@ describe('resolve_take_proposal', () => {
     }]);
   });
 
+  test('accept follows page and holder aliases into the canonical page', async () => {
+    const canonicalSlug = 'people/alice-example';
+    const aliasSlug = 'people/alice-typo';
+    const canonicalPath = await seedProposalPage(canonicalSlug);
+    const aliasPath = await seedProposalPage(aliasSlug);
+    await engine.softDeletePage(aliasSlug, { sourceId: 'default' });
+    await seedSlugAlias(aliasSlug, canonicalSlug);
+    rmSync(aliasPath);
+    const id = await seedProposal({
+      pageSlug: aliasSlug,
+      claimText: 'Alias-targeted proposal',
+      holder: aliasSlug,
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    const result = await resolveProposal(ctx(), { id, action: 'accept' });
+
+    expect(result).toMatchObject({ page_slug: canonicalSlug });
+    const fence = parseTakesFence(readFileSync(canonicalPath, 'utf8'));
+    expect(fence.takes).toHaveLength(1);
+    expect(fence.takes[0]).toMatchObject({
+      claim: 'Alias-targeted proposal',
+      holder: canonicalSlug,
+      source: `proposal:${id}`,
+    });
+    expect(existsSync(aliasPath)).toBe(false);
+    const takes = await engine.executeRaw<{
+      page_slug: string;
+      holder: string;
+    }>(
+      `SELECT p.slug AS page_slug, t.holder
+         FROM takes t
+         JOIN pages p ON p.id = t.page_id`,
+    );
+    expect(takes).toEqual([{
+      page_slug: canonicalSlug,
+      holder: canonicalSlug,
+    }]);
+  });
+
+  test('accept rejects a soft-deleted page without recreating its file', async () => {
+    const slug = 'people/deleted-example';
+    const pagePath = await seedProposalPage(slug);
+    await engine.softDeletePage(slug, { sourceId: 'default' });
+    rmSync(pagePath);
+    const id = await seedProposal({
+      pageSlug: slug,
+      claimText: 'Tombstoned proposal',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    await expect(resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+    })).rejects.toMatchObject({
+      code: 'page_deleted',
+      message: `Page is soft-deleted: ${slug}`,
+    });
+
+    expect(existsSync(pagePath)).toBe(false);
+    const proposals = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(proposals[0]?.status).toBe('pending');
+    const takes = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM takes`,
+    );
+    expect(Number(takes[0]?.count)).toBe(0);
+  });
+
+  test('accept preserves page_not_found for a never-ingested slug without writing', async () => {
+    const slug = 'people/missing-example';
+    const pagePath = join(brainDir, `${slug}.md`);
+    await engine.setConfig('sync.repo_path', brainDir);
+    const id = await seedProposal({
+      pageSlug: slug,
+      claimText: 'Never-ingested proposal',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    await expect(resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+    })).rejects.toMatchObject({ code: 'page_not_found' });
+    expect(existsSync(pagePath)).toBe(false);
+  });
+
+  test('dry-run reports canonical page and holder aliases without writing', async () => {
+    const canonicalSlug = 'people/alice-example';
+    const aliasSlug = 'people/alice-typo';
+    const originalMarkdown = `# ${canonicalSlug}\n`;
+    const canonicalPath = await seedProposalPage(
+      canonicalSlug,
+      'default',
+      originalMarkdown,
+    );
+    const aliasPath = await seedProposalPage(aliasSlug);
+    await engine.softDeletePage(aliasSlug, { sourceId: 'default' });
+    await seedSlugAlias(aliasSlug, canonicalSlug);
+    rmSync(aliasPath);
+    const id = await seedProposal({
+      pageSlug: aliasSlug,
+      claimText: 'Preview alias proposal',
+      holder: aliasSlug,
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    const result = await resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+      dry_run: true,
+    });
+
+    expect(result).toMatchObject({
+      dry_run: true,
+      action: 'accept',
+      id,
+      page_slug: canonicalSlug,
+      holder: canonicalSlug,
+    });
+    expect(readFileSync(canonicalPath, 'utf8')).toBe(originalMarkdown);
+    expect(existsSync(aliasPath)).toBe(false);
+  });
+
+  test('dry-run rejects the same soft-deleted page as a real accept', async () => {
+    const slug = 'people/deleted-example';
+    const pagePath = await seedProposalPage(slug);
+    await engine.softDeletePage(slug, { sourceId: 'default' });
+    rmSync(pagePath);
+    const id = await seedProposal({
+      pageSlug: slug,
+      claimText: 'Preview tombstoned proposal',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    await expect(resolveProposal(ctx(), {
+      id,
+      action: 'accept',
+      dry_run: true,
+    })).rejects.toMatchObject({
+      code: 'page_deleted',
+      message: `Page is soft-deleted: ${slug}`,
+    });
+    expect(existsSync(pagePath)).toBe(false);
+  });
+
   test('dry-run returns effective fields without mutating the file or database', async () => {
     const originalMarkdown = '# Proposal page\n';
     const pagePath = await seedProposalPage(
@@ -504,6 +665,7 @@ describe('resolve_take_proposal', () => {
       dry_run: true,
       action: 'accept',
       id,
+      page_slug: 'proposal-page',
       claim_text: 'Preview edit',
       kind: 'bet',
       holder: 'world',

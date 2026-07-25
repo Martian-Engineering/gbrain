@@ -4914,6 +4914,7 @@ export class PostgresEngine implements BrainEngine {
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE 1=1
+        AND p.deleted_at IS NULL
         AND (${opts.page_id ?? null}::int   IS NULL OR t.page_id = ${opts.page_id ?? null}::int)
         AND (${opts.page_slug ?? null}::text IS NULL OR p.slug   = ${opts.page_slug ?? null}::text)
         AND (${opts.holder ?? null}::text   IS NULL OR t.holder  = ${opts.holder ?? null}::text)
@@ -4953,6 +4954,7 @@ export class PostgresEngine implements BrainEngine {
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE t.active
+        AND p.deleted_at IS NULL
         AND t.claim % ${query}
         AND (
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL
@@ -4987,6 +4989,7 @@ export class PostgresEngine implements BrainEngine {
       FROM takes t
       JOIN pages p ON p.id = t.page_id
       WHERE t.active
+        AND p.deleted_at IS NULL
         AND t.embedding IS NOT NULL
         AND (
           ${opts.takesHoldersAllowList ?? null}::text[] IS NULL

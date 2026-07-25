@@ -52,7 +52,12 @@ import {
 } from './slug-alias.ts';
 import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
 import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
-import { addTake, resolveTakeBrainDir, TakeAddError } from './take-add.ts';
+import {
+  addTake,
+  resolveTakeBrainDir,
+  resolveTakeTarget,
+  TakeAddError,
+} from './take-add.ts';
 import {
   GET_RECENT_SALIENCE_DESCRIPTION,
   FIND_ANOMALIES_DESCRIPTION,
@@ -2575,10 +2580,17 @@ const resolve_take_proposal: Operation = {
           resolution_note: notes,
         };
       }
-      // Resolve the markdown working tree too, so a preview fails the same
-      // way a real acceptance would on a misconfigured deployment.
+      const effective = effectiveTake(proposal, p);
+      // Resolve the same working tree, aliases, and active page as a real
+      // acceptance so previews cannot report a write that would be rejected.
+      let target: Awaited<ReturnType<typeof resolveTakeTarget>>;
       try {
         await resolveTakeBrainDir(ctx.engine, { sourceId });
+        target = await resolveTakeTarget(ctx.engine, {
+          slug: proposal.page_slug,
+          holder: effective.holder,
+          sourceId,
+        });
       } catch (error) {
         if (error instanceof TakeAddError) {
           throw new OperationError(error.code, error.message);
@@ -2589,7 +2601,9 @@ const resolve_take_proposal: Operation = {
         dry_run: true,
         action,
         id,
-        ...effectiveTake(proposal, p),
+        ...effective,
+        page_slug: target.slug,
+        holder: target.holder,
       };
     }
 
@@ -2617,9 +2631,9 @@ const resolve_take_proposal: Operation = {
       // The shared service owns the canonical markdown-first promotion; the
       // transaction-scoped engine keeps its database mirror in this commit.
       const effective = effectiveTake(proposal, p);
-      let rowNum: number;
+      let promoted: Awaited<ReturnType<typeof addTake>>;
       try {
-        ({ rowNum } = await addTake(tx, {
+        promoted = await addTake(tx, {
           slug: proposal.page_slug,
           claim: effective.claim_text,
           kind: effective.kind,
@@ -2628,7 +2642,7 @@ const resolve_take_proposal: Operation = {
           sinceDate: effective.since_date,
           source: effective.source,
           sourceId,
-        }));
+        });
       } catch (error) {
         if (error instanceof TakeAddError) {
           throw new OperationError(error.code, error.message);
@@ -2646,9 +2660,13 @@ const resolve_take_proposal: Operation = {
           WHERE id = $1 AND source_id = $2 AND status = 'pending'
         RETURNING id, status, acted_at, acted_by,
                   promoted_row_num, resolution_note`,
-        [id, sourceId, rowNum, actor, notes],
+        [id, sourceId, promoted.rowNum, actor, notes],
       );
-      return { ...rows[0], id };
+      return {
+        ...rows[0],
+        id,
+        page_slug: promoted.pageSlug,
+      };
     });
   },
 };

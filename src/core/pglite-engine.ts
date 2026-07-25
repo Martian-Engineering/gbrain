@@ -4756,6 +4756,7 @@ export class PGLiteEngine implements BrainEngine {
        FROM takes t
        JOIN pages p ON p.id = t.page_id
        WHERE 1=1
+         AND p.deleted_at IS NULL
          AND ($1::int   IS NULL OR t.page_id = $1::int)
          AND ($2::text  IS NULL OR p.slug    = $2::text)
          AND ($3::text  IS NULL OR t.holder  = $3::text)
@@ -4805,6 +4806,7 @@ export class PGLiteEngine implements BrainEngine {
        FROM takes t
        JOIN pages p ON p.id = t.page_id
        WHERE t.active
+         AND p.deleted_at IS NULL
          AND t.claim % $1
          AND ($2::text[] IS NULL OR t.holder = ANY($2::text[]))
          AND ($4::text[] IS NULL OR p.source_id = ANY($4::text[]))
@@ -4837,6 +4839,7 @@ export class PGLiteEngine implements BrainEngine {
        FROM takes t
        JOIN pages p ON p.id = t.page_id
        WHERE t.active
+         AND p.deleted_at IS NULL
          AND t.embedding IS NOT NULL
          AND ($2::text[] IS NULL OR t.holder = ANY($2::text[]))
          AND ($4::text[] IS NULL OR p.source_id = ANY($4::text[]))

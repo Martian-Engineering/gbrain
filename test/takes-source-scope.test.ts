@@ -96,3 +96,43 @@ describe('getScorecard / getCalibrationCurve — EXISTS pages.source_id scope', 
     expect(b.reduce((s, x) => s + x.n, 0)).toBe(1);
   });
 });
+
+describe('soft-deleted page filtering', () => {
+  test('listTakes and searchTakes exclude takes bound to a tombstoned page', async () => {
+    const page = await engine.putPage('people/deleted-example', {
+      title: 'Deleted example',
+      type: 'person',
+      compiled_truth: '## Takes\n',
+    }, { sourceId: 'tenant-a' });
+    await engine.addTakesBatch([{
+      page_id: page.id,
+      row_num: 1,
+      claim: 'Ghost founder exact phrase',
+      kind: 'take',
+      holder: 'world',
+      weight: 0.9,
+    }]);
+    const embedding = new Float32Array(1536).fill(0.001);
+    await engine.executeRaw(
+      `UPDATE takes SET embedding = $1::vector WHERE page_id = $2`,
+      [`[${Array.from(embedding).join(',')}]`, page.id],
+    );
+    await engine.softDeletePage('people/deleted-example', {
+      sourceId: 'tenant-a',
+    });
+
+    const listed = await engine.listTakes({
+      page_slug: 'people/deleted-example',
+      sourceId: 'tenant-a',
+    });
+    const hits = await engine.searchTakes('Ghost founder exact phrase', {
+      sourceId: 'tenant-a',
+    });
+    const vectorHits = await engine.searchTakesVector(embedding, {
+      sourceId: 'tenant-a',
+    });
+    expect(listed).toEqual([]);
+    expect(hits).toEqual([]);
+    expect(vectorHits).toEqual([]);
+  });
+});
