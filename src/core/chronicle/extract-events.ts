@@ -44,8 +44,22 @@ export interface ChronicleExtractResult {
   slug: string;
   status: 'extracted' | 'no_events' | 'skipped';
   events_written: number;
+  events_superseded: number;
+  events_kept_tagged: number;
   reason?: string;
 }
+
+interface SupersessionCounts {
+  events_superseded: number;
+  events_kept_tagged: number;
+}
+
+const NO_SUPERSESSION: SupersessionCounts = {
+  events_superseded: 0,
+  events_kept_tagged: 0,
+};
+
+const CHRONICLE_SUPERSEDED_TAG = 'life-chronicle:superseded';
 
 const KIND_VOCAB = new Set([
   'meeting', 'call', 'meal', 'solo', 'travel', 'work',
@@ -104,6 +118,61 @@ function collectAttendees(fm: Record<string, unknown>): string[] {
 }
 
 /**
+ * Soft-delete stale auto-events for one depth page and remove their timeline
+ * projections. Desk-tagged events retain both the page and projection because
+ * those tags carry user resolution state.
+ */
+async function supersedePriorEvents(
+  engine: BrainEngine,
+  sourceId: string,
+  depthSlug: string,
+  currentEventSlugs: Set<string>,
+): Promise<SupersessionCounts> {
+  // The full current batch is excluded in SQL so only prior active auto-events
+  // can enter the destructive path.
+  const candidates = await engine.executeRaw<{ id: number; slug: string; has_desk_tag: boolean }>(
+    `SELECT p.id, p.slug,
+            EXISTS (
+              SELECT 1 FROM tags t
+               WHERE t.page_id = p.id
+                 AND left(t.tag, 5) = 'desk:'
+            ) AS has_desk_tag
+       FROM pages p
+      WHERE p.source_id = $1
+        AND p.deleted_at IS NULL
+        AND p.slug LIKE 'life/events/%'
+        AND p.frontmatter->>'captured_via' = 'life-chronicle:auto'
+        AND p.frontmatter->'event'->>'depth' = $2
+        AND NOT (p.slug = ANY($3::text[]))
+      ORDER BY p.id`,
+    [sourceId, depthSlug, [...currentEventSlugs]],
+  );
+
+  let eventsSuperseded = 0;
+  let eventsKeptTagged = 0;
+  for (const candidate of candidates) {
+    if (candidate.has_desk_tag) {
+      eventsKeptTagged++;
+      continue;
+    }
+    const deleted = await engine.softDeletePage(candidate.slug, { sourceId });
+    if (!deleted) continue;
+    // Record tombstone ownership so a later same-hash extraction can restore
+    // this page without reviving pages a user deleted through delete_page.
+    await engine.addTag(candidate.slug, CHRONICLE_SUPERSEDED_TAG, { sourceId });
+    await engine.executeRaw(
+      `DELETE FROM timeline_entries WHERE event_page_id = $1`,
+      [candidate.id],
+    );
+    eventsSuperseded++;
+  }
+  return {
+    events_superseded: eventsSuperseded,
+    events_kept_tagged: eventsKeptTagged,
+  };
+}
+
+/**
  * Run the chronicle extractor for one depth page. Idempotent: event slugs are
  * content-addressed (re-run upserts the same pages) and the projection upserts
  * on (event_page_id, date). A crash between writes re-runs to the same state.
@@ -115,7 +184,15 @@ export async function runChronicleExtract(
   const sourceId = opts.sourceId ?? 'default';
   const tz = opts.tz ?? 'UTC';
   const page = await engine.getPage(opts.slug, { sourceId });
-  if (!page) return { slug: opts.slug, status: 'skipped', events_written: 0, reason: 'page_not_found' };
+  if (!page) {
+    return {
+      slug: opts.slug,
+      status: 'skipped',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+      reason: 'page_not_found',
+    };
+  }
 
   const fm = (page.frontmatter ?? {}) as Record<string, unknown>;
   const edRaw = page.effective_date as unknown;
@@ -135,51 +212,119 @@ export async function runChronicleExtract(
     });
   } catch (e) {
     if ((e as Error)?.name === 'AbortError') throw e;
-    return { slug: opts.slug, status: 'skipped', events_written: 0, reason: 'judge_error' };
+    return {
+      slug: opts.slug,
+      status: 'skipped',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+      reason: 'judge_error',
+    };
   }
 
   // #2606: a truncated or unparseable judge response is a FAILURE, not an
   // empty page. Record it as a distinct skipped reason so operators (and
   // retries) can tell it apart from a genuine no_events.
   if (result?.failure) {
-    return { slug: opts.slug, status: 'skipped', events_written: 0, reason: `judge_${result.failure}` };
+    return {
+      slug: opts.slug,
+      status: 'skipped',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+      reason: `judge_${result.failure}`,
+    };
   }
   const proposals = Array.isArray(result?.events) ? result.events : [];
-  if (proposals.length === 0) return { slug: opts.slug, status: 'no_events', events_written: 0 };
+  // A legitimate empty judge result is not an authoritative replacement set:
+  // preserve prior events. Only a successful non-empty batch may supersede.
+  if (proposals.length === 0) {
+    return {
+      slug: opts.slug,
+      status: 'no_events',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+    };
+  }
   // PARSE BARRIER — reject the WHOLE batch on any malformed proposal; no partial writes.
   if (!proposals.every(isValidProposal)) {
-    return { slug: opts.slug, status: 'skipped', events_written: 0, reason: 'malformed_proposal' };
+    return {
+      slug: opts.slug,
+      status: 'skipped',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+      reason: 'malformed_proposal',
+    };
   }
 
-  let written = 0;
-  for (const ev of proposals) {
-    if (opts.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
-    const who = ev.who.length ? ev.who : attendees;
-    const when = ev.when || effectiveDate || isoDay(new Date(0).toISOString(), tz);
-    const day = isoDay(when, tz);
-    const hash = computeContentHash(`${who.join(',')}|${ev.what}|${opts.slug}`).slice(0, 8);
-    const eventSlug = `life/events/${day}-${hash}`;
-    await engine.putPage(eventSlug, {
-      type: 'event',
-      title: ev.what.slice(0, 120),
-      compiled_truth: `${ev.what} — see [[${opts.slug}]].`,
-      frontmatter: {
+  const writeResult = await engine.transaction(async (tx) => {
+    // Serialize the complete replace-set transition per source/depth page.
+    // The judge runs before this lock so model latency never holds a DB row.
+    const lockedDepth = await tx.executeRaw<{ id: number }>(
+      `SELECT id FROM pages
+        WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [sourceId, opts.slug],
+    );
+    if (lockedDepth.length === 0) return null;
+
+    let written = 0;
+    const currentEventSlugs = new Set<string>();
+    for (const ev of proposals) {
+      if (opts.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
+      const who = ev.who.length ? ev.who : attendees;
+      const when = ev.when || effectiveDate || isoDay(new Date(0).toISOString(), tz);
+      const day = isoDay(when, tz);
+      const hash = computeContentHash(`${who.join(',')}|${ev.what}|${opts.slug}`).slice(0, 8);
+      const eventSlug = `life/events/${day}-${hash}`;
+      const priorTags = await tx.getTags(eventSlug, { sourceId });
+      const wasChronicleSuperseded = priorTags.includes(CHRONICLE_SUPERSEDED_TAG);
+      await tx.putPage(eventSlug, {
         type: 'event',
-        event: {
-          when, who, what: ev.what, where: ev.where ?? null,
-          owner: ev.owner ?? null, kind: normalizeKind(ev.kind), depth: opts.slug,
+        title: ev.what.slice(0, 120),
+        compiled_truth: `${ev.what} — see [[${opts.slug}]].`,
+        frontmatter: {
+          type: 'event',
+          event: {
+            when, who, what: ev.what, where: ev.where ?? null,
+            owner: ev.owner ?? null, kind: normalizeKind(ev.kind), depth: opts.slug,
+          },
+          captured_via: 'life-chronicle:auto',
         },
-        captured_via: 'life-chronicle:auto',
-      },
-      effective_date: safeDate(when),
-    }, { sourceId });
-    await engine.upsertEventProjection({
-      depthSlug: opts.slug, eventSlug, date: day, summary: ev.what,
-      owner: ev.owner ?? null, sourceId,
-    });
-    written++;
+        effective_date: safeDate(when),
+      }, { sourceId });
+      if (wasChronicleSuperseded) {
+        await tx.restorePage(eventSlug, { sourceId });
+        await tx.removeTag(eventSlug, CHRONICLE_SUPERSEDED_TAG, { sourceId });
+      }
+      await tx.upsertEventProjection({
+        depthSlug: opts.slug, eventSlug, date: day, summary: ev.what,
+        owner: ev.owner ?? null, sourceId,
+      });
+      currentEventSlugs.add(eventSlug);
+      written++;
+    }
+    const supersession = await supersedePriorEvents(
+      tx,
+      sourceId,
+      opts.slug,
+      currentEventSlugs,
+    );
+    return { written, supersession };
+  });
+  if (!writeResult) {
+    return {
+      slug: opts.slug,
+      status: 'skipped',
+      events_written: 0,
+      ...NO_SUPERSESSION,
+      reason: 'page_not_found',
+    };
   }
-  return { slug: opts.slug, status: 'extracted', events_written: written };
+  return {
+    slug: opts.slug,
+    status: 'extracted',
+    events_written: writeResult.written,
+    ...writeResult.supersession,
+  };
 }
 
 const JUDGE_SYSTEM = `You segment a meeting/transcript page into discrete timeline EVENTS.

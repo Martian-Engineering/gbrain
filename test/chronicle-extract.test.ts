@@ -102,6 +102,204 @@ describe('runChronicleExtract', () => {
     expect(day.length).toBe(1);
   });
 
+  test('rephrased output supersedes the prior event and removes its projection', async () => {
+    const first = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+    const firstDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    const priorSlug = firstDay[0].event_slug!;
+
+    const rephrased: ChronicleJudge = async () => ({
+      events: [{
+        when: '2026-06-18T15:30:00Z',
+        who: ['people/sarah-chen', 'people/bob'],
+        owner: 'people/sarah-chen',
+        what: 'Sarah took ownership of the Q3 follow-up',
+        kind: 'commitment',
+      }],
+    });
+    const second = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: rephrased,
+    });
+
+    expect(first.events_superseded).toBe(0);
+    expect(first.events_kept_tagged).toBe(0);
+    expect(second.events_superseded).toBe(1);
+    expect(second.events_kept_tagged).toBe(0);
+    expect(await engine.getPage(priorSlug, { sourceId: 'default' })).toBeNull();
+    expect(await engine.getPage(priorSlug, {
+      sourceId: 'default',
+      includeDeleted: true,
+    })).not.toBeNull();
+
+    const projections = await engine.executeRaw<{ event_slug: string }>(
+      `SELECT ep.slug AS event_slug
+         FROM timeline_entries te
+         JOIN pages ep ON ep.id = te.event_page_id
+        ORDER BY ep.slug`,
+    );
+    expect(projections).toHaveLength(1);
+    expect(projections[0].event_slug).not.toBe(priorSlug);
+  });
+
+  test('concurrent extracts serialize replace-set writes for one depth page', async () => {
+    let judgesReady = 0;
+    let releaseJudges!: () => void;
+    const bothJudgesReady = new Promise<void>((resolve) => {
+      releaseJudges = resolve;
+    });
+    const judge = (what: string): ChronicleJudge => async () => {
+      judgesReady++;
+      if (judgesReady === 2) releaseJudges();
+      await bothJudgesReady;
+      return {
+        events: [{
+          when: '2026-06-18T15:30:00Z',
+          who: ['people/sarah-chen'],
+          what,
+          kind: 'commitment',
+        }],
+      };
+    };
+
+    await Promise.all([
+      runChronicleExtract(engine, {
+        slug: 'meetings/2026-06-18-sync',
+        judge: judge('Sarah owns the Q3 follow-up'),
+      }),
+      runChronicleExtract(engine, {
+        slug: 'meetings/2026-06-18-sync',
+        judge: judge('Sarah took the Q3 action item'),
+      }),
+    ]);
+
+    const activeEvents = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM pages
+        WHERE deleted_at IS NULL
+          AND frontmatter->'event'->>'depth' = 'meetings/2026-06-18-sync'`,
+    );
+    const projections = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n FROM timeline_entries WHERE event_page_id IS NOT NULL`,
+    );
+    expect(Number(activeEvents[0].n)).toBe(1);
+    expect(Number(projections[0].n)).toBe(1);
+  });
+
+  test('no_events leaves prior events and projections untouched', async () => {
+    await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+    const priorDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    const priorSlug = priorDay[0].event_slug!;
+    const none: ChronicleJudge = async () => ({ events: [] });
+
+    const result = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: none,
+    });
+
+    expect(result.status).toBe('no_events');
+    expect(result.events_superseded).toBe(0);
+    expect(result.events_kept_tagged).toBe(0);
+    expect(await engine.getPage(priorSlug, { sourceId: 'default' })).not.toBeNull();
+    const projections = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n FROM timeline_entries WHERE event_page_id IS NOT NULL`,
+    );
+    expect(Number(projections[0].n)).toBe(1);
+  });
+
+  test('desk-tagged prior events survive supersession and are counted', async () => {
+    await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+    const priorDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    const priorSlug = priorDay[0].event_slug!;
+    await engine.addTag(priorSlug, 'desk:resolved', { sourceId: 'default' });
+    const rephrased: ChronicleJudge = async () => ({
+      events: [{
+        when: '2026-06-18T15:30:00Z',
+        who: ['people/sarah-chen', 'people/bob'],
+        owner: 'people/sarah-chen',
+        what: 'Sarah owns the Q3 action item',
+        kind: 'commitment',
+      }],
+    });
+
+    const result = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: rephrased,
+    });
+
+    expect(result.events_superseded).toBe(0);
+    expect(result.events_kept_tagged).toBe(1);
+    expect(await engine.getPage(priorSlug, { sourceId: 'default' })).not.toBeNull();
+    const projections = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n FROM timeline_entries WHERE event_page_id IS NOT NULL`,
+    );
+    expect(Number(projections[0].n)).toBe(2);
+  });
+
+  test('same-hash re-extraction preserves a user-deleted event tombstone', async () => {
+    await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+    const priorDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    const eventSlug = priorDay[0].event_slug!;
+    await engine.softDeletePage(eventSlug, { sourceId: 'default' });
+
+    const result = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+
+    expect(result.events_superseded).toBe(0);
+    expect(await engine.getPage(eventSlug, { sourceId: 'default' })).toBeNull();
+    const tombstone = await engine.getPage(eventSlug, {
+      sourceId: 'default',
+      includeDeleted: true,
+    });
+    expect(tombstone?.deleted_at).toBeInstanceOf(Date);
+  });
+
+  test('re-emitting an extractor-superseded hash restores that event only', async () => {
+    await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+    const firstDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    const originalSlug = firstDay[0].event_slug!;
+    const rephrased: ChronicleJudge = async () => ({
+      events: [{
+        when: '2026-06-18T15:30:00Z',
+        who: ['people/sarah-chen', 'people/bob'],
+        owner: 'people/sarah-chen',
+        what: 'Sarah took ownership of the Q3 follow-up',
+        kind: 'commitment',
+      }],
+    });
+    await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: rephrased,
+    });
+
+    const result = await runChronicleExtract(engine, {
+      slug: 'meetings/2026-06-18-sync',
+      judge: oneEvent,
+    });
+
+    expect(result.events_superseded).toBe(1);
+    expect(await engine.getPage(originalSlug, { sourceId: 'default' })).not.toBeNull();
+    const day = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
+    expect(day).toHaveLength(1);
+    expect(day[0].event_slug).toBe(originalSlug);
+  });
+
   test('parse barrier: a malformed proposal writes NOTHING', async () => {
     const before = await countEvents();
     const bad: ChronicleJudge = async () => ({ events: [{ when: '2026-06-18', who: [], kind: 'x' } as never] });
