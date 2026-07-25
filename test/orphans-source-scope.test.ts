@@ -168,6 +168,16 @@ describe('getOrphansData — scoped totals + F6 denominator', () => {
 });
 
 describe('find_orphans MCP op — F8 source-isolation scope', () => {
+  test('declares flood thresholds and explains aggregate caller behavior', async () => {
+    const { operations } = await import('../src/core/operations.ts');
+    const op = operations.find(o => o.name === 'find_orphans');
+
+    expect(op?.params.count_threshold?.type).toBe('number');
+    expect(op?.params.ratio_threshold?.type).toBe('number');
+    expect(op?.description).toContain('corpus shape');
+    expect(op?.description).toContain('aggregate data-quality signal');
+  });
+
   test('ctx.sourceId scopes results to that source only', async () => {
     const { operations } = await import('../src/core/operations.ts');
     const op = operations.find(o => o.name === 'find_orphans');
@@ -180,11 +190,57 @@ describe('find_orphans MCP op — F8 source-isolation scope', () => {
       remote: true,
       sourceId: 'src-b',
     };
-    const result = (await op!.handler(ctx as any, {})) as { orphans: { slug: string }[] };
+    const result = (await op!.handler(ctx as any, {})) as {
+      orphans: { slug: string }[];
+      by_domain: { domain: string; count: number; share: number }[];
+      flood: {
+        flooded: boolean;
+        count_threshold: number;
+        ratio_threshold: number;
+      };
+    };
     const slugs = result.orphans.map(o => o.slug).sort();
     expect(slugs).toEqual(['people/src-b-linker', 'people/zara-orphan']);
+    expect(result.by_domain).toEqual([
+      { domain: 'people', count: 2, share: 1 },
+    ]);
+    expect(result.flood).toEqual({
+      flooded: true,
+      count_threshold: 100,
+      ratio_threshold: 0.25,
+    });
     // Leak guard: default's orphan must NOT appear.
     expect(slugs).not.toContain('people/alice-orphan');
+  });
+
+  test('forwards count and ratio threshold overrides', async () => {
+    const { operations } = await import('../src/core/operations.ts');
+    const op = operations.find(o => o.name === 'find_orphans');
+    const ctx = {
+      engine,
+      config: { engine: 'pglite' as const },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      dryRun: false,
+      remote: true,
+      sourceId: 'src-b',
+    };
+
+    const result = (await op!.handler(ctx as any, {
+      count_threshold: 2,
+      ratio_threshold: 1,
+    })) as {
+      flood: {
+        flooded: boolean;
+        count_threshold: number;
+        ratio_threshold: number;
+      };
+    };
+
+    expect(result.flood).toEqual({
+      flooded: false,
+      count_threshold: 2,
+      ratio_threshold: 1,
+    });
   });
 
   test('ctx.auth.allowedSources (federated) scopes to the allowed set', async () => {

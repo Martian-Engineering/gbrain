@@ -8,6 +8,7 @@ import {
   type OrphanPage,
   type OrphanResult,
 } from '../src/commands/orphans.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 
 // --- shouldExclude ---
@@ -165,12 +166,19 @@ describe('deriveDomain', () => {
 
 describe('formatOrphansText', () => {
   function makeResult(orphans: OrphanPage[], overrides?: Partial<OrphanResult>): OrphanResult {
+    const totalOrphans = orphans.length;
     return {
       orphans,
-      total_orphans: orphans.length,
-      total_linkable: orphans.length + 50,
-      total_pages: orphans.length + 60,
+      total_orphans: totalOrphans,
+      total_linkable: totalOrphans + 50,
+      total_pages: totalOrphans + 60,
       excluded: 10,
+      by_domain: [],
+      flood: {
+        flooded: false,
+        count_threshold: 100,
+        ratio_threshold: 0.25,
+      },
       ...overrides,
     };
   }
@@ -237,15 +245,170 @@ describe('formatOrphansText', () => {
       total_linkable: 100,
       total_pages: 120,
       excluded: 20,
+      by_domain: [{ domain: 'a', count: 2, share: 1 }],
+      flood: {
+        flooded: false,
+        count_threshold: 100,
+        ratio_threshold: 0.25,
+      },
     };
     const out = formatOrphansText(result);
     expect(out).toContain('2 orphans out of 100 linkable pages (120 total; 20 excluded)');
+  });
+
+  test('shows one flood warning with the top three domains', () => {
+    const result = makeResult(
+      [{ slug: 'companies/acme', title: 'Acme', domain: 'companies' }],
+      {
+        total_orphans: 120,
+        total_linkable: 200,
+        total_pages: 210,
+        by_domain: [
+          { domain: 'companies', count: 60, share: 0.5 },
+          { domain: 'people', count: 30, share: 0.25 },
+          { domain: 'projects', count: 20, share: 0.167 },
+          { domain: 'notes', count: 10, share: 0.083 },
+        ],
+        flood: {
+          flooded: true,
+          count_threshold: 100,
+          ratio_threshold: 0.25,
+        },
+      },
+    );
+
+    const out = formatOrphansText(result);
+    expect(out).toContain(
+      'WARNING: Orphan flood detected; corpus shape is largely unlinked. ' +
+      'Top domains: companies (60), people (30), projects (20).',
+    );
+    expect(out).not.toContain('notes (10)');
   });
 });
 
 // ────────────────────────────────────────────────────────────────
 // findOrphans + queryOrphanPages with explicit engine (v0.17 change)
 // ────────────────────────────────────────────────────────────────
+
+function stubOrphanEngine(
+  orphans: { slug: string; title: string; domain: string | null }[],
+  totalLinkable: number,
+): BrainEngine {
+  const liveSlugs = [
+    ...orphans.map(orphan => orphan.slug),
+    ...Array.from(
+      { length: Math.max(0, totalLinkable - orphans.length) },
+      (_, index) => `linked/page-${index}`,
+    ),
+  ];
+  return {
+    findOrphanPages: async () => orphans,
+    executeRaw: async () => liveSlugs.map(slug => ({ slug })),
+    getConfig: async () => null,
+  } as unknown as BrainEngine;
+}
+
+describe('findOrphans result metadata', () => {
+  test('aggregates the full orphan set by domain with ordered, rounded shares', async () => {
+    const engine = stubOrphanEngine([
+      { slug: 'people/alice', title: 'Alice', domain: 'people' },
+      { slug: 'companies/acme', title: 'Acme', domain: 'companies' },
+      { slug: 'companies/beta', title: 'Beta', domain: 'companies' },
+      { slug: 'projects/one', title: 'One', domain: 'projects' },
+      { slug: 'projects/two', title: 'Two', domain: 'projects' },
+      { slug: 'projects/three', title: 'Three', domain: 'projects' },
+    ], 20);
+
+    const result = await findOrphans(engine);
+
+    expect(result.by_domain).toEqual([
+      { domain: 'projects', count: 3, share: 0.5 },
+      { domain: 'companies', count: 2, share: 0.333 },
+      { domain: 'people', count: 1, share: 0.167 },
+    ]);
+  });
+
+  test('floods when the default count threshold is exceeded', async () => {
+    const orphans = Array.from({ length: 101 }, (_, index) => ({
+      slug: `people/orphan-${index}`,
+      title: `Orphan ${index}`,
+      domain: 'people',
+    }));
+
+    const result = await findOrphans(stubOrphanEngine(orphans, 1_000));
+
+    expect(result.flood).toEqual({
+      flooded: true,
+      count_threshold: 100,
+      ratio_threshold: 0.25,
+    });
+  });
+
+  test('floods when the default ratio threshold is exceeded', async () => {
+    const orphans = Array.from({ length: 26 }, (_, index) => ({
+      slug: `people/orphan-${index}`,
+      title: `Orphan ${index}`,
+      domain: 'people',
+    }));
+
+    const result = await findOrphans(stubOrphanEngine(orphans, 100));
+
+    expect(result.flood.flooded).toBe(true);
+  });
+
+  test('does not flood at either strict threshold boundary', async () => {
+    const orphans = Array.from({ length: 100 }, (_, index) => ({
+      slug: `people/orphan-${index}`,
+      title: `Orphan ${index}`,
+      domain: 'people',
+    }));
+
+    const result = await findOrphans(stubOrphanEngine(orphans, 400));
+
+    expect(result.flood.flooded).toBe(false);
+  });
+
+  test('honors count and ratio threshold overrides', async () => {
+    const engine = stubOrphanEngine([
+      { slug: 'people/alice', title: 'Alice', domain: 'people' },
+      { slug: 'companies/acme', title: 'Acme', domain: 'companies' },
+    ], 10);
+
+    const countFlood = await findOrphans(engine, {
+      countThreshold: 1,
+      ratioThreshold: 1,
+    });
+    expect(countFlood.flood).toEqual({
+      flooded: true,
+      count_threshold: 1,
+      ratio_threshold: 1,
+    });
+
+    const ratioFlood = await findOrphans(engine, {
+      countThreshold: 100,
+      ratioThreshold: 0.1,
+    });
+    expect(ratioFlood.flood).toEqual({
+      flooded: true,
+      count_threshold: 100,
+      ratio_threshold: 0.1,
+    });
+  });
+
+  test('keeps the existing result fields additive and unchanged', async () => {
+    const result = await findOrphans(stubOrphanEngine([
+      { slug: 'people/alice', title: 'Alice', domain: 'people' },
+    ], 4));
+
+    expect(result).toMatchObject({
+      orphans: [{ slug: 'people/alice', title: 'Alice', domain: 'people' }],
+      total_orphans: 1,
+      total_linkable: 4,
+      total_pages: 4,
+      excluded: 0,
+    });
+  });
+});
 
 describe('findOrphans (engine-injected)', () => {
   let engine: PGLiteEngine;
@@ -326,6 +489,8 @@ describe('findOrphans (engine-injected)', () => {
     expect(result.orphans).toEqual([]);
     expect(result.total_orphans).toBe(0);
     expect(result.total_pages).toBe(0);
+    expect(result.by_domain).toEqual([]);
+    expect(result.flood.flooded).toBe(false);
   });
 
   // ────────────────────────────────────────────────────────────────
