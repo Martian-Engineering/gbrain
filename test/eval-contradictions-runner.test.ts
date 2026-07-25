@@ -74,6 +74,7 @@ function stubJudge(opts: {
   confidence?: number;
   inputTokens?: number;
   outputTokens?: number;
+  axis?: string;
   throwOn?: (i: number) => boolean;
 }): JudgeFn {
   let calls = 0;
@@ -88,7 +89,7 @@ function stubJudge(opts: {
       verdict: {
         verdict: resolvedVerdict,
         severity: opts.severity ?? 'medium',
-        axis: 'stub axis',
+        axis: opts.axis ?? 'stub axis',
         confidence: opts.confidence ?? 0.85,
         resolution_kind: 'dream_synthesize',
       },
@@ -129,6 +130,102 @@ describe('runContradictionProbe', () => {
     expect(out.report.total_contradictions_flagged).toBe(1);
     expect(out.report.queries_with_contradiction).toBe(1);
     expect(out.report.per_query[0].pairs_judged).toBe(1);
+  });
+
+  test('metadata-only NOT evidence downgrades contradiction to negation_artifact', async () => {
+    const idA = await seedPage('artifacts/not-123-artifact', 'Not X Artifact');
+    const idB = await seedPage('artifacts/x', 'X Artifact');
+    const out = await runContradictionProbe({
+      engine,
+      queries: ['Not X Artifact'],
+      judgeFn: stubJudge({
+        verdict: 'contradiction',
+        severity: 'high',
+        axis: 'The NOT token in the retrieval query syntax creates an apparent claim negation',
+      }),
+      searchFn: async () => [
+        mkResult('artifacts/not-123-artifact', idA, 1, 'Artifact X is archived.'),
+        mkResult('artifacts/x', idB, 2, 'Artifact X remains archived.'),
+      ],
+      budgetUsd: 5,
+      noCache: true,
+    });
+    const finding = out.report.per_query[0].contradictions[0];
+    expect(finding.verdict).toBe('negation_artifact');
+    expect(finding.severity).toBe('low');
+    expect(finding.resolution_kind).toBe('flag_for_review');
+    expect(out.report.queries_with_contradiction).toBe(0);
+    expect(out.report.verdict_breakdown.negation_artifact).toBe(1);
+  });
+
+  test('claim-prose negation prevents metadata-only downgrade', async () => {
+    const idA = await seedPage('artifacts/not-123-artifact', 'Not X Artifact');
+    const idB = await seedPage('artifacts/x', 'X Artifact');
+    const out = await runContradictionProbe({
+      engine,
+      queries: ['Not X Artifact'],
+      judgeFn: stubJudge({
+        verdict: 'contradiction',
+        severity: 'high',
+        axis: 'The NOT token in the retrieval query syntax matches the claim conflict',
+      }),
+      searchFn: async () => [
+        mkResult('artifacts/not-123-artifact', idA, 1, 'Artifact X is approved.'),
+        mkResult('artifacts/x', idB, 2, 'Artifact X is not approved.'),
+      ],
+      budgetUsd: 5,
+      noCache: true,
+    });
+    expect(out.report.per_query[0].contradictions[0].verdict).toBe('contradiction');
+    expect(out.report.queries_with_contradiction).toBe(1);
+  });
+
+  test('cache stores the raw verdict before applying query-specific negation guard', async () => {
+    const metadataId = await seedPage('artifacts/not-123-artifact', 'Not X Artifact');
+    const plainAId = await seedPage('artifacts/a', 'Artifact A');
+    const plainBId = await seedPage('artifacts/b', 'Artifact B');
+    let judgeCalls = 0;
+    const judgeFn: JudgeFn = async () => {
+      judgeCalls++;
+      return {
+        verdict: {
+          verdict: 'contradiction',
+          severity: 'high',
+          axis: 'The NOT token in the retrieval query syntax creates an apparent claim negation',
+          confidence: 0.9,
+          resolution_kind: 'dream_synthesize',
+        },
+        usage: { inputTokens: 500, outputTokens: 80 },
+      };
+    };
+    const textA = 'Artifact X is archived.';
+    const textB = 'Artifact X remains archived.';
+
+    const guarded = await runContradictionProbe({
+      engine,
+      queries: ['Not X Artifact'],
+      judgeFn,
+      searchFn: async () => [
+        mkResult('artifacts/not-123-artifact', metadataId, 1, textA),
+        mkResult('artifacts/b', plainBId, 2, textB),
+      ],
+      budgetUsd: 5,
+    });
+    expect(guarded.report.per_query[0].contradictions[0].verdict).toBe('negation_artifact');
+
+    const unguarded = await runContradictionProbe({
+      engine,
+      queries: ['Artifact X status'],
+      judgeFn,
+      searchFn: async () => [
+        mkResult('artifacts/a', plainAId, 3, textA),
+        mkResult('artifacts/b', plainBId, 4, textB),
+      ],
+      budgetUsd: 5,
+    });
+    expect(judgeCalls).toBe(1);
+    expect(unguarded.report.cache.hits).toBe(1);
+    expect(unguarded.report.per_query[0].contradictions[0].verdict).toBe('contradiction');
   });
 
   test('intra-page chunk-vs-take detection (P1 batched fetch)', async () => {

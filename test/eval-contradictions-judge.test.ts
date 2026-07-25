@@ -106,6 +106,30 @@ describe('buildJudgePrompt', () => {
     });
     expect(p).toContain('holder garry');
   });
+
+  test('forbids treating query and page metadata tokens as claim negation', () => {
+    const p = buildJudgePrompt({
+      query: 'Not X Artifact',
+      a: { slug: 'artifacts/not-123-artifact', text: 'Artifact X is archived.' },
+      b: { slug: 'artifacts/x', text: 'Artifact X remains archived.' },
+      maxPairChars: 1500,
+    });
+    expect(p).toContain('file paths, slugs, page titles, or the retrieval query');
+    expect(p).toContain('NEVER claim negation');
+    expect(p).toContain('Reasoning about query syntax is never a contradiction');
+    expect(p).toContain('must use negation_artifact');
+  });
+
+  test('requires axis to be a short noun phrase', () => {
+    const p = buildJudgePrompt({
+      query: 'q',
+      a: { slug: 'a', text: 'A' },
+      b: { slug: 'b', text: 'B' },
+      maxPairChars: 1500,
+    });
+    expect(p).toContain('short noun-phrase label');
+    expect(p).toContain('at most 8 words and about 60 characters');
+  });
 });
 
 describe('normalizeVerdict', () => {
@@ -247,6 +271,38 @@ describe('normalizeVerdict', () => {
       confidence: 0.4,
     });
     expect(v.axis).toBe('');
+  });
+
+  test('over-long axis is clamped to the first clause with an ellipsis', () => {
+    const v = normalizeVerdict({
+      verdict: 'contradiction',
+      severity: 'medium',
+      axis: 'MRR reporting basis, because the first statement uses bookings while the second uses recognized revenue',
+      confidence: 0.9,
+    });
+    expect(v.axis).toBe('MRR reporting basis…');
+  });
+
+  test('axis clamp enforces both word and character limits', () => {
+    const v = normalizeVerdict({
+      verdict: 'contradiction',
+      severity: 'medium',
+      axis: 'ExtraordinarilyLongBusinessMetricIdentifier that differs across the two retrieved statements without punctuation',
+      confidence: 0.9,
+    });
+    expect(v.axis.length).toBeLessThanOrEqual(60);
+    expect(v.axis.split(/\s+/).length).toBeLessThanOrEqual(8);
+    expect(v.axis.endsWith('…')).toBe(true);
+  });
+
+  test('short noun-phrase axis passes through unchanged', () => {
+    const v = normalizeVerdict({
+      verdict: 'contradiction',
+      severity: 'medium',
+      axis: 'MRR reporting basis',
+      confidence: 0.9,
+    });
+    expect(v.axis).toBe('MRR reporting basis');
   });
 });
 

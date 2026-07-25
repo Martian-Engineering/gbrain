@@ -35,7 +35,12 @@ import { buildSourceTierBreakdown, classifySlugTier } from './cross-source.ts';
 import { shouldSkipForDateMismatch } from './date-filter.ts';
 import { withBudgetTracker } from '../ai/gateway.ts';
 import { BudgetTracker, BudgetExhausted } from '../budget/budget-tracker.ts';
-import { judgeContradiction, type JudgeInput, type JudgeOutput } from './judge.ts';
+import {
+  guardNegationArtifact,
+  judgeContradiction,
+  type JudgeInput,
+  type JudgeOutput,
+} from './judge.ts';
 import { JudgeErrorCollector } from './judge-errors.ts';
 import { buildHotPages } from './severity-classify.ts';
 import { pairToFinding } from './auto-supersession.ts';
@@ -367,13 +372,14 @@ async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResu
       // Cache lookup.
       const cached = await cache.lookup(pair.a.text, pair.b.text);
       if (cached) {
+        const guarded = guardNegationArtifact(cached, { query, a: pair.a, b: pair.b });
         cacheHits++;
-        tallyVerdict(cached.verdict);
+        tallyVerdict(guarded.verdict);
         // v0.34 / Lane A2: emit findings for every non-no_contradiction verdict.
         // Without this, the new verdicts (temporal_supersession etc.) would
         // disappear from the report and the whole wave is invisible to users.
-        if (cached.verdict !== 'no_contradiction') {
-          findings.push(pairToFinding(pair, cached));
+        if (guarded.verdict !== 'no_contradiction') {
+          findings.push(pairToFinding(pair, guarded));
         }
         continue;
       }
@@ -401,11 +407,12 @@ async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResu
         });
         tracker.recordJudgeCall(judgeModel, out.usage);
         await cache.store(pair.a.text, pair.b.text, out.verdict);
+        const guarded = guardNegationArtifact(out.verdict, { query, a: pair.a, b: pair.b });
         judged++;
-        tallyVerdict(out.verdict.verdict);
+        tallyVerdict(guarded.verdict);
         // v0.34 / Lane A2: same emit predicate as the cache-hit branch.
-        if (out.verdict.verdict !== 'no_contradiction') {
-          findings.push(pairToFinding(pair, out.verdict));
+        if (guarded.verdict !== 'no_contradiction') {
+          findings.push(pairToFinding(pair, guarded));
         }
       } catch (err) {
         errs.record(pairId(pair), err);

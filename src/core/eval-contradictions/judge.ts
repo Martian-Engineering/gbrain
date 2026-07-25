@@ -24,6 +24,13 @@ import { parseSeverity, defaultSeverityForVerdict } from './severity-classify.ts
 import type { JudgeVerdict, ResolutionKind, Verdict } from './types.ts';
 
 const FENCE_RE = /```(?:json)?\s*\n?([\s\S]*?)```/i;
+const AXIS_MAX_WORDS = 8;
+const AXIS_MAX_CHARS = 60;
+const CLAIM_NEGATION_RE =
+  /(?:^|[\s([{"'“‘])(?:not(?:\b|-)|no\b|never\b|neither\b|nor\b|without\b|cannot\b|can['’]t\b|isn['’]t\b|aren['’]t\b|wasn['’]t\b|weren['’]t\b|doesn['’]t\b|don['’]t\b|didn['’]t\b|won['’]t\b|wouldn['’]t\b|shouldn['’]t\b|couldn['’]t\b|hasn['’]t\b|haven['’]t\b|hadn['’]t\b)/i;
+const METADATA_NOT_RE = /(?:^|[/_\s-])not(?:[-_\s]|$)/i;
+const META_REASONING_RE = /\b(?:query|syntax|token|path|slug|file(?:name)?|title|metadata|label)\b/i;
+const NEGATION_REASONING_RE = /\b(?:not|negat\w*)\b/i;
 
 /**
  * Generic 3-strategy LLM JSON parser. Throws when no strategy works rather
@@ -157,13 +164,77 @@ export function parseVerdict(value: unknown): Verdict {
 }
 
 /**
+ * Keep finding axes compact and stable for terminal and JSON consumers.
+ * Over-long model output is reduced to its first clause, then bounded by
+ * both the word and character limits. The finding itself is never rejected.
+ */
+export function clampAxis(raw: string): string {
+  const axis = raw.trim().replace(/\s+/g, ' ');
+  const words = axis.split(' ');
+  if (axis.length <= AXIS_MAX_CHARS && words.length <= AXIS_MAX_WORDS) {
+    return axis;
+  }
+
+  // Prefer a natural clause boundary before applying the hard limits.
+  const boundary = axis.match(/[,;:.!?](?=\s|$)|\s[—–]\s/);
+  const firstClause =
+    boundary?.index !== undefined && boundary.index > 0
+      ? axis.slice(0, boundary.index)
+      : axis;
+  const wordBounded = firstClause.split(/\s+/).slice(0, AXIS_MAX_WORDS).join(' ');
+  const charBounded = wordBounded.slice(0, AXIS_MAX_CHARS - 1).trimEnd();
+  return `${charBounded}…`;
+}
+
+/**
+ * Conservatively downgrade contradictions based only on metadata negation.
+ * Claim-prose negation always wins: if either statement contains an actual
+ * negation, the judge's contradiction verdict is preserved for review.
+ */
+export function guardNegationArtifact(
+  verdict: JudgeVerdict,
+  context: {
+    query: string;
+    a: { slug: string; text: string; title?: string | null };
+    b: { slug: string; text: string; title?: string | null };
+  },
+): JudgeVerdict {
+  const normalized = { ...verdict, axis: clampAxis(verdict.axis) };
+  if (normalized.verdict !== 'contradiction') return normalized;
+  if (CLAIM_NEGATION_RE.test(context.a.text) || CLAIM_NEGATION_RE.test(context.b.text)) {
+    return normalized;
+  }
+
+  // Require both metadata-level NOT syntax and explicit meta-reasoning in
+  // the returned axis. This avoids downgrading unrelated factual conflicts
+  // merely because a retrieved page happens to have a "not-" slug.
+  const metadata = [
+    context.query,
+    context.a.slug,
+    context.b.slug,
+    context.a.title ?? '',
+    context.b.title ?? '',
+  ].join('\n');
+  if (!METADATA_NOT_RE.test(metadata)) return normalized;
+  if (!META_REASONING_RE.test(normalized.axis)) return normalized;
+  if (!NEGATION_REASONING_RE.test(normalized.axis)) return normalized;
+
+  return {
+    ...normalized,
+    verdict: 'negation_artifact',
+    severity: defaultSeverityForVerdict('negation_artifact'),
+    resolution_kind: 'flag_for_review',
+  };
+}
+
+/**
  * Validate the raw parsed JSON against the JudgeVerdict shape. Throws on
  * fundamentally-broken shape (missing verdict/confidence) so the caller
  * counts it under judge_errors.parse_fail rather than fabricating a verdict.
  *
- * v0.34 / Lane A2: parses the new `verdict: Verdict` enum field instead of
- * the v1 `contradicts: boolean`. PROMPT_VERSION = '2' (bumped in A1) means
- * the persistent cache won't return v1-shaped rows for these calls.
+ * v0.34 / Lane A2: parses the `verdict: Verdict` enum field instead of the
+ * v1 `contradicts: boolean`. The prompt-version cache discriminator prevents
+ * persistent v1-shaped rows from being returned for these calls.
  *
  * C1 enforcement: `verdict === 'contradiction'` with confidence < 0.7 is
  * downgraded to `'no_contradiction'` (belt-and-suspenders against models
@@ -218,7 +289,7 @@ export function normalizeVerdict(raw: unknown): JudgeVerdict {
   return {
     verdict,
     severity,
-    axis: isFinding ? axisRaw : '',
+    axis: isFinding ? clampAxis(axisRaw) : '',
     confidence: clampedConfidence,
     resolution_kind: normalizedResolutionKind,
   };
@@ -285,9 +356,12 @@ export function buildJudgePrompt(opts: {
     '  (e.g., MRR dropped from $200K to $150K). This is a signal worth flagging.',
     '- Use temporal_evolution for legitimate change over time that is neither',
     '  supersession nor regression (e.g., evolving narrative, multi-step decision).',
-    '- Use negation_artifact when one side contains an explicit negation that',
-    '  the surface tokens make look like a positive claim (e.g., "NOT X" parsed',
-    '  as "X"). The data is correct; the apparent conflict is a parsing artifact.',
+    '- Negation-looking tokens in file paths, slugs, page titles, or the retrieval query',
+    '  are metadata/search syntax, NEVER claim negation.',
+    '- Reasoning about query syntax is never a contradiction; cases based only on',
+    '  those tokens must use negation_artifact.',
+    '- Use negation_artifact when surface tokens outside claim prose create the',
+    '  apparent conflict. The underlying claims may still be compatible.',
     '- Use contradiction ONLY for genuinely conflicting claims at the same point',
     '  in time, where the dates do not explain the difference.',
     '- Use no_contradiction when the statements are compatible.',
@@ -297,12 +371,14 @@ export function buildJudgePrompt(opts: {
     '- Different aspects of the same entity are not contradictions.',
     "- Incidental disagreements unrelated to the user's query do not count.",
     '  Judge only on claims relevant to what the user asked.',
+    '- Axis must be a short noun-phrase label, at most 8 words and about 60 characters.',
+    '  Do not put reasoning, evidence, or a full sentence in axis.',
     '',
     'Reply with JSON ONLY:',
     '{',
     '  "verdict": "no_contradiction" | "contradiction" | "temporal_supersession" | "temporal_regression" | "temporal_evolution" | "negation_artifact",',
     '  "severity": "info" | "low" | "medium" | "high",',
-    '  "axis": "<one-line: what they disagree about, or empty>",',
+    '  "axis": "<short noun phrase, <=8 words / about 60 chars, or empty>",',
     '  "confidence": 0.0..1.0,',
     '  "resolution_kind": "takes_supersede" | "dream_synthesize" | "takes_mark_debate" | "manual_review" | "temporal_supersede" | "flag_for_review" | "log_timeline_change" | null',
     '}',
