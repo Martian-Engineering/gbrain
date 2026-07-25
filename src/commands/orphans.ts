@@ -35,7 +35,16 @@ export interface OrphanResult {
   total_linkable: number;
   total_pages: number;
   excluded: number;
+  by_domain: { domain: string; count: number; share: number }[];
+  flood: {
+    flooded: boolean;
+    count_threshold: number;
+    ratio_threshold: number;
+  };
 }
+
+const DEFAULT_FLOOD_COUNT_THRESHOLD = 100;
+const DEFAULT_FLOOD_RATIO_THRESHOLD = 0.25;
 
 // --- Filter logic ---
 
@@ -89,9 +98,17 @@ export async function queryOrphanPages(
  */
 export async function findOrphans(
   engine: BrainEngine,
-  opts: { includePseudo?: boolean; sourceId?: string; sourceIds?: string[] } = {},
+  opts: {
+    includePseudo?: boolean;
+    sourceId?: string;
+    sourceIds?: string[];
+    countThreshold?: number;
+    ratioThreshold?: number;
+  } = {},
 ): Promise<OrphanResult> {
   const includePseudo = !!opts.includePseudo;
+  const countThreshold = opts.countThreshold ?? DEFAULT_FLOOD_COUNT_THRESHOLD;
+  const ratioThreshold = opts.ratioThreshold ?? DEFAULT_FLOOD_RATIO_THRESHOLD;
   // v0.41.29.0: `sourceId` (scalar, from `--source` + single-source MCP
   // clients) or `sourceIds` (federated, from `allowedSources` MCP clients)
   // scopes the candidate set. `sourceIds` wins when both set (mirrors
@@ -155,17 +172,39 @@ export async function findOrphans(
     domain: deriveDomain(row.domain, row.slug),
   }));
 
+  const totalOrphans = orphans.length;
+  const totalLinkable = total - excludedAll;
   const excluded = allOrphans.length - filtered.length;
+  const domainCounts = new Map<string, number>();
+  for (const orphan of orphans) {
+    domainCounts.set(orphan.domain, (domainCounts.get(orphan.domain) ?? 0) + 1);
+  }
+  const byDomain = [...domainCounts]
+    .sort(([domainA, countA], [domainB, countB]) =>
+      countB - countA || domainA.localeCompare(domainB))
+    .map(([domain, count]) => ({
+      domain,
+      count,
+      share: Number((count / totalOrphans).toFixed(3)),
+    }));
 
   return {
     orphans,
-    total_orphans: orphans.length,
+    total_orphans: totalOrphans,
     // v0.41.29.0 (Codex F6): denominator = live pages minus ALL excluded
     // pages (orphan or not), so excluded pages with inbound links no longer
     // inflate it.
-    total_linkable: total - excludedAll,
+    total_linkable: totalLinkable,
     total_pages: total,
     excluded,
+    by_domain: byDomain,
+    flood: {
+      flooded:
+        totalOrphans > countThreshold ||
+        (totalLinkable > 0 && totalOrphans / totalLinkable > ratioThreshold),
+      count_threshold: countThreshold,
+      ratio_threshold: ratioThreshold,
+    },
   };
 }
 
@@ -183,10 +222,20 @@ export const getOrphansData = findOrphans;
 export function formatOrphansText(result: OrphanResult): string {
   const lines: string[] = [];
 
-  const { orphans, total_orphans, total_linkable, total_pages, excluded } = result;
+  const { orphans, total_orphans, total_linkable, total_pages, excluded, by_domain, flood } = result;
   lines.push(
     `${total_orphans} orphans out of ${total_linkable} linkable pages (${total_pages} total; ${excluded} excluded)\n`,
   );
+  if (flood.flooded) {
+    const topDomains = by_domain
+      .slice(0, 3)
+      .map(({ domain, count }) => `${domain} (${count})`)
+      .join(', ');
+    lines.push(
+      'WARNING: Orphan flood detected; corpus shape is largely unlinked. ' +
+      `Top domains: ${topDomains}.`,
+    );
+  }
 
   if (orphans.length === 0) {
     lines.push('No orphan pages found.');

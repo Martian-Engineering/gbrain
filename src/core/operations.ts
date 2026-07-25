@@ -4440,11 +4440,22 @@ const send_job_message: Operation = {
 
 const find_orphans: Operation = {
   name: 'find_orphans',
-  description: 'Find pages with no inbound wikilinks. Essential for content enrichment cycles.',
+  description:
+    'Find pages with no inbound wikilinks. When flood.flooded is true, orphan-ness reflects ' +
+    'corpus shape (bulk pages without inbound links); callers should surface an aggregate ' +
+    'data-quality signal rather than per-page prompts.',
   params: {
     include_pseudo: {
       type: 'boolean',
       description: 'Include auto-generated and pseudo pages (default: false)',
+    },
+    count_threshold: {
+      type: 'number',
+      description: 'Flood when total_orphans is greater than this count (default: 100)',
+    },
+    ratio_threshold: {
+      type: 'number',
+      description: 'Flood when total_orphans / total_linkable is greater than this ratio (default: 0.25)',
     },
   },
   scope: 'read',
@@ -4458,6 +4469,8 @@ const find_orphans: Operation = {
     // orphans --source` instead (ctx.remote === false → empty scope here).
     return findOrphans(ctx.engine, {
       includePseudo: (p.include_pseudo as boolean) || false,
+      countThreshold: p.count_threshold as number | undefined,
+      ratioThreshold: p.ratio_threshold as number | undefined,
       ...sourceScopeOpts(ctx),
     });
   },
