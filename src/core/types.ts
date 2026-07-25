@@ -1323,6 +1323,7 @@ export interface ChronicleTimelineRow {
   effective_date: string | null; // event page effective_date — drives intra-day order
   kind: string | null;        // event.kind from the event page frontmatter
   owner: string | null;       // accountable person for commitment/intro events
+  who?: string[] | null;      // event participants; null for raw or malformed rows
 }
 
 export interface ChronicleTimelineOpts {

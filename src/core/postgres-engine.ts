@@ -58,6 +58,7 @@ import type {
 } from './types.ts';
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
 import { finalizeLastSeen } from './chronicle/last-seen.ts';
+import { normalizeChronicleTimelineRows } from './chronicle/timeline-row.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import * as db from './db.ts';
 import { ConnectionManager } from './connection-manager.ts';
@@ -3799,7 +3800,8 @@ export class PostgresEngine implements BrainEngine {
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
-             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
+             ep.frontmatter->'event'->'who' AS who
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3808,7 +3810,7 @@ export class PostgresEngine implements BrainEngine {
         ${this.chronicleSourceCond(opts)}
       ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
       LIMIT ${limit}`;
-    return rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(rows as unknown as Record<string, unknown>[]);
   }
 
   async getSince(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
@@ -3821,7 +3823,8 @@ export class PostgresEngine implements BrainEngine {
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
-             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
+             ep.frontmatter->'event'->'who' AS who
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3831,7 +3834,7 @@ export class PostgresEngine implements BrainEngine {
         ${this.chronicleSourceCond(opts)}
       ORDER BY COALESCE(ep.effective_date, te.date::timestamptz) ASC, te.id ASC
       LIMIT ${limit}`;
-    return rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(rows as unknown as Record<string, unknown>[]);
   }
 
   async getOnThisDay(opts?: { date?: string; limit?: number; sourceId?: string; sourceIds?: string[] }): Promise<ChronicleTimelineRow[]> {
@@ -3844,7 +3847,8 @@ export class PostgresEngine implements BrainEngine {
              te.event_page_id, ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
-             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
+             COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
+             ep.frontmatter->'event'->'who' AS who
       FROM timeline_entries te
       JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
       LEFT JOIN pages ep ON ep.id = te.event_page_id
@@ -3855,7 +3859,7 @@ export class PostgresEngine implements BrainEngine {
         ${this.chronicleSourceCond(opts)}
       ORDER BY te.date DESC, te.id ASC
       LIMIT ${limit}`;
-    return rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(rows as unknown as Record<string, unknown>[]);
   }
 
   async getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult> {

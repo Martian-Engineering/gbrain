@@ -90,6 +90,38 @@ describe('Life Chronicle timeline reads', () => {
     const commitments = await engine.getSince('2026-06-18', { kind: 'commitment', sourceId: 'default' });
     expect(commitments.map(r => r.event_slug)).toEqual(['life/events/2026-06-18-001']);
     expect(commitments[0].owner).toBe('people/sarah-chen');
+    expect(commitments[0].who).toEqual(['people/sarah-chen']);
+  });
+
+  test('getSince returns null who for raw rows and malformed event participants', async () => {
+    const malformedEvent = await insertPage({
+      slug: 'life/events/2026-06-22-malformed-who',
+      type: 'event',
+      effectiveDate: '2026-06-22T10:00:00Z',
+      frontmatter: '{"event":{"who":["people/bob",42],"kind":"meeting"}}',
+    });
+    await insertProjection(ids.meeting, malformedEvent, '2026-06-22', 'Malformed participants');
+    await engine.executeRaw(
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
+       VALUES ($1, '2026-06-21'::date, 'manual:raw-who-test', 'Raw timeline row', '')`,
+      [ids.meeting],
+    );
+
+    try {
+      const rows = await engine.getSince('2026-06-21', { sourceId: 'default' });
+      const raw = rows.find(row => row.summary === 'Raw timeline row');
+      const malformed = rows.find(row => row.event_page_id === malformedEvent);
+      expect(raw?.event_page_id).toBeNull();
+      expect(raw?.who).toBeNull();
+      expect(malformed?.who).toBeNull();
+    } finally {
+      await engine.executeRaw(
+        `DELETE FROM timeline_entries
+         WHERE source = 'manual:raw-who-test' OR event_page_id = $1`,
+        [malformedEvent],
+      );
+      await engine.executeRaw('DELETE FROM pages WHERE id = $1', [malformedEvent]);
+    }
   });
 
   test('getLastSeen finds the entity via event who, with days_ago', async () => {

@@ -54,6 +54,7 @@ import { executeRawJsonb } from './sql-query.ts';
 import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows } from './batch-rows.ts';
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
 import { finalizeLastSeen } from './chronicle/last-seen.ts';
+import { normalizeChronicleTimelineRows } from './chronicle/timeline-row.ts';
 import { computeAnomaliesFromBuckets } from './cycle/anomaly.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery } from './search/sql-ranking.ts';
@@ -3618,7 +3619,8 @@ export class PGLiteEngine implements BrainEngine {
            te.event_page_id, ep.slug AS event_slug,
            ep.effective_date::text AS effective_date,
            ep.frontmatter->'event'->>'kind' AS kind,
-           COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner
+           COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
+           ep.frontmatter->'event'->'who' AS who
     FROM timeline_entries te
     JOIN pages p ON p.id = te.page_id AND p.deleted_at IS NULL
     LEFT JOIN pages ep ON ep.id = te.event_page_id`;
@@ -3642,7 +3644,7 @@ export class PGLiteEngine implements BrainEngine {
        LIMIT $${params.length}`,
       params,
     );
-    return result.rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(result.rows as Record<string, unknown>[]);
   }
 
   async getSince(date: string, opts?: ChronicleTimelineOpts): Promise<ChronicleTimelineRow[]> {
@@ -3665,7 +3667,7 @@ export class PGLiteEngine implements BrainEngine {
        LIMIT $${params.length}`,
       params,
     );
-    return result.rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(result.rows as Record<string, unknown>[]);
   }
 
   async getOnThisDay(opts?: { date?: string; limit?: number; sourceId?: string; sourceIds?: string[] }): Promise<ChronicleTimelineRow[]> {
@@ -3689,7 +3691,7 @@ export class PGLiteEngine implements BrainEngine {
        LIMIT $${params.length}`,
       params,
     );
-    return result.rows as unknown as ChronicleTimelineRow[];
+    return normalizeChronicleTimelineRows(result.rows as Record<string, unknown>[]);
   }
 
   async getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult> {
