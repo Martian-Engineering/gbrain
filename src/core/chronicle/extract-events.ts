@@ -327,10 +327,11 @@ export async function runChronicleExtract(
   };
 }
 
-const JUDGE_SYSTEM = `You segment a meeting/transcript page into discrete timeline EVENTS.
+export const JUDGE_SYSTEM = `You segment a meeting/transcript page into discrete timeline EVENTS.
 Return ONLY a JSON array. Each element: {"when": ISO datetime or YYYY-MM-DD, "who": [entity slugs/names], "what": one-clause summary, "where": optional string, "owner": optional entity slug/name, "kind": one of meeting|call|meal|solo|travel|work|commitment|decision|intro|conflict|milestone|event}.
 Prefer the page's known date for "when" when the text gives no explicit time. Use the provided attendee slugs for "who" when the text does not name participants.
 For commitment and intro events, set "owner" to the SINGLE person accountable for following through, using a known attendee slug when possible. Omit "owner" for other event kinds or when accountability is unclear.
+When the "what" clause names the acting person, "owner" MUST be that person, mapped to their attendee slug when available. Fall back to attendee inference only when the clause is actorless. Never default "owner" to the meeting host.
 No prose, no markdown — just the JSON array.`;
 
 /**

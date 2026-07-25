@@ -9,6 +9,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { isChronicleEligible } from '../src/core/chronicle/eligibility.ts';
 import {
+  JUDGE_SYSTEM,
   isValidProposal,
   parseJudgeJson,
   runChronicleExtract,
@@ -359,6 +360,19 @@ describe('isValidProposal owner', () => {
   test('rejects non-string owner', () => {
     expect(isValidProposal({ ...proposal, owner: ['people/sarah-chen'] })).toBe(false);
     expect(isValidProposal({ ...proposal, owner: 42 })).toBe(false);
+  });
+});
+
+describe('JUDGE_SYSTEM owner attribution', () => {
+  test('names the in-summary actor before attendee inference', () => {
+    expect(JUDGE_SYSTEM).toContain(
+      'When the "what" clause names the acting person, "owner" MUST be that person',
+    );
+    expect(JUDGE_SYSTEM).toContain('mapped to their attendee slug when available');
+    expect(JUDGE_SYSTEM).toContain(
+      'Fall back to attendee inference only when the clause is actorless',
+    );
+    expect(JUDGE_SYSTEM).toContain('Never default "owner" to the meeting host');
   });
 });
 
