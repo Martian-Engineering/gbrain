@@ -6,6 +6,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 
 const MIGRATION_VERSION = 130;
 const migration = MIGRATIONS.find(candidate => candidate.version === MIGRATION_VERSION);
+const enrollmentMigration = MIGRATIONS.find(candidate => candidate.version === 132);
 const schemas = [
   readFileSync(join(import.meta.dir, '../src/schema.sql'), 'utf8'),
   readFileSync(join(import.meta.dir, '../src/core/schema-embedded.ts'), 'utf8'),
@@ -48,9 +49,19 @@ describe('take_mining_work schema contract', () => {
       expect(schema).toContain('CREATE TABLE IF NOT EXISTS take_mining_work');
       expect(schema).toContain('PRIMARY KEY (source_id, page_slug)');
       expect(schema).toContain('take_mining_work_immediate_idx');
+      expect(schema).toMatch(
+        /CREATE TABLE IF NOT EXISTS take_mining_work[\s\S]*?write_intent\s+TEXT\s+(?!NOT NULL)CHECK/,
+      );
     }
     expect(schemas[0]).toContain(
       'ALTER TABLE take_mining_work ENABLE ROW LEVEL SECURITY',
+    );
+  });
+
+  test('makes write intent nullable only for explicit enrollment work', () => {
+    expect(enrollmentMigration?.name).toBe('take_mining_work_explicit_enrollment');
+    expect(enrollmentMigration?.sql).toContain(
+      'ALTER COLUMN write_intent DROP NOT NULL',
     );
   });
 });
@@ -118,5 +129,31 @@ describe('take_mining_work PGLite behavior', () => {
         WHERE page_slug = 'writing/queued'`,
     );
     expect(rows).toEqual([{ count: 0 }]);
+  });
+
+  test('accepts a null write intent for operator-enrolled work', async () => {
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES (
+         'default', 'writing/enrolled', 'note', 'Enrolled',
+         'This page was deliberately selected for historical mining.'
+       )`,
+    );
+    await engine.executeRaw(`
+      INSERT INTO take_mining_work (
+        source_id, page_slug, mining_input_hash, admission,
+        write_intent, actor, batch_id, reason
+      ) VALUES (
+        'default', 'writing/enrolled', 'hash-enrolled', 'deferred',
+        NULL, 'cli:take-mining', 'history-1', 'historical_backfill'
+      )
+    `);
+
+    const rows = await engine.executeRaw<{ write_intent: string | null }>(
+      `SELECT write_intent
+         FROM take_mining_work
+        WHERE page_slug = 'writing/enrolled'`,
+    );
+    expect(rows).toEqual([{ write_intent: null }]);
   });
 });

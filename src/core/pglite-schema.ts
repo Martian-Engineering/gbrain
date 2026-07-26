@@ -850,7 +850,7 @@ CREATE TABLE IF NOT EXISTS take_mining_work (
   mining_input_hash  TEXT        NOT NULL,
   admission          TEXT        NOT NULL
                                CHECK (admission IN ('immediate', 'deferred')),
-  write_intent       TEXT        NOT NULL
+  write_intent       TEXT
                                CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
   actor              TEXT        NOT NULL,
   batch_id           TEXT,

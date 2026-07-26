@@ -5896,6 +5896,17 @@ export const MIGRATIONS: Migration[] = [
         ON take_mining_work (page_mutation_id);
     `,
   },
+  {
+    version: 132,
+    name: 'take_mining_work_explicit_enrollment',
+    // Explicit historical enrollment is not itself a page mutation. NULL
+    // distinguishes operator-selected work from write-triggered admission.
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_mining_work
+        ALTER COLUMN write_intent DROP NOT NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
