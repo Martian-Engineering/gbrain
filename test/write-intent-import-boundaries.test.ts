@@ -5,6 +5,7 @@ import {
   beforeEach,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -14,6 +15,12 @@ import { join } from 'path';
 import { runImport } from '../src/commands/import.ts';
 import { performSync, runSync } from '../src/commands/sync.ts';
 import { importFromFile } from '../src/core/import-file.ts';
+import {
+  PROPOSE_TAKES_PROMPT_VERSION,
+  runTakeMiningWork,
+} from '../src/core/cycle/propose-takes.ts';
+import { getTakeMiningStatus } from '../src/core/take-mining-control.ts';
+import type { OperationContext } from '../src/core/operations.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -77,7 +84,7 @@ describe('import write-intent boundaries', () => {
       page_slug: 'one',
       actor: 'import:file',
       write_intent: 'backfill',
-      batch_id: null,
+      batch_id: 'mutation:1',
     }]);
   });
 
@@ -87,14 +94,85 @@ describe('import write-intent boundaries', () => {
       'two.md': '---\ntitle: Two\ntype: note\n---\n\nSecond historical page.',
     });
 
-    const result = await runImport(engine, [dir, '--no-embed']);
+    const logs: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation((...values) => {
+      logs.push(values.map(String).join(' '));
+    });
+    const result = await runImport(engine, [dir, '--no-embed'])
+      .finally(() => log.mockRestore());
     expect(result.imported).toBe(2);
+    expect(result.batchId).toMatch(/^import:/);
+    expect(logs).toContain(`  Take-mining batch: ${result.batchId}`);
 
     const rows = await mutations();
     expect(rows.map(row => row.actor)).toEqual(['cli:import', 'cli:import']);
     expect(rows.map(row => row.write_intent)).toEqual(['backfill', 'backfill']);
-    expect(rows[0]?.batch_id).toMatch(/^import:/);
+    expect(rows[0]?.batch_id).toBe(result.batchId);
     expect(rows[1]?.batch_id).toBe(rows[0]?.batch_id);
+  });
+
+  test('explicit CLI batch id is reported and drains the imported batch end to end', async () => {
+    const dir = makeImportDir({
+      'one.md': '---\ntitle: One\ntype: note\n---\n\nHistorical prediction.',
+    });
+
+    const logs: string[] = [];
+    const log = spyOn(console, 'log').mockImplementation((...values) => {
+      logs.push(values.map(String).join(' '));
+    });
+    const result = await runImport(engine, [
+      dir,
+      '--no-embed',
+      '--batch-id',
+      'archive-2024',
+      '--json',
+    ]).finally(() => log.mockRestore());
+    expect(result.batchId).toBe('archive-2024');
+    const summary = logs
+      .map(line => {
+        try {
+          return JSON.parse(line) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      })
+      .find(value => value?.status === 'success');
+    expect(summary?.batch_id).toBe('archive-2024');
+
+    const ctx: OperationContext = {
+      engine,
+      config: { engine: 'pglite' },
+      logger: { info() {}, warn() {}, error() {} },
+      dryRun: false,
+      remote: false,
+      sourceId: 'default',
+    };
+    const queued = await getTakeMiningStatus(ctx, {
+      sourceId: 'default',
+      batchId: result.batchId,
+    });
+    expect(queued.batch?.queuedPages).toBe(1);
+
+    const drained = await runTakeMiningWork(ctx, {
+      admission: 'deferred',
+      sourceId: 'default',
+      batchId: result.batchId,
+      promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: 1,
+      proposalCap: 10,
+      maxEstimatedSpendUsd: 1,
+      _extractableTypes: ['note'],
+      _estimatedPageSpendUsd: 0.01,
+      extractor: async () => [],
+    });
+    expect(drained.pages_scanned).toBe(1);
+    expect(drained.remaining_work).toBe(0);
+
+    const settled = await getTakeMiningStatus(ctx, {
+      sourceId: 'default',
+      batchId: result.batchId,
+    });
+    expect(settled.batch).toBeNull();
   });
 
   test('explicit CLI import ingestion mode can classify current material as live', async () => {

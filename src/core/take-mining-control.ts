@@ -335,16 +335,33 @@ function classifyCandidate(
     counters.existingImmediatePages++;
     return;
   }
-  if (row.work_admission === 'deferred' && row.work_batch_id !== input.batchId) {
+  if (
+    row.work_admission === 'deferred'
+    && row.work_batch_id !== null
+    && row.work_batch_id !== input.batchId
+  ) {
     counters.existingOtherBatchPages++;
     return;
   }
-  if (row.work_admission === 'deferred' && row.work_page_mutation_id !== null) {
+  if (
+    row.work_admission === 'deferred'
+    && row.work_page_mutation_id !== null
+    && row.work_batch_id !== null
+  ) {
     counters.existingWriteTriggeredPages++;
     return;
   }
   if (
     row.work_admission === 'deferred'
+    && row.work_page_mutation_id !== null
+    && row.work_hash !== canonical.mining_input_hash
+  ) {
+    counters.existingWriteTriggeredPages++;
+    return;
+  }
+  if (
+    row.work_admission === 'deferred'
+    && row.work_batch_id === input.batchId
     && row.work_hash === canonical.mining_input_hash
   ) {
     counters.alreadyEnrolledPages++;
@@ -466,13 +483,30 @@ async function upsertEnrollmentCandidate(
         AND p.deleted_at IS NULL
      ON CONFLICT (source_id, page_slug) DO UPDATE
        SET mining_input_hash = EXCLUDED.mining_input_hash,
-           actor = EXCLUDED.actor,
-           reason = EXCLUDED.reason,
+           actor = CASE
+             WHEN take_mining_work.batch_id IS NULL
+               THEN take_mining_work.actor
+             ELSE EXCLUDED.actor
+           END,
+           batch_id = EXCLUDED.batch_id,
+           reason = CASE
+             WHEN take_mining_work.batch_id IS NULL
+               THEN take_mining_work.reason
+             ELSE EXCLUDED.reason
+           END,
            updated_at = now()
      WHERE take_mining_work.admission = 'deferred'
-       AND take_mining_work.batch_id = EXCLUDED.batch_id
-       AND take_mining_work.page_mutation_id IS NULL
-       AND take_mining_work.mining_input_hash <> EXCLUDED.mining_input_hash
+       AND (
+         (
+           take_mining_work.batch_id IS NULL
+           AND take_mining_work.mining_input_hash = EXCLUDED.mining_input_hash
+         )
+         OR (
+           take_mining_work.batch_id = EXCLUDED.batch_id
+           AND take_mining_work.page_mutation_id IS NULL
+           AND take_mining_work.mining_input_hash <> EXCLUDED.mining_input_hash
+         )
+       )
      RETURNING page_slug`,
     [
       input.sourceId,

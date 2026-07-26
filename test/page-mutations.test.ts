@@ -147,6 +147,33 @@ describe('PGLite atomic page mutations', () => {
     });
   });
 
+  test('records generated page receipts without creating undrainable mining work', async () => {
+    const slug = 'extracts/take-mining-receipt';
+    await engine.putPage(
+      slug,
+      {
+        type: 'extract_receipt',
+        title: 'Take mining receipt',
+        compiled_truth: 'Generated audit receipt.',
+        frontmatter: {
+          type: 'extract_receipt',
+          dream_generated: true,
+        },
+      },
+      {
+        writeContext: {
+          actor: 'extract:takes',
+          writeIntent: 'derived',
+          batchId: 'run-1',
+        },
+      },
+    );
+
+    expect(await mutations(slug)).toHaveLength(1);
+    expect(await work(slug)).toBeUndefined();
+    expect((await engine.getPage(slug))?.compiled_truth).toBe('Generated audit receipt.');
+  });
+
   test('records a canonical no-op without replacing pending work', async () => {
     await engine.putPage(
       'writing/link-repair',

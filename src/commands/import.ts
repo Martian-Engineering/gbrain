@@ -48,6 +48,8 @@ export interface RunImportResult {
   errors: number;
   chunksCreated: number;
   failures: Array<{ path: string; error: string }>;
+  /** Stable batch that status and deferred take-mining drains can target. */
+  batchId: string;
 }
 
 export async function runImport(
@@ -79,10 +81,35 @@ export async function runImport(
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
   const ingestionMode = parseIngestionMode(args) ?? 'backfill';
-  const writeContext = opts.writeContext ?? {
-    actor: 'cli:import',
-    writeIntent: writeIntentForIngestionMode(ingestionMode),
-    batchId: `import:${randomUUID()}`,
+  const batchIdIdx = args.indexOf('--batch-id');
+  const requestedBatchId = batchIdIdx === -1 ? undefined : args[batchIdIdx + 1];
+  if (
+    batchIdIdx !== -1
+    && (
+      requestedBatchId === undefined
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(requestedBatchId)
+    )
+  ) {
+    throw new Error(
+      '--batch-id must be 1-128 letters, digits, dots, underscores, colons, or hyphens.',
+    );
+  }
+  if (
+    requestedBatchId
+    && opts.writeContext?.batchId
+    && requestedBatchId !== opts.writeContext.batchId
+  ) {
+    throw new Error('--batch-id conflicts with the trusted caller batch.');
+  }
+  const batchId = requestedBatchId
+    ?? opts.writeContext?.batchId
+    ?? `import:${randomUUID()}`;
+  const writeContext = {
+    ...(opts.writeContext ?? {
+      actor: 'cli:import',
+      writeIntent: writeIntentForIngestionMode(ingestionMode),
+    }),
+    batchId,
   };
 
   // T7 (D9): refuse cleanly when init persisted the deferred-setup sentinel,
@@ -197,10 +224,11 @@ export async function runImport(
   if (workersIdx !== -1) flagValues.add(workersIdx + 1);
   if (sourceIdIdx !== -1) flagValues.add(sourceIdIdx + 1);
   if (ingestionModeIdx !== -1) flagValues.add(ingestionModeIdx + 1);
+  if (batchIdIdx !== -1) flagValues.add(batchIdIdx + 1);
   const dirArg = args.find((a, i) => !a.startsWith('--') && !flagValues.has(i));
 
   if (!dirArg) {
-    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--source-id <id>] [--ingestion-mode live|backfill] [--json]');
+    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--source-id <id>] [--ingestion-mode live|backfill] [--batch-id <id>] [--json]');
     process.exit(1);
   }
   // #1728: capture the import target ONCE as an absolute real path. Every
@@ -462,12 +490,14 @@ export async function runImport(
       status: 'success', duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       total_files: allFiles.length,
+      batch_id: batchId,
     }));
   } else {
     console.log(`\nImport complete (${totalTime}s):`);
     console.log(`  ${imported} pages imported`);
     console.log(`  ${skipped} pages skipped (${skipped - errors} unchanged, ${errors} errors)`);
     console.log(`  ${chunksCreated} chunks created`);
+    console.log(`  Take-mining batch: ${batchId}`);
   }
 
   // v0.39 T7 — end-of-run schema mismatch warn. Fires ONCE per import,
@@ -548,7 +578,7 @@ export async function runImport(
     await engine.setConfig('sync.repo_path', dir);
   }
 
-  return { imported, skipped, errors, chunksCreated, failures };
+  return { imported, skipped, errors, chunksCreated, failures, batchId };
 }
 
 /**

@@ -404,6 +404,59 @@ async function loadEligibleWorkBatch(
   );
 }
 
+/**
+ * Retire rows whose current page cannot enter this consumer.
+ *
+ * The page and its mutation receipts remain intact. A later page mutation or
+ * explicit enrollment can create fresh work if its type becomes extractable.
+ */
+async function settleIneligibleWork(
+  engine: BrainEngine,
+  scope: ScopedReadOpts,
+  extractableTypes: ReadonlySet<string>,
+  selector: TakeMiningSelector,
+  dryRun: boolean,
+): Promise<number> {
+  if (dryRun) return 0;
+  const params: unknown[] = [];
+  const scoped = sourcePredicate(scope, params);
+  params.push(selector.admission);
+  const admissionParam = `$${params.length}`;
+  let batchPredicate = '';
+  if (selector.admission === 'deferred') {
+    params.push(selector.batchId);
+    batchPredicate = `AND w.batch_id = $${params.length}`;
+  }
+  const typePlaceholders = [...extractableTypes].map(type => {
+    params.push(type);
+    return `$${params.length}`;
+  });
+  const eligiblePage = typePlaceholders.length === 0
+    ? 'FALSE'
+    : `EXISTS (
+         SELECT 1
+           FROM pages p
+          WHERE p.source_id = w.source_id
+            AND p.slug = w.page_slug
+            AND p.deleted_at IS NULL
+            AND p.page_kind = 'markdown'
+            AND p.type IN (${typePlaceholders.join(', ')})
+            AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+       )`;
+  const where = `${scoped}
+        AND w.admission = ${admissionParam}
+        ${batchPredicate}
+        AND NOT (${eligiblePage})`;
+
+  const rows = await engine.executeRaw<{ page_slug: string }>(
+    `DELETE FROM take_mining_work w
+      WHERE ${where}
+      RETURNING page_slug`,
+    params,
+  );
+  return rows.length;
+}
+
 async function loadCandidateWork(
   engine: BrainEngine,
   scope: ScopedReadOpts,
@@ -751,6 +804,13 @@ async function selectRunnerWork(
   if (!extractableTypes) return null;
   const scope = runnerScope(ctx, opts);
   const selector = runnerSelector(opts);
+  const ineligibleCount = await settleIneligibleWork(
+    ctx.engine,
+    scope,
+    extractableTypes,
+    selector,
+    opts.dryRun ?? false,
+  );
   const satisfiedCount = await settleSatisfiedWork(
     ctx.engine,
     scope,
@@ -768,7 +828,7 @@ async function selectRunnerWork(
     takeMiningWorkBatchSize(opts.pageCap, opts._workBatchSize),
     opts.skipPagesWithFence ?? false,
   );
-  return { ...selection, satisfiedCount };
+  return { ...selection, satisfiedCount, ineligibleCount };
 }
 
 async function countRunnerWork(

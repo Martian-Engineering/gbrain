@@ -128,6 +128,7 @@ export interface TakeMiningRunResult extends ProposeTakesResult {
   stop_reason: TakeMiningStopReason | null;
   remaining_work: number;
   work_batches_read: number;
+  ineligible_work_settled: number;
 }
 
 /** Invalid runner input, including a deploy-time prompt pin mismatch. */
@@ -160,6 +161,8 @@ export interface TakeMiningRunnerSelection {
   candidates: TakeMiningRunnerCandidate[];
   /** Queued revisions already covered by a successful scan for this prompt. */
   satisfiedCount: number;
+  /** Queue rows retired because their current page cannot be mined. */
+  ineligibleCount?: number;
   staleCount: number;
   emptyCount: number;
   batchesRead: number;
@@ -439,6 +442,7 @@ function buildInitialResult(
     stop_reason: null,
     remaining_work: 0,
     work_batches_read: 0,
+    ineligible_work_settled: 0,
     warnings: [],
   };
 }
@@ -450,6 +454,7 @@ function applySelectionDiagnostics(
   result.eligible_pages = selection.candidates.length;
   result.cache_hits += selection.satisfiedCount;
   result.work_batches_read = selection.batchesRead;
+  result.ineligible_work_settled = selection.ineligibleCount ?? 0;
   if (selection.staleCount > 0) {
     result.warnings.push(
       `${selection.staleCount} take-mining work item${selection.staleCount === 1 ? '' : 's'} had stale semantic hashes and ${selection.staleCount === 1 ? 'was' : 'were'} preserved`,

@@ -177,7 +177,8 @@ describe('propose_takes explicit work queue', () => {
     expect(result.status).toBe('ok');
     expect(result.details.stopped).toBe(false);
     expect(result.details.pages_scanned).toBe(1);
-    expect(await count('take_mining_work')).toBe(3);
+    expect(result.details.ineligible_work_settled).toBe(1);
+    expect(await count('take_mining_work')).toBe(2);
   });
 
   test('excludes generated, deleted, non-extractable, and canonically empty pages', async () => {
@@ -206,7 +207,8 @@ describe('propose_takes explicit work queue', () => {
 
     expect(calls).toBe(0);
     expect(result.details.pages_scanned).toBe(0);
-    expect(await count('take_mining_work')).toBe(4);
+    expect(result.details.ineligible_work_settled).toBe(2);
+    expect(await count('take_mining_work')).toBe(1);
   });
 
   test('passes canonical prose while preserving fence rows as dedup context', async () => {

@@ -770,7 +770,10 @@ describe('shared take-mining runner', () => {
       async () => {
         throw new Error('must not call');
       },
-      { _extractableTypes: [] },
+      {
+        _extractableTypes: ['note'],
+        _estimatedPageSpendUsd: null,
+      },
     ));
 
     expect(result.cache_hits).toBe(0);

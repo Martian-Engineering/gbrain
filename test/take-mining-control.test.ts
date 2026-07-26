@@ -186,6 +186,63 @@ describe('take-mining enrollment control', () => {
     ]);
   });
 
+  test('adopts bounded legacy unbatched deferred work without stealing a named batch', async () => {
+    await insertPage(engine, 'notes/unbatched', 'Legacy body', '2023-01-02');
+    await insertPage(engine, 'notes/named', 'Named body', '2023-01-03');
+    const mutationId = await insertMutation(engine, 'notes/unbatched');
+    await insertWork(
+      engine,
+      'notes/unbatched',
+      buildTakeMiningInput('Legacy body').mining_input_hash,
+      'deferred',
+      null,
+      'user_edit',
+      mutationId,
+    );
+    await insertWork(
+      engine,
+      'notes/named',
+      buildTakeMiningInput('Named body').mining_input_hash,
+      'deferred',
+      'owned-elsewhere',
+      'user_edit',
+      mutationId,
+    );
+
+    const result = await enqueueTakeMiningWork(ctx, {
+      sourceId: 'default',
+      batchId: 'adopted-history',
+      reason: 'historical_backfill',
+      pageCap: 1,
+    }, dependencies);
+
+    expect(result.enqueuedPages).toBe(1);
+    expect(result.items.map(item => item.slug)).toEqual(['notes/unbatched']);
+    expect(await engine.executeRaw<{
+      page_slug: string;
+      actor: string;
+      batch_id: string | null;
+      page_mutation_id: number | null;
+    }>(
+      `SELECT page_slug, actor, batch_id, page_mutation_id
+         FROM take_mining_work
+        ORDER BY page_slug`,
+    )).toEqual([
+      {
+        page_slug: 'notes/named',
+        actor: 'test:fixture',
+        batch_id: 'owned-elsewhere',
+        page_mutation_id: mutationId,
+      },
+      {
+        page_slug: 'notes/unbatched',
+        actor: 'test:fixture',
+        batch_id: 'adopted-history',
+        page_mutation_id: mutationId,
+      },
+    ]);
+  });
+
   test('bounds discovery and resumes after the returned slug cursor', async () => {
     await insertPage(engine, 'notes/a', 'A body', '2022-01-01');
     await insertPage(engine, 'notes/b', 'B body', '2022-01-02');
@@ -313,7 +370,7 @@ async function insertWork(
   slug: string,
   hash: string,
   admission: 'immediate' | 'deferred',
-  batchId: string,
+  batchId: string | null,
   writeIntent: 'user_edit' | null,
   pageMutationId: number | null = null,
 ): Promise<void> {

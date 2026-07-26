@@ -65,15 +65,37 @@ export async function recordPageMutation(
     ],
   );
   const mutationId = Number(mutationRows[0]!.id);
+  const batchId = context.batchId
+    ?? (admission === 'deferred' ? `mutation:${mutationId}` : null);
+
+  // Deferred work must always have a stable drain key. Legacy callers that
+  // omit a batch get one derived from the append-only receipt id.
+  if (batchId !== (context.batchId ?? null)) {
+    await engine.executeRaw(
+      `UPDATE page_mutations
+          SET batch_id = $2
+        WHERE id = $1`,
+      [mutationId, batchId],
+    );
+  }
 
   // Semantic no-ops leave any pending work untouched. A changed semantic
-  // revision replaces current work only when its receipt is newer.
+  // revision replaces current work only when its receipt is newer. Generated
+  // and intrinsically non-markdown pages retain the receipt but never enter
+  // a prose-mining queue they cannot drain.
   if (admission !== 'none') {
     await engine.executeRaw(
       `INSERT INTO take_mining_work (
          source_id, page_slug, mining_input_hash, admission, write_intent,
          actor, batch_id, reason, priority, page_mutation_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)
+       )
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, 0, $9
+         FROM pages p
+        WHERE p.source_id = $1
+          AND p.slug = $2
+          AND p.page_kind = 'markdown'
+          AND COALESCE(p.type, '') <> 'extract_receipt'
+          AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
        ON CONFLICT (source_id, page_slug) DO UPDATE SET
          mining_input_hash = EXCLUDED.mining_input_hash,
          admission = EXCLUDED.admission,
@@ -94,7 +116,7 @@ export async function recordPageMutation(
         admission,
         context.writeIntent,
         context.actor,
-        context.batchId ?? null,
+        batchId,
         context.reason ?? null,
         mutationId,
       ],
