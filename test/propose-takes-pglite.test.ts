@@ -8,7 +8,7 @@ import {
 } from 'bun:test';
 import { createHash } from 'node:crypto';
 import type { OperationContext } from '../src/core/operations.ts';
-import { runMigrations } from '../src/core/migrate.ts';
+import { MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 import {
   runPhaseProposeTakes,
   type ProposeTakesExtractor,
@@ -69,7 +69,9 @@ describe('propose_takes persistence on PGLite', () => {
 
     const result = await runMigrations(engine);
 
-    expect(result.applied).toBe(1);
+    expect(result.applied).toBe(
+      MIGRATIONS.filter(migration => migration.version > 125).length,
+    );
     const rows = await engine.executeRaw<{
       claim_hash: string;
       resolution_note: string | null;

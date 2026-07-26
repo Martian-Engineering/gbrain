@@ -788,6 +788,42 @@ CREATE INDEX IF NOT EXISTS take_proposals_pending_idx
 CREATE INDEX IF NOT EXISTS take_proposals_run_id_idx
   ON take_proposals (proposal_run_id);
 
+CREATE TABLE IF NOT EXISTS take_proposal_scans (
+  source_id          TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  page_slug          TEXT        NOT NULL,
+  mining_input_hash  TEXT        NOT NULL,
+  prompt_version     TEXT        NOT NULL,
+  status             TEXT        NOT NULL DEFAULT 'in_progress'
+                                 CHECK (status IN ('in_progress', 'succeeded')),
+  attempt_id         TEXT        NOT NULL,
+  lease_expires_at   TIMESTAMPTZ,
+  proposal_run_id    TEXT        NOT NULL,
+  model_id           TEXT        NOT NULL,
+  proposal_count     INTEGER     CHECK (proposal_count >= 0),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at       TIMESTAMPTZ,
+  PRIMARY KEY (source_id, page_slug, mining_input_hash, prompt_version),
+  CONSTRAINT take_proposal_scans_state_check CHECK (
+    (
+      status = 'in_progress'
+      AND lease_expires_at IS NOT NULL
+      AND proposal_count IS NULL
+      AND completed_at IS NULL
+    )
+    OR
+    (
+      status = 'succeeded'
+      AND lease_expires_at IS NULL
+      AND proposal_count IS NOT NULL
+      AND completed_at IS NOT NULL
+    )
+  )
+);
+CREATE INDEX IF NOT EXISTS take_proposal_scans_expired_claim_idx
+  ON take_proposal_scans (lease_expires_at)
+  WHERE status = 'in_progress';
+
 CREATE TABLE IF NOT EXISTS take_grade_cache (
   take_id            BIGINT       NOT NULL,
   prompt_version     TEXT         NOT NULL,
