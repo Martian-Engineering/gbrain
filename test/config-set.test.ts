@@ -8,6 +8,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { KNOWN_CONFIG_KEYS, KNOWN_CONFIG_KEY_PREFIXES } from '../src/core/config.ts';
+import { runConfig } from '../src/commands/config.ts';
 import { suggestNearest } from '../src/core/levenshtein.ts';
 
 describe('KNOWN_CONFIG_KEYS', () => {
@@ -46,6 +47,11 @@ describe('KNOWN_CONFIG_KEYS', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('embed.backfill_cooldown_min');
     expect(KNOWN_CONFIG_KEYS).toContain('embed.backfill_max_usd_per_source_24h');
     expect(KNOWN_CONFIG_KEYS).toContain('embed.backfill_max_usd');
+  });
+
+  test('contains the orphan-policy keys — no --force required', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('orphans.exclude_prefixes');
+    expect(KNOWN_CONFIG_KEYS).toContain('orphans.exclude_slugs');
   });
 
   test('includes the gateway-loop toggle and provider API keys the wave wires', () => {
@@ -158,5 +164,24 @@ describe('prefix vs known-key gate logic (mirrored from runConfig)', () => {
 
   test('bug-reporter: embedding.dimensions → "unknown"', () => {
     expect(gate('embedding.dimensions')).toBe('unknown');
+  });
+});
+
+describe('orphan-policy config writes', () => {
+  test('both documented keys are accepted without --force', async () => {
+    const writes: Array<[string, string]> = [];
+    const engine = {
+      setConfig: async (key: string, value: string) => {
+        writes.push([key, value]);
+      },
+    };
+
+    await runConfig(engine as never, ['set', 'orphans.exclude_prefixes', 'private/,archive/']);
+    await runConfig(engine as never, ['set', 'orphans.exclude_slugs', 'fixture-page']);
+
+    expect(writes).toEqual([
+      ['orphans.exclude_prefixes', 'private/,archive/'],
+      ['orphans.exclude_slugs', 'fixture-page'],
+    ]);
   });
 });

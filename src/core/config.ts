@@ -2,6 +2,10 @@ import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'f
 import { isAbsolute, join } from 'path';
 import { homedir } from 'os';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
+import {
+  ORPHAN_EXCLUDE_PREFIXES_KEY,
+  ORPHAN_EXCLUDE_SLUGS_KEY,
+} from './orphan-policy.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -964,6 +968,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Link resolution (issue #972)
   'link_resolution',
   'link_resolution.global_basename',
+  // Orphan reporting exclusions (comma-separated):
+  // - prefixes excludes every page below the named path prefixes.
+  // - slugs excludes only the exact canonical page slugs.
+  ORPHAN_EXCLUDE_PREFIXES_KEY,
+  ORPHAN_EXCLUDE_SLUGS_KEY,
   // Spend controls (v0.42.42.0, issue #2139). Previously `--force`-only — the
   // operator had to discover these by reading source. Registered so `config
   // set` accepts them directly. See docs/operations/spend-controls.md.
