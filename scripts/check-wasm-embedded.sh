@@ -19,7 +19,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT_BIN="$(mktemp /tmp/gbrain-wasm-check.XXXXXX)"
+# Bun stages compiled output beside the repository before renaming it into
+# place. Keep the destination on that same filesystem so Docker bind mounts do
+# not turn the final rename into a cross-filesystem failure.
+mkdir -p "$REPO_ROOT/.context"
+OUT_BIN="$(mktemp "$REPO_ROOT/.context/gbrain-wasm-check.XXXXXX")"
 trap 'rm -f "$OUT_BIN"' EXIT
 
 # Build a minimal smoketest binary that imports the chunker. We compile this
