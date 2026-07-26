@@ -56,7 +56,7 @@ export const GET_RECENT_TRANSCRIPTS_DESCRIPTION =
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const LIST_PAGES_DESCRIPTION =
-  "List pages with optional filters. " +
+  "List pages with optional filters. Every result includes source_id so federated callers can distinguish same-slug pages. " +
   "For 'what's recent / what did I touch this week' questions, use list_pages " +
   "with sort=updated_desc instead of semantic search.";
 
