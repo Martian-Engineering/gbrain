@@ -42,6 +42,7 @@ function fakeManifest(name: string, opts: { extends?: string; version?: string }
       },
     ],
     link_types: [],
+    link_directories: [],
     frontmatter_links: [],
     takes_kinds: ['fact', 'take', 'bet', 'hunch'],
     enrichable_types: [],
