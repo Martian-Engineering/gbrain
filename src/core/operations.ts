@@ -4325,14 +4325,25 @@ function mapTakeMiningControlError(error: unknown): never {
 
 function takeMiningExpectedWork(
   pageCallsMax: number,
-  pricing: { modelId: string; estimatedSpendUsd: number | null },
+  pricing: {
+    modelId: string;
+    estimatedInputTokens: number;
+    maxOutputTokens: number;
+    maxOutputTokensPerPage: number;
+    maxProposalsPerPage: number;
+    estimatedSpendUsd: number | null;
+  },
 ) {
   return {
     page_calls_max: pageCallsMax,
+    estimated_input_tokens_max: pricing.estimatedInputTokens,
+    max_output_tokens_per_page: pricing.maxOutputTokensPerPage,
+    max_output_tokens_total: pricing.maxOutputTokens,
+    proposals_per_page_max: pricing.maxProposalsPerPage,
     estimated_spend_usd_max:
       pricing.estimatedSpendUsd === null
         ? null
-        : pricing.estimatedSpendUsd * pageCallsMax,
+        : pricing.estimatedSpendUsd,
     model_id: pricing.modelId,
     ...(pricing.estimatedSpendUsd === null
       ? { warning: `Pricing is unavailable for ${pricing.modelId}; execution fails closed.` }
@@ -4444,7 +4455,10 @@ const enqueue_take_mining_work: Operation = {
       const result = p.dry_run === true || ctx.dryRun
         ? await control.previewTakeMiningEnrollment(sourceCtx, input)
         : await control.enqueueTakeMiningWork(sourceCtx, input);
-      const pricing = runner.takeMiningExpectedPageSpend();
+      const pricing = runner.takeMiningExpectedWorkSpend(
+        result.eligiblePages,
+        result.estimatedInputTokens,
+      );
       return {
         dry_run: result.dryRun,
         source_id: result.sourceId,

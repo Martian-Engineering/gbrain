@@ -7,6 +7,12 @@ import {
   test,
 } from 'bun:test';
 import { KNOWN_CONFIG_KEY_PREFIXES } from '../src/core/config.ts';
+import { estimateMaxCostUsd } from '../src/core/anthropic-pricing.ts';
+import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
+import {
+  extractExistingTakesForDedup,
+  renderTakeMiningRequest,
+} from '../src/core/cycle/take-mining-request.ts';
 import {
   OperationError,
   operationsByName,
@@ -127,6 +133,104 @@ describe('take-mining operation behavior', () => {
     expect(await engine.executeRaw<{ count: number }>(
       `SELECT COUNT(*)::int AS count FROM minion_jobs`,
     )).toEqual([{ count: 0 }]);
+  });
+
+  test('enrollment preview reports request-shaped conservative spend fields', async () => {
+    const result = await operationsByName.enqueue_take_mining_work.handler(ctx, {
+      source_id: 'default',
+      batch_id: 'preview',
+      reason: 'historical_backfill',
+      page_cap: 10,
+      dry_run: true,
+    }) as { expected_work: Record<string, unknown> };
+
+    expect(result.expected_work).toMatchObject({
+      page_calls_max: 0,
+      estimated_input_tokens_max: 0,
+      max_output_tokens_per_page: 2048,
+      max_output_tokens_total: 0,
+      proposals_per_page_max: 10,
+      estimated_spend_usd_max: 0,
+      model_id: 'anthropic:claude-sonnet-4-6',
+    });
+  });
+
+  test('enrollment preview prices the selected bodies and fence context', async () => {
+    const body = `A long prediction: ${'growth continues. '.repeat(50)}
+
+## Takes
+<!-- gbrain:takes:begin -->
+| # | claim | kind | who | weight |
+|---|-------|------|-----|--------|
+| 1 | Existing view | take | brain | 0.6 |
+<!-- gbrain:takes:end -->`;
+    await engine.putPage('notes/priced-preview', {
+      type: 'note',
+      title: 'Priced preview',
+      compiled_truth: body,
+    }, {
+      writeContext: {
+        actor: 'test',
+        writeIntent: 'maintenance',
+        batchId: 'setup',
+      },
+    });
+    const secondBody = 'A much shorter second prediction.';
+    await engine.putPage('notes/priced-preview-second', {
+      type: 'note',
+      title: 'Second priced preview',
+      compiled_truth: secondBody,
+    }, {
+      writeContext: {
+        actor: 'test',
+        writeIntent: 'maintenance',
+        batchId: 'setup',
+      },
+    });
+    await engine.executeRaw(
+      `DELETE FROM take_mining_work
+        WHERE source_id = 'default'
+          AND page_slug IN ('notes/priced-preview', 'notes/priced-preview-second')`,
+    );
+
+    const result = await operationsByName.enqueue_take_mining_work.handler(ctx, {
+      source_id: 'default',
+      batch_id: 'preview',
+      reason: 'historical_backfill',
+      page_cap: 10,
+      dry_run: true,
+    }) as {
+      eligible_count: number;
+      expected_work: {
+        estimated_input_tokens_max: number;
+        estimated_spend_usd_max: number;
+      };
+    };
+    const canonical = buildTakeMiningInput(body);
+    const request = renderTakeMiningRequest({
+      pagePath: 'notes/priced-preview',
+      pageBody: canonical.prose,
+      existingTakes: extractExistingTakesForDedup(body),
+    });
+    const secondRequest = renderTakeMiningRequest({
+      pagePath: 'notes/priced-preview-second',
+      pageBody: buildTakeMiningInput(secondBody).prose,
+      existingTakes: [],
+    });
+    const expectedSpend = estimateMaxCostUsd(
+      'anthropic:claude-sonnet-4-6',
+      request.estimatedInputTokens + secondRequest.estimatedInputTokens,
+      request.maxTokens + secondRequest.maxTokens,
+    );
+    if (expectedSpend === null) {
+      throw new Error('test model must have pricing');
+    }
+
+    expect(result.eligible_count).toBe(2);
+    expect(result.expected_work.estimated_input_tokens_max).toBe(
+      request.estimatedInputTokens + secondRequest.estimatedInputTokens,
+    );
+    expect(result.expected_work.estimated_spend_usd_max).toBe(expectedSpend);
   });
 
   test('generic submit_job cannot bypass the dedicated validated operation', async () => {

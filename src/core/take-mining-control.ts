@@ -1,7 +1,11 @@
 import type { BrainEngine } from './engine.ts';
 import type { OperationContext } from './operations.ts';
-import { PROPOSE_TAKES_PROMPT_VERSION } from './cycle/propose-takes.ts';
 import { buildTakeMiningInput } from './cycle/take-mining-input.ts';
+import {
+  extractExistingTakesForDedup,
+  PROPOSE_TAKES_PROMPT_VERSION,
+  renderTakeMiningRequest,
+} from './cycle/take-mining-request.ts';
 import { loadActivePackBestEffort } from './schema-pack/best-effort.ts';
 import { extractableTypesFromPack } from './schema-pack/extractable.ts';
 
@@ -66,6 +70,8 @@ export interface TakeMiningEnrollmentPreview {
   existingOtherBatchPages: number;
   existingWriteTriggeredPages: number;
   alreadyEnrolledPages: number;
+  /** Conservative input-token bound for the selected current revisions. */
+  estimatedInputTokens: number;
   items: TakeMiningEnrollmentItem[];
   nextAfterSlug: string | null;
   truncated: boolean;
@@ -140,6 +146,7 @@ interface CandidateRow {
 
 interface EligibleCandidate extends TakeMiningEnrollmentItem {
   compiledTruth: string;
+  estimatedInputTokens: number;
 }
 
 interface DiscoveryResult extends TakeMiningEnrollmentPreview {
@@ -291,6 +298,10 @@ async function discoverEnrollment(
   }
 
   const truncated = !reachedEnd;
+  const estimatedInputTokens = eligibleCandidates.reduce(
+    (total, candidate) => total + candidate.estimatedInputTokens,
+    0,
+  );
   return {
     dryRun: true,
     sourceId: input.sourceId,
@@ -299,6 +310,7 @@ async function discoverEnrollment(
     promptVersion,
     ...counters,
     eligiblePages: eligibleCandidates.length,
+    estimatedInputTokens,
     items: eligibleCandidates.map(publicItem),
     nextAfterSlug: truncated ? (cursor ?? null) : null,
     truncated,
@@ -345,6 +357,11 @@ function classifyCandidate(
     effectiveDateSource: row.effective_date_source,
     miningInputHash: canonical.mining_input_hash,
     compiledTruth: row.compiled_truth,
+    estimatedInputTokens: renderTakeMiningRequest({
+      pagePath: row.slug,
+      pageBody: canonical.prose,
+      existingTakes: extractExistingTakesForDedup(row.compiled_truth),
+    }).estimatedInputTokens,
   });
 }
 

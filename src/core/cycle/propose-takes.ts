@@ -47,6 +47,13 @@ import { loadActivePackBestEffort } from '../schema-pack/best-effort.ts';
 import { extractableTypesFromPack } from '../schema-pack/extractable.ts';
 import { buildTakeMiningInput } from './take-mining-input.ts';
 import {
+  extractExistingTakesForDedup,
+  PROPOSE_TAKES_PROMPT_VERSION,
+  renderTakeMiningRequest,
+  TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+  type TakeMiningExtractorInput,
+} from './take-mining-request.ts';
+import {
   createTakeMiningRunner,
   TAKE_MINING_LOCK_NAME,
   takeMiningWorkBatchSize,
@@ -68,7 +75,7 @@ export {
  * verdicts in `take_proposals` (composite key includes prompt_version) stay
  * valid as audit history; new runs re-spend LLM tokens on every page.
  */
-export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
+export { PROPOSE_TAKES_PROMPT_VERSION } from './take-mining-request.ts';
 
 /**
  * Tuned extractor prompt, validated against the hand-labeled synthetic
@@ -98,37 +105,10 @@ export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
  * fixtures before bumping PROPOSE_TAKES_PROMPT_VERSION; the train-holdout
  * gap should stay < 0.10 (overfitting threshold).
  */
-export const EXTRACT_TAKES_PROMPT = `Extract gradeable claims from the prose below.
-
-A "gradeable claim" is a prediction, recommendation, or interpretive judgment
-that could turn out wrong over time. Examples:
-- "X company will hit ARR milestone by Q3" (prediction)
-- "Y founder is going to struggle with execution" (judgment)
-- "Z market will compress in 18 months" (prediction)
-- "I bet alice wins the round" (bet)
-
-NOT gradeable (do NOT extract these):
-- Pure facts ("X was founded in 2020")
-- Direct quotes from others without endorsement
-- Restatements of an earlier claim in the same page
-
-For each gradeable claim, output a JSON object with:
-- claim_text   (string, <=200 chars, paraphrase or near-verbatim from prose)
-- kind         ('prediction' | 'judgment' | 'bet')
-- holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain' — default 'brain' when author asserts the claim)
-- weight       (number 0..1 inferred from hedging language: 'I bet'/'strong conviction'=0.7-0.85,
-                'I think'/'moderate conviction'=0.5-0.7, 'maybe'/'I'd guess'=0.3-0.5)
-- domain       (short tag — e.g. 'tactics', 'macro', 'hiring', 'geography', 'pricing')
-
-Output ONLY a JSON array of these objects. No prose. No commentary. If no
-gradeable claims, return [].
-
-EXISTING FENCE ROWS (already captured — do NOT propose duplicates):
-{EXISTING_TAKES_JSON}
-
-PAGE PROSE:
-{PAGE_BODY}
-`;
+export {
+  EXTRACT_TAKES_PROMPT,
+  extractExistingTakesForDedup,
+} from './take-mining-request.ts';
 
 /** One proposed take, as the extractor produces it. */
 export interface ProposedTake {
@@ -140,12 +120,9 @@ export interface ProposedTake {
 }
 
 /** Extractor function signature — injected for tests; production calls gateway. */
-export type ProposeTakesExtractor = (input: {
-  pagePath: string;
-  pageBody: string;
-  existingTakes: Array<{ claim: string; kind: string; holder: string; weight: number }>;
-  modelHint?: string;
-}) => Promise<ProposedTake[]>;
+export type ProposeTakesExtractor = (
+  input: TakeMiningExtractorInput,
+) => Promise<ProposedTake[]>;
 
 export interface ProposeTakesOpts extends BasePhaseOpts {
   /** Retained cycle-call compatibility; queued work is database-backed. */
@@ -213,41 +190,6 @@ export function hasCompleteFence(pageBody: string): boolean {
 }
 
 /**
- * Parse the existing fence into rows so the extractor can dedupe.
- * Returns [] when no fence is present. Best-effort — malformed fences
- * surface to the operator via the existing v0.28 fence parser, not here.
- */
-export function extractExistingTakesForDedup(pageBody: string): Array<{
-  claim: string;
-  kind: string;
-  holder: string;
-  weight: number;
-}> {
-  const fenceMatch = pageBody.match(/<!---?\s*gbrain:takes:begin\s*-->([\s\S]*?)<!---?\s*gbrain:takes:end\s*-->/);
-  if (!fenceMatch) return [];
-  const body = fenceMatch[1] ?? '';
-  const rows: Array<{ claim: string; kind: string; holder: string; weight: number }> = [];
-  for (const line of body.split('\n')) {
-    const cells = line.split('|').map(c => c.trim()).filter((_, i, arr) => i > 0 && i < arr.length - 1);
-    // Skip header + separator rows.
-    if (cells.length < 4) continue;
-    if (cells[0] === '#' || cells[0]?.match(/^-+$/)) continue;
-    const claim = cells[1] ?? '';
-    if (!claim || claim.startsWith('~~')) continue; // strikethrough = inactive, doesn't count for dedup
-    const kind = cells[2] ?? 'take';
-    const holder = cells[3] ?? 'brain';
-    const weight = Number.parseFloat(cells[4] ?? '0.5');
-    rows.push({
-      claim: claim.replace(/^~~|~~$/g, ''),
-      kind,
-      holder,
-      weight: Number.isFinite(weight) ? weight : 0.5,
-    });
-  }
-  return rows;
-}
-
-/**
  * Production extractor — calls gateway.chat with the EXTRACT_TAKES_PROMPT
  * and parses the JSON array output. Malformed output throws so the caller
  * releases the lease; a valid [] remains a durable successful scan.
@@ -260,14 +202,12 @@ export function extractExistingTakesForDedup(pageBody: string): Array<{
 export async function defaultExtractor(
   input: Parameters<ProposeTakesExtractor>[0],
 ): Promise<ProposedTake[]> {
-  const prompt = EXTRACT_TAKES_PROMPT
-    .replace('{EXISTING_TAKES_JSON}', JSON.stringify(input.existingTakes, null, 2))
-    .replace('{PAGE_BODY}', input.pageBody);
+  const request = renderTakeMiningRequest(input);
 
   const result = await gatewayChat({
-    messages: [{ role: 'user', content: prompt }],
+    messages: request.messages,
     ...(input.modelHint ? { model: input.modelHint } : {}),
-    maxTokens: 2048,
+    maxTokens: request.maxTokens,
   });
 
   // A valid [] is a successful scan; malformed output is retryable.
@@ -320,7 +260,10 @@ function parseExtractorOutputResult(raw: string): ExtractorParseResult {
     const domain = typeof r.domain === 'string' && r.domain.length > 0 ? r.domain : undefined;
     out.push({ claim_text, kind, holder, weight, domain });
   }
-  return { valid: true, proposals: out };
+  return {
+    valid: true,
+    proposals: out.slice(0, TAKE_MINING_MAX_PROPOSALS_PER_PAGE),
+  };
 }
 
 export function parseExtractorOutput(raw: string): ProposedTake[] {
@@ -845,6 +788,7 @@ async function countRunnerWork(
 export const runTakeMiningWork = createTakeMiningRunner({
   promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
   defaultExtractor,
+  renderRequest: renderTakeMiningRequest,
   select: selectRunnerWork,
   countRemaining: countRunnerWork,
   claim: claimScan,

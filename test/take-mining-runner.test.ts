@@ -9,13 +9,32 @@ import {
   type ProposeTakesExtractor,
   type TakeMiningRunnerOptions,
 } from '../src/core/cycle/propose-takes.ts';
+import {
+  renderTakeMiningRequest,
+  TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+} from '../src/core/cycle/take-mining-request.ts';
 import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 const MODEL_ID = 'anthropic:claude-haiku-4-5';
 const NOTE_TYPES = ['note'] as const;
-const ESTIMATED_PAGE_SPEND = estimateMaxCostUsd(MODEL_ID, 1_500, 500) ?? 0;
+function expectedPageSpend(
+  pageBody: string,
+  existingTakes: Parameters<typeof renderTakeMiningRequest>[0]['existingTakes'] = [],
+): number {
+  const request = renderTakeMiningRequest({
+    pagePath: 'unused-by-prompt',
+    pageBody,
+    existingTakes,
+    modelHint: MODEL_ID,
+  });
+  return estimateMaxCostUsd(
+    MODEL_ID,
+    request.estimatedInputTokens,
+    request.maxTokens,
+  ) ?? 0;
+}
 
 let engine: PGLiteEngine;
 
@@ -213,12 +232,14 @@ describe('shared take-mining runner', () => {
     });
 
     await resetPgliteState(engine);
-    await queueWork('notes/spend-a', 'Spend A.', 'deferred', 'spend-cap');
+    const spendBody = 'Spend A.';
+    const estimatedPageSpend = expectedPageSpend(spendBody);
+    await queueWork('notes/spend-a', spendBody, 'deferred', 'spend-cap');
     await queueWork('notes/spend-b', 'Spend B.', 'deferred', 'spend-cap');
     const spendResult = await runTakeMiningWork(ctx(), deferredOpts(
       'spend-cap',
       async () => [],
-      { maxEstimatedSpendUsd: ESTIMATED_PAGE_SPEND * 1.5 },
+      { maxEstimatedSpendUsd: estimatedPageSpend * 1.5 },
     ));
     expect(spendResult).toMatchObject({
       pages_scanned: 1,
@@ -226,7 +247,7 @@ describe('shared take-mining runner', () => {
       stop_reason: 'estimated_spend_cap',
       remaining_work: 1,
     });
-    expect(spendResult.estimated_spend_usd).toBeCloseTo(ESTIMATED_PAGE_SPEND);
+    expect(spendResult.estimated_spend_usd).toBeCloseTo(estimatedPageSpend);
   });
 
   test('applies brain-wide daily page, proposal, and spend guards', async () => {
@@ -273,18 +294,23 @@ describe('shared take-mining runner', () => {
     );
     expect(overshootResult).toMatchObject({
       pages_scanned: 1,
-      proposals_inserted: 2,
+      proposals_extracted: 2,
+      proposals_inserted: 0,
       stopped: true,
       stop_reason: 'daily_proposal_cap',
-      remaining_work: 1,
+      remaining_work: 2,
     });
+    expect(await tableCount('take_proposal_scans')).toBe(0);
+    expect(await tableCount('take_proposals')).toBe(0);
 
     await resetPgliteState(engine);
+    const spendStopBody = 'Spend stop.';
+    const estimatedSpendStop = expectedPageSpend(spendStopBody);
     await engine.setConfig(
       'take_mining.daily_estimated_spend_usd',
-      String(ESTIMATED_PAGE_SPEND / 2),
+      String(estimatedSpendStop / 2),
     );
-    await queueWork('notes/spend-stop', 'Spend stop.', 'deferred', 'daily');
+    await queueWork('notes/spend-stop', spendStopBody, 'deferred', 'daily');
     const spendResult = await runTakeMiningWork(
       ctx(),
       deferredOpts('daily', async () => []),
@@ -320,7 +346,8 @@ describe('shared take-mining runner', () => {
   });
 
   test('commits attempted spend but releases owned claim on extractor failure', async () => {
-    await queueWork('notes/failure', 'Failure prose.', 'deferred', 'batch-a');
+    const body = 'Failure prose.';
+    await queueWork('notes/failure', body, 'deferred', 'batch-a');
     const result = await runTakeMiningWork(ctx(), deferredOpts(
       'batch-a',
       async () => {
@@ -329,7 +356,7 @@ describe('shared take-mining runner', () => {
     ));
 
     expect(result.pages_scanned).toBe(1);
-    expect(result.estimated_spend_usd).toBeCloseTo(ESTIMATED_PAGE_SPEND);
+    expect(result.estimated_spend_usd).toBeCloseTo(expectedPageSpend(body));
     expect(result.warnings).toContain(
       'extractor failed on notes/failure: provider failed after submit',
     );
@@ -339,6 +366,164 @@ describe('shared take-mining runner', () => {
       `SELECT status FROM budget_reservations`,
     );
     expect(reservations).toEqual([{ status: 'committed' }]);
+  });
+
+  test('uses the exact rendered request estimate and the 2048 output ceiling', async () => {
+    const body = `A semantic judgment.\n${'More context. '.repeat(80)}
+
+## Takes
+<!-- gbrain:takes:begin -->
+| # | claim | kind | who | weight |
+|---|-------|------|-----|--------|
+| 1 | Existing view | take | brain | 0.6 |
+<!-- gbrain:takes:end -->`;
+    await queueWork('notes/request-estimate', body, 'deferred', 'estimate');
+    const estimates: Array<{
+      modelId: string;
+      estimatedInputTokens: number;
+      maxOutputTokens: number;
+    }> = [];
+
+    await runTakeMiningWork(ctx(), deferredOpts(
+      'estimate',
+      async () => [],
+      {
+        _checkRunBudget: estimate => {
+          estimates.push(estimate);
+          return {
+            allowed: true,
+            estimatedCostUsd: 0,
+            cumulativeCostUsd: 0,
+            budgetUsd: 1,
+          };
+        },
+      },
+    ));
+
+    const existingTakes = [{
+      claim: 'Existing view',
+      kind: 'take',
+      holder: 'brain',
+      weight: 0.6,
+    }];
+    const canonicalBody = buildTakeMiningInput(body).prose;
+    const expected = renderTakeMiningRequest({
+      pagePath: 'notes/request-estimate',
+      pageBody: canonicalBody,
+      existingTakes,
+      modelHint: MODEL_ID,
+    });
+    expect(estimates).toEqual([{
+      modelId: MODEL_ID,
+      estimatedInputTokens: expected.estimatedInputTokens,
+      maxOutputTokens: 2048,
+    }]);
+  });
+
+  test('persists no partial page when the per-run proposal cap would be exceeded', async () => {
+    const body = 'Two complete proposals.';
+    await queueWork('notes/run-overshoot', body, 'deferred', 'run-overshoot');
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'run-overshoot',
+      async () => [1, 2].map(index => ({
+        claim_text: `Claim ${index}`,
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      })),
+      { proposalCap: 1 },
+    ));
+
+    expect(result).toMatchObject({
+      pages_scanned: 1,
+      proposals_extracted: 2,
+      proposals_inserted: 0,
+      stopped: true,
+      stop_reason: 'proposal_cap',
+      remaining_work: 1,
+    });
+    expect(await tableCount('take_proposals')).toBe(0);
+    expect(await tableCount('take_proposal_scans')).toBe(0);
+    expect(await tableCount('take_mining_work')).toBe(1);
+    expect(result.estimated_spend_usd).toBeCloseTo(expectedPageSpend(body));
+    expect(await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM budget_reservations`,
+    )).toEqual([{ status: 'committed' }]);
+  });
+
+  test('accepts a complete page exactly at the proposal bound', async () => {
+    await queueWork('notes/exact-bound', 'Exactly two proposals.', 'deferred', 'exact');
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'exact',
+      async () => [1, 2].map(index => ({
+        claim_text: `Exact claim ${index}`,
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      })),
+      { proposalCap: 2 },
+    ));
+
+    expect(result).toMatchObject({
+      proposals_extracted: 2,
+      proposals_inserted: 2,
+      remaining_work: 0,
+    });
+    expect(await tableCount('take_proposals')).toBe(2);
+    expect(await tableCount('take_proposal_scans')).toBe(1);
+  });
+
+  test('accepts a complete page exactly at the daily proposal bound', async () => {
+    await engine.setConfig('take_mining.daily_proposal_cap', '2');
+    await queueWork('notes/daily-exact', 'Exactly two daily proposals.', 'deferred', 'daily-exact');
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'daily-exact',
+      async () => [1, 2].map(index => ({
+        claim_text: `Daily exact claim ${index}`,
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      })),
+    ));
+
+    expect(result).toMatchObject({
+      proposals_extracted: 2,
+      proposals_inserted: 2,
+      remaining_work: 0,
+    });
+    expect(await tableCount('take_proposals')).toBe(2);
+    expect(await tableCount('take_proposal_scans')).toBe(1);
+  });
+
+  test('defensively bounds an injected extractor to ten ranked proposals', async () => {
+    await queueWork('notes/over-return', 'Many possible takes.', 'deferred', 'bounded');
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'bounded',
+      async () => Array.from(
+        { length: TAKE_MINING_MAX_PROPOSALS_PER_PAGE + 2 },
+        (_, index) => ({
+          claim_text: `Ranked claim ${index + 1}`,
+          kind: 'take',
+          holder: 'brain',
+          weight: 0.5,
+        }),
+      ),
+      { proposalCap: TAKE_MINING_MAX_PROPOSALS_PER_PAGE },
+    ));
+
+    expect(result).toMatchObject({
+      proposals_extracted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+      proposals_inserted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+      remaining_work: 0,
+    });
+    expect(await tableCount('take_proposals')).toBe(TAKE_MINING_MAX_PROPOSALS_PER_PAGE);
+    expect(result.warnings).toContain(
+      `extractor returned 12 proposals for notes/over-return; kept the strongest ${TAKE_MINING_MAX_PROPOSALS_PER_PAGE}`,
+    );
   });
 
   test('releases its owned claim when an in-flight extraction is aborted', async () => {

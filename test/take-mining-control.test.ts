@@ -8,6 +8,7 @@ import {
   type TakeMiningControlDependencies,
 } from '../src/core/take-mining-control.ts';
 import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
+import { renderTakeMiningRequest } from '../src/core/cycle/take-mining-request.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 const dependencies: TakeMiningControlDependencies = {
@@ -77,6 +78,13 @@ describe('take-mining enrollment control', () => {
     }]);
     expect(preview.alreadyScannedPages).toBe(1);
     expect(preview.eligiblePages).toBe(1);
+    expect(preview.estimatedInputTokens).toBe(
+      renderTakeMiningRequest({
+        pagePath: 'notes/alpha',
+        pageBody: 'Alpha label',
+        existingTakes: [],
+      }).estimatedInputTokens,
+    );
     expect(preview.nextAfterSlug).toBeNull();
     const queue = await engine.executeRaw<{ count: number }>(
       'SELECT COUNT(*)::int AS count FROM take_mining_work',

@@ -21,6 +21,12 @@ import type {
   ProposeTakesResult,
   ProposedTake,
 } from './propose-takes.ts';
+import {
+  TAKE_MINING_MAX_OUTPUT_TOKENS,
+  TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+  type RenderedTakeMiningRequest,
+  type TakeMiningExtractorInput,
+} from './take-mining-request.ts';
 
 const DEFAULT_CLAIM_LEASE_SECONDS = 10 * 60;
 const MIN_WORK_BATCH_SIZE = 25;
@@ -29,25 +35,36 @@ const DEFAULT_DAILY_PAGE_CAP = 100;
 const DEFAULT_DAILY_PROPOSAL_CAP = 200;
 const DEFAULT_DAILY_SPEND_CAP_USD = 5;
 const DEFAULT_BUDGET_TIME_ZONE = 'America/Los_Angeles';
-const ESTIMATED_INPUT_TOKENS = 1_500;
-const MAX_OUTPUT_TOKENS = 500;
 const DAILY_BUDGET_SCOPE = 'brain';
 const DAILY_BUDGET_RESOLVER = 'take_mining';
 
 /** Renewable lock shared by automatic and operator-triggered take mining. */
 export const TAKE_MINING_LOCK_NAME = 'gbrain-take-mining';
 
-/** Current model and fixed per-page estimate used by preview and execution. */
-export function takeMiningExpectedPageSpend(modelId = getChatModel()): {
+/** Conservative aggregate pricing for a concrete preview's rendered inputs. */
+export function takeMiningExpectedWorkSpend(
+  pageCount: number,
+  estimatedInputTokens: number,
+  modelId = getChatModel(),
+): {
   modelId: string;
+  estimatedInputTokens: number;
+  maxOutputTokens: number;
+  maxOutputTokensPerPage: number;
+  maxProposalsPerPage: number;
   estimatedSpendUsd: number | null;
 } {
+  const totalOutputTokens = pageCount * TAKE_MINING_MAX_OUTPUT_TOKENS;
   return {
     modelId,
+    estimatedInputTokens,
+    maxOutputTokens: totalOutputTokens,
+    maxOutputTokensPerPage: TAKE_MINING_MAX_OUTPUT_TOKENS,
+    maxProposalsPerPage: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
     estimatedSpendUsd: estimateMaxCostUsd(
       modelId,
-      ESTIMATED_INPUT_TOKENS,
-      MAX_OUTPUT_TOKENS,
+      estimatedInputTokens,
+      totalOutputTokens,
     ),
   };
 }
@@ -159,6 +176,7 @@ type ExistingTake = {
 export interface TakeMiningRunnerDependencies {
   promptVersion: string;
   defaultExtractor: ProposeTakesExtractor;
+  renderRequest(input: TakeMiningExtractorInput): RenderedTakeMiningRequest;
   select(
     ctx: OperationContext,
     opts: TakeMiningRunnerOptions,
@@ -217,9 +235,15 @@ interface CandidateContext {
   ledger: BudgetLedger;
   extractor: ProposeTakesExtractor;
   modelId: string;
-  estimatedPageSpend: number;
   leaseSeconds: number;
   deps: TakeMiningRunnerDependencies;
+}
+
+interface PreparedCandidate {
+  existingTakes: ExistingTake[];
+  estimatedInputTokens: number;
+  maxOutputTokens: number;
+  estimatedSpendUsd: number;
 }
 
 function requirePositiveInteger(value: number, field: string): void {
@@ -440,8 +464,9 @@ function applySelectionDiagnostics(
 
 async function pacingStop(
   context: CandidateContext,
+  estimatedPageSpend: number,
 ): Promise<[TakeMiningStopReason, string] | null> {
-  const { engine, caps, opts, result, estimatedPageSpend } = context;
+  const { engine, caps, opts, result } = context;
   const usage = await readDailyUsage(engine, caps);
   if (usage.pageCalls >= caps.pageCap) {
     return ['daily_page_cap', 'brain-wide daily page cap reached'];
@@ -465,8 +490,10 @@ async function pacingStop(
 async function reserveAttempt(
   context: CandidateContext,
   work: TakeMiningRunnerWork,
+  prepared: PreparedCandidate,
 ): Promise<Extract<ReservationResult, { kind: 'held' }> | null> {
-  const { ledger, caps, opts, modelId, estimatedPageSpend, result } = context;
+  const { ledger, caps, opts, modelId, result } = context;
+  const estimatedPageSpend = prepared.estimatedSpendUsd;
   const reserved = await ledger.reserve({
     scope: DAILY_BUDGET_SCOPE,
     resolverId: DAILY_BUDGET_RESOLVER,
@@ -487,8 +514,8 @@ async function reserveAttempt(
   try {
     budget = opts._checkRunBudget?.({
       modelId,
-      estimatedInputTokens: ESTIMATED_INPUT_TOKENS,
-      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      estimatedInputTokens: prepared.estimatedInputTokens,
+      maxOutputTokens: prepared.maxOutputTokens,
     });
   } catch (error) {
     await ledger.rollback(reserved.reservationId);
@@ -509,15 +536,14 @@ async function reserveAttempt(
 async function invokeExtractor(
   context: CandidateContext,
   candidate: TakeMiningRunnerCandidate,
+  prepared: PreparedCandidate,
   reservation: Extract<ReservationResult, { kind: 'held' }>,
 ): Promise<{ proposals: ProposedTake[]; existingTakes: ExistingTake[] } | null> {
   const { work, input } = candidate;
-  const { deps, opts, extractor, modelId, result, ledger, estimatedPageSpend } =
-    context;
-  let existingTakes: ExistingTake[];
+  const { opts, extractor, result, ledger } = context;
+  const estimatedPageSpend = prepared.estimatedSpendUsd;
   try {
     opts.signal?.throwIfAborted();
-    existingTakes = deps.existingTakes(work.compiled_truth);
   } catch (error) {
     await ledger.rollback(reservation.reservationId);
     throw error;
@@ -527,7 +553,7 @@ async function invokeExtractor(
     extraction = Promise.resolve(extractor({
       pagePath: work.page_slug,
       pageBody: input.prose,
-      existingTakes,
+      existingTakes: prepared.existingTakes,
       modelHint: opts.model,
     }));
   } catch (error) {
@@ -545,9 +571,17 @@ async function invokeExtractor(
   }
 
   try {
+    const rawProposals = await waitForExtraction(extraction, opts.signal);
+    const proposals = rawProposals.slice(0, TAKE_MINING_MAX_PROPOSALS_PER_PAGE);
+    if (rawProposals.length > TAKE_MINING_MAX_PROPOSALS_PER_PAGE) {
+      result.warnings.push(
+        `extractor returned ${rawProposals.length} proposals for ${work.page_slug}; ` +
+        `kept the strongest ${TAKE_MINING_MAX_PROPOSALS_PER_PAGE}`,
+      );
+    }
     return {
-      proposals: await waitForExtraction(extraction, opts.signal),
-      existingTakes,
+      proposals,
+      existingTakes: prepared.existingTakes,
     };
   } catch (error) {
     if (opts.signal?.aborted) throw error;
@@ -555,6 +589,63 @@ async function invokeExtractor(
     result.warnings.push(`extractor failed on ${work.page_slug}: ${message}`);
     return null;
   }
+}
+
+function prepareCandidate(
+  opts: TakeMiningRunnerOptions,
+  modelId: string,
+  deps: TakeMiningRunnerDependencies,
+  candidate: TakeMiningRunnerCandidate,
+): PreparedCandidate | null {
+  const existingTakes = deps.existingTakes(
+    candidate.work.compiled_truth,
+  );
+  const request = deps.renderRequest({
+    pagePath: candidate.work.page_slug,
+    pageBody: candidate.input.prose,
+    existingTakes,
+    modelHint: opts.model,
+  });
+  const estimatedSpendUsd = opts._estimatedPageSpendUsd === undefined
+    ? estimateMaxCostUsd(
+      modelId,
+      request.estimatedInputTokens,
+      request.maxTokens,
+    )
+    : opts._estimatedPageSpendUsd;
+  if (estimatedSpendUsd === null) return null;
+  return {
+    existingTakes,
+    estimatedInputTokens: request.estimatedInputTokens,
+    maxOutputTokens: request.maxTokens,
+    estimatedSpendUsd,
+  };
+}
+
+async function proposalPersistenceStop(
+  context: CandidateContext,
+  proposalCount: number,
+): Promise<[TakeMiningStopReason, string] | null> {
+  const { caps, engine, opts, result } = context;
+  if (
+    opts.proposalCap !== undefined
+    && result.proposals_inserted + proposalCount > opts.proposalCap
+  ) {
+    return [
+      'proposal_cap',
+      `complete page result (${proposalCount}) would exceed the per-run ` +
+      `proposal cap; no proposals from this page were persisted`,
+    ];
+  }
+  const usage = await readDailyUsage(engine, caps);
+  if (usage.proposals + proposalCount > caps.proposalCap) {
+    return [
+      'daily_proposal_cap',
+      `complete page result (${proposalCount}) would exceed the brain-wide ` +
+      `daily proposal cap; no proposals from this page were persisted`,
+    ];
+  }
+  return null;
 }
 
 /**
@@ -591,7 +682,21 @@ async function processCandidate(
   candidate: TakeMiningRunnerCandidate,
 ): Promise<'continue' | 'stop'> {
   const { work } = candidate;
-  const stop = await pacingStop(context);
+  const prepared = prepareCandidate(
+    context.opts,
+    context.modelId,
+    context.deps,
+    candidate,
+  );
+  if (!prepared) {
+    markStopped(
+      context.result,
+      'unknown_model_pricing',
+      `model ${context.modelId} has no pricing; capped take mining fails closed`,
+    );
+    return 'stop';
+  }
+  const stop = await pacingStop(context, prepared.estimatedSpendUsd);
   if (stop) {
     markStopped(context.result, ...stop);
     return 'stop';
@@ -616,15 +721,28 @@ async function processCandidate(
 
   let claimSettled = false;
   try {
-    const reservation = await reserveAttempt(context, work);
+    const reservation = await reserveAttempt(context, work, prepared);
     if (!reservation) {
       return 'stop';
     }
-    const extracted = await invokeExtractor(context, candidate, reservation);
+    const extracted = await invokeExtractor(
+      context,
+      candidate,
+      prepared,
+      reservation,
+    );
     if (!extracted) {
       return 'continue';
     }
     context.result.proposals_extracted += extracted.proposals.length;
+    const proposalStop = await proposalPersistenceStop(
+      context,
+      extracted.proposals.length,
+    );
+    if (proposalStop) {
+      markStopped(context.result, ...proposalStop);
+      return 'stop';
+    }
     context.result.proposals_inserted += await context.deps.persist(
       context.engine,
       work,
@@ -731,16 +849,21 @@ export function createTakeMiningRunner(deps: TakeMiningRunnerDependencies) {
 
     applySelectionDiagnostics(result, selection);
     opts.reporter?.start('propose_takes.pages' as never, result.eligible_pages);
-    const estimatedPageSpend = opts._estimatedPageSpendUsd === undefined
-      ? estimateMaxCostUsd(modelId, ESTIMATED_INPUT_TOKENS, MAX_OUTPUT_TOKENS)
-      : opts._estimatedPageSpendUsd;
-    if (estimatedPageSpend === null) {
+    const pricingAvailable = opts._estimatedPageSpendUsd === undefined
+      ? estimateMaxCostUsd(modelId, 0, TAKE_MINING_MAX_OUTPUT_TOKENS) !== null
+      : opts._estimatedPageSpendUsd !== null;
+    if (!pricingAvailable) {
       markStopped(
         result,
         'unknown_model_pricing',
         `model ${modelId} has no pricing; capped take mining fails closed`,
       );
-    } else if (!opts.dryRun) {
+    } else if (opts.dryRun) {
+      for (const candidate of selection.candidates) {
+        const prepared = prepareCandidate(opts, modelId, deps, candidate);
+        result.estimated_spend_usd += prepared?.estimatedSpendUsd ?? 0;
+      }
+    } else {
       const caps = await resolveDailyCaps(engine);
       await processCandidates({
         engine,
@@ -750,7 +873,6 @@ export function createTakeMiningRunner(deps: TakeMiningRunnerDependencies) {
         ledger: new BudgetLedger(engine, { tz: caps.timeZone }),
         extractor: opts.extractor ?? deps.defaultExtractor,
         modelId,
-        estimatedPageSpend,
         leaseSeconds: opts._leaseSeconds ?? DEFAULT_CLAIM_LEASE_SECONDS,
         deps,
       }, selection.candidates);

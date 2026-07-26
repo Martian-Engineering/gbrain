@@ -55,6 +55,22 @@ describe('parseExtractorOutput', () => {
     });
     expect(output[1]?.weight).toBe(0);
   });
+
+  test('keeps only the first ten proposals from an overlong response', () => {
+    const output = parseExtractorOutput(JSON.stringify(
+      Array.from({ length: 12 }, (_, index) => ({
+        claim_text: `ranked-${index + 1}`,
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      })),
+    ));
+
+    expect(output).toHaveLength(10);
+    expect(output.map(proposal => proposal.claim_text)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `ranked-${index + 1}`),
+    );
+  });
 });
 
 describe('contentHash', () => {
