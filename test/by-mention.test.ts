@@ -23,13 +23,17 @@
  *   15. Determinism across 10 calls
  *   16. Self-link guard (D13)
  *   17. Cross-source guard
- *   18. Hardcoded type filter (meeting NOT in gazetteer)
+ *   18. Active-pack entity primitive filter (meeting NOT in gazetteer)
  *   19. Min-length + ignore-list interaction
  *   20. Code-block + token interaction
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { extractNerLinks } from '../src/core/extract-ner.ts';
 import {
   buildGazetteer,
   findMentionedEntities,
@@ -37,8 +41,15 @@ import {
   type Gazetteer,
   type GazetteerEntry,
 } from '../src/core/by-mention.ts';
+import {
+  __setPackLocatorForTests,
+  _resetPackLocatorForTests,
+} from '../src/core/schema-pack/load-active.ts';
+import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let tempDir: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -47,13 +58,53 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  _resetPackLocatorForTests();
+  _resetPackCacheForTests();
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   await engine.disconnect();
 });
 
 beforeEach(async () => {
+  _resetPackLocatorForTests();
+  _resetPackCacheForTests();
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  tempDir = mkdtempSync(join(tmpdir(), 'gbrain-mention-pack-'));
   await engine.executeRaw('DELETE FROM links');
+  await engine.executeRaw('DELETE FROM slug_aliases');
   await engine.executeRaw('DELETE FROM pages');
+  await engine.unsetConfig('schema_pack');
+  await engine.unsetConfig('schema_pack.source.client-a');
 });
+
+function installEntityPack(): string {
+  const packDir = join(tempDir, 'pack');
+  mkdirSync(packDir, { recursive: true });
+  const packPath = join(packDir, 'pack.yaml');
+  writeFileSync(packPath, `api_version: gbrain-schema-pack-v1
+name: mention-source-pack
+version: 1.0.0
+description: ""
+gbrain_min_version: 0.38.0
+extends: null
+borrow_from: []
+page_types:
+  - name: advisor
+    primitive: entity
+    path_prefixes: [advisors/]
+    aliases: []
+    extractable: false
+    expert_routing: false
+link_types:
+  - name: collaborated_with
+    inference:
+      regex: worked alongside
+frontmatter_links: []
+takes_kinds: [fact, take, bet, hunch]
+enrichable_types: []
+filing_rules: []
+`, 'utf8');
+  return packPath;
+}
 
 // Tiny gazetteer builder for pure-fn cases that don't need engine.
 function gazetteerFromEntries(entries: Omit<GazetteerEntry, 'tokens'>[]): Gazetteer {
@@ -321,7 +372,7 @@ describe('buildGazetteer — engine integration', () => {
     expect(g.size).toBe(0);
   });
 
-  test('18. hardcoded type filter — page with type=meeting NOT in gazetteer', async () => {
+  test('18. active-pack entity filter — page with type=meeting NOT in gazetteer', async () => {
     await engine.putPage('meetings/2026-01-15', {
       type: 'meeting' as any, title: 'Weekly Sync',
       compiled_truth: 'b', timeline: '', frontmatter: {},
@@ -332,6 +383,142 @@ describe('buildGazetteer — engine integration', () => {
     const g = await buildGazetteer(engine);
     expect(g.has('weekly')).toBe(false); // meeting type filtered out
     expect(g.has('robert')).toBe(true);  // person type included
+  });
+
+  test('slug alias display form resolves mentions to the canonical page', async () => {
+    await engine.putPage('people/robert-builder', {
+      type: 'person', title: 'Robert Builder', compiled_truth: 'b', timeline: '', frontmatter: {},
+    });
+    await engine.executeRaw(
+      `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug)
+       VALUES ($1, $2, $3)`,
+      ['default', 'people/bob-builder', 'people/robert-builder'],
+    );
+
+    const g = await buildGazetteer(engine);
+    const mentions = findMentionedEntities('Bob Builder joined the call.', g, {
+      fromSlug: 'notes/call', fromSourceId: 'default',
+    });
+
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0]!.slug).toBe('people/robert-builder');
+    expect(mentions[0]!.name).toBe('Bob Builder');
+  });
+
+  test('frontmatter title participates as an alternate display form', async () => {
+    await engine.putPage('people/robert-builder', {
+      type: 'person',
+      title: 'Robert Builder',
+      compiled_truth: 'b',
+      timeline: '',
+      frontmatter: { title: 'Bobby Builder' },
+    });
+
+    const g = await buildGazetteer(engine);
+    expect(g.get('bobby')?.[0]).toMatchObject({
+      slug: 'people/robert-builder',
+      title: 'Bobby Builder',
+    });
+  });
+
+  test('pack-declared entity type participates', async () => {
+    await engine.putPage('partners/jane-example', {
+      type: 'partner' as any,
+      title: 'Jane Example',
+      compiled_truth: 'b',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const g = await buildGazetteer(engine, {
+      activePack: {
+        page_types: [{
+          name: 'partner',
+          primitive: 'entity',
+          path_prefixes: ['partners/'],
+          aliases: [],
+          extractable: false,
+          expert_routing: false,
+        }],
+      },
+    });
+    expect(g.get('jane')?.[0]?.slug).toBe('partners/jane-example');
+  });
+
+  test('source-scoped DB pack selects custom entity types', async () => {
+    const packPath = installEntityPack();
+    __setPackLocatorForTests(name => name === 'mention-source-pack' ? packPath : null);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
+      ['client-a'],
+    );
+    await engine.setConfig('schema_pack.source.client-a', 'mention-source-pack');
+    await engine.putPage('advisors/riley-example', {
+      type: 'advisor',
+      title: 'Riley Example',
+      compiled_truth: 'b',
+      timeline: '',
+      frontmatter: {},
+    }, { sourceId: 'client-a' });
+    await engine.putPage('notes/client-update', {
+      type: 'note',
+      title: 'Client Update',
+      compiled_truth: 'We worked alongside Riley Example.',
+      timeline: '',
+      frontmatter: {},
+    }, { sourceId: 'client-a' });
+
+    const { g, ner } = await withEnv({ GBRAIN_SCHEMA_PACK: undefined }, async () => ({
+      g: await buildGazetteer(engine, { sourceId: 'client-a' }),
+      ner: await extractNerLinks(engine, { sourceIdFilter: 'client-a' }),
+    }));
+
+    expect(g.get('riley')?.[0]).toMatchObject({
+      slug: 'advisors/riley-example',
+      source_id: 'client-a',
+    });
+    expect(ner.created).toBe(1);
+    const links = await engine.getLinks('notes/client-update', { sourceId: 'client-a' });
+    expect(links).toContainEqual(expect.objectContaining({
+      to_slug: 'advisors/riley-example',
+      link_type: 'collaborated_with',
+    }));
+    const typedRows = await engine.executeRaw<{ link_kind: string }>(
+      `SELECT l.link_kind
+         FROM links l
+         JOIN pages p ON p.id = l.from_page_id
+        WHERE p.source_id = $1 AND l.link_type = $2`,
+      ['client-a', 'collaborated_with'],
+    );
+    expect(typedRows).toEqual([{ link_kind: 'typed_ner' }]);
+  });
+
+  test('no-pack fallback preserves the legacy entity types', async () => {
+    await engine.putPage('entities/launch-committee', {
+      type: 'entity',
+      title: 'Launch Committee',
+      compiled_truth: 'b',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const g = await buildGazetteer(engine, { activePack: null });
+    expect(g.get('launch')?.[0]?.slug).toBe('entities/launch-committee');
+  });
+
+  test('bundled default pack preserves legacy entity types', async () => {
+    await engine.putPage('organizations/launch-committee', {
+      type: 'organization',
+      title: 'Launch Committee',
+      compiled_truth: 'b',
+      timeline: '',
+      frontmatter: {},
+    });
+
+    const g = await withEnv({ GBRAIN_SCHEMA_PACK: undefined }, () =>
+      buildGazetteer(engine));
+
+    expect(g.get('launch')?.[0]?.slug).toBe('organizations/launch-committee');
   });
 
   test('19. min-length + ignore-list interaction — "YC" (2 chars) filtered by min-length BEFORE ignore-list', async () => {
@@ -362,8 +549,8 @@ describe('buildGazetteer — engine integration', () => {
   });
 
   test('LINKABLE_ENTITY_TYPES exposes the hardcoded contract', () => {
-    // Regression: if anyone changes the hardcoded type list, this test
-    // forces a deliberate change (and a corresponding test update).
+    // Regression: this is the no-pack fallback, so changes must remain
+    // deliberate even though active packs supply the normal type set.
     expect(LINKABLE_ENTITY_TYPES).toEqual(['person', 'company', 'organization', 'entity']);
   });
 });

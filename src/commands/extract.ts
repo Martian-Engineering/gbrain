@@ -54,7 +54,7 @@ import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
 import { withRetry, isRetryableConnError } from '../core/retry.ts';
 export { withRetry };
 export type { WithRetryOpts } from '../core/retry.ts';
-import { buildGazetteer, findMentionedEntities } from '../core/by-mention.ts';
+import { buildGazetteer, findMentionedEntities, type Gazetteer } from '../core/by-mention.ts';
 import {
   loadOpCheckpoint, recordCompleted, clearOpCheckpoint, mentionsFingerprint,
 } from '../core/op-checkpoint.ts';
@@ -939,13 +939,18 @@ Status (v0.42):
           setCliExitVerdict(1);
         }
       } else if (byMention || ner) {
-        // v0.41.18.0 (T7): combined --by-mention + --ner walk shares one
-        // gazetteer; saves an entire pass on big brains. When only one
-        // flag is set, the other extractor skips silently.
+        // A source-scoped combined run can share one gazetteer. Unscoped
+        // federated runs resolve one gazetteer per source inside each
+        // extractor so per-source schema packs remain isolated.
         const { buildGazetteer: buildGz } = await import('../core/by-mention.ts');
-        const sharedGazetteer = (byMention || ner) ? await buildGz(engine) : undefined;
+        const sharedGazetteer = sourceIdFilter
+          ? await buildGz(engine, { sourceId: sourceIdFilter })
+          : undefined;
         if (byMention) {
-          const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, { sourceIdFilter });
+          const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, {
+            sourceIdFilter,
+            gazetteer: sharedGazetteer,
+          });
           result.links_created += r.created;
           result.pages_processed += r.pages;
         }
@@ -1836,14 +1841,22 @@ async function extractMentionsFromDb(
   jsonMode: boolean,
   typeFilter: PageType | undefined,
   since: string | undefined,
-  opts?: { sourceIdFilter?: string },
+  opts?: { sourceIdFilter?: string; gazetteer?: Gazetteer },
 ): Promise<{ created: number; pages: number }> {
   const sourceIdFilter = opts?.sourceIdFilter;
 
-  // Build gazetteer once per run. Skip everything if there are no
-  // linkable entities — vacuous truth, no mentions to find.
-  const gazetteer = await buildGazetteer(engine);
-  if (gazetteer.size === 0) {
+  const allRefs = sourceIdFilter
+    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
+    : await engine.listAllPageRefs();
+  const sourceIds = [...new Set(allRefs.map(ref => ref.source_id))];
+  const gazetteers = new Map<string, Gazetteer>();
+  await Promise.all(sourceIds.map(async sourceId => {
+    const gazetteer = opts?.gazetteer && sourceId === sourceIdFilter
+      ? opts.gazetteer
+      : await buildGazetteer(engine, { sourceId });
+    gazetteers.set(sourceId, gazetteer);
+  }));
+  if ([...gazetteers.values()].every(gazetteer => gazetteer.size === 0)) {
     if (jsonMode) {
       process.stdout.write(JSON.stringify({ event: 'no_gazetteer', message: 'no linkable entity pages found; nothing to scan' }) + '\n');
     } else {
@@ -1856,14 +1869,15 @@ async function extractMentionsFromDb(
   // fingerprint so adding new entity pages mid-pause invalidates the
   // checkpoint cleanly. Without it, resumed pages would skip new
   // entities silently (codex flag).
+  const gazetteerKeys = gazetteers.size === 1
+    ? [...gazetteers.values()][0]!.keys()
+    : [...gazetteers.entries()]
+      .flatMap(([sourceId, gazetteer]) =>
+        [...gazetteer.keys()].map(key => `${sourceId}:${key}`));
   const gazetteerHash = createHash('sha256')
-    .update([...gazetteer.keys()].sort().join('|'))
+    .update([...gazetteerKeys].sort().join('|'))
     .digest('hex')
     .slice(0, 8);
-
-  const allRefs = sourceIdFilter
-    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
-    : await engine.listAllPageRefs();
 
   // v0.41.19.0 (T5): load checkpoint and skip already-completed
   // (source_id, slug) pairs. Dry-run does NOT load OR persist the
@@ -1974,7 +1988,7 @@ async function extractMentionsFromDb(
       continue;
     }
 
-    const mentions = findMentionedEntities(body, gazetteer, {
+    const mentions = findMentionedEntities(body, gazetteers.get(source_id) ?? new Map(), {
       fromSlug: slug,
       fromSourceId: source_id,
     });
@@ -2035,7 +2049,9 @@ async function extractMentionsFromDb(
 
   if (!jsonMode) {
     const label = dryRun ? '(dry run) would create' : 'created';
-    console.log(`Mentions: ${label} ${created} links from ${processed} pages against gazetteer of ${gazetteer.size} first-token buckets`);
+    const bucketCount = [...gazetteers.values()]
+      .reduce((total, gazetteer) => total + gazetteer.size, 0);
+    console.log(`Mentions: ${label} ${created} links from ${processed} pages against gazetteer of ${bucketCount} first-token buckets`);
   }
   return { created, pages: processed };
 }

@@ -11,8 +11,8 @@
  * per-page first-mention-only cap (1 link per (source_slug, target_slug)).
  *
  * Design decisions locked in /plan-eng-review for v0.42.0.0:
- *  - D2/D10  Hardcoded entity-type filter (not pack-aware) — pack v2
- *            extension filed as TODO-1.
+ *  - D2/D10  Entity-type filter follows the active schema pack's entity
+ *            primitives, with the legacy list as the no-pack fallback.
  *  - D6      Token-Map + multi-word phrase pass (no new deps, no regex
  *            alternation, no Aho-Corasick).
  *  - D7      DB-source only — caller restricts page WALK to DB iteration.
@@ -27,9 +27,12 @@
  */
 
 import type { BrainEngine } from './engine.ts';
+import { loadConfig } from './config.ts';
 import { stripCodeBlocks } from './link-extraction.ts';
+import { loadActivePack } from './schema-pack/load-active.ts';
+import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
 
-/** D2: hardcoded entity types for v1. Pack-aware extension is TODO-1. */
+/** Legacy entity types used only when no active schema pack can be loaded. */
 export const LINKABLE_ENTITY_TYPES = ['person', 'company', 'organization', 'entity'] as const;
 
 /**
@@ -90,6 +93,26 @@ export interface BuildGazetteerOpts {
    * raw title match). Merged with DEFAULT_IGNORE_LIST.
    */
   extraIgnore?: string[];
+  /** Restrict pages and active-pack resolution to one source. */
+  sourceId?: string;
+  /**
+   * Preloaded active pack manifest. Omit to resolve the active pack from
+   * config; pass null to use the legacy no-pack fallback.
+   */
+  activePack?: EntityPack | null;
+}
+
+type EntityPageType = Pick<
+  SchemaPackManifest['page_types'][number],
+  'name' | 'primitive'
+> & Partial<Omit<
+  SchemaPackManifest['page_types'][number],
+  'name' | 'primitive'
+>>;
+
+interface EntityPack {
+  name?: string;
+  page_types: ReadonlyArray<EntityPageType>;
 }
 
 export interface FindMentionsOpts {
@@ -141,13 +164,64 @@ function tokenizeTitle(title: string): string[] {
   return tokens;
 }
 
+function aliasDisplayName(aliasSlug: string): string {
+  const tail = aliasSlug.split('/').pop() ?? aliasSlug;
+  return tail.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function frontmatterTitle(frontmatter: unknown): string | null {
+  if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
+  const value = (frontmatter as Record<string, unknown>).title;
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return null;
+}
+
+async function resolveActivePack(
+  engine: BrainEngine,
+  sourceId?: string,
+): Promise<EntityPack | null> {
+  try {
+    const [dbConfig, perSourceConfig] = await Promise.all([
+      engine.getConfig('schema_pack'),
+      sourceId
+        ? engine.getConfig(`schema_pack.source.${sourceId}`)
+        : Promise.resolve(null),
+    ]);
+    const pack = await loadActivePack({
+      cfg: loadConfig(),
+      remote: false,
+      sourceId,
+      dbConfig: dbConfig ?? undefined,
+      perSourceDb: sourceId && perSourceConfig
+        ? new Map([[sourceId, perSourceConfig]])
+        : undefined,
+    });
+    return pack.manifest;
+  } catch {
+    return null;
+  }
+}
+
+function entityTypesFromPack(
+  pack: EntityPack | null,
+): readonly string[] {
+  if (!pack) return LINKABLE_ENTITY_TYPES;
+  const declaredTypes = pack.page_types
+    .filter(pageType => pageType.primitive === 'entity')
+    .flatMap(pageType => [pageType.name, ...(pageType.aliases ?? [])]);
+  return pack.name === 'gbrain-base'
+    ? [...new Set([...declaredTypes, ...LINKABLE_ENTITY_TYPES])]
+    : declaredTypes;
+}
+
 /**
  * Build a token-Map gazetteer from all entity-typed pages in the brain.
  *
- * Hardcoded type filter per D2 (pack-awareness is TODO-1). Soft-deleted
- * pages excluded. Pages with too-short titles excluded (MIN_NAME_LENGTH).
- * Ignore-list applied per CK12: built-in ambiguous tokens dropped unless
- * the user has explicitly created the corresponding page.
+ * Entity types come from the active schema pack's `primitive: entity`
+ * declarations, falling back to LINKABLE_ENTITY_TYPES when no pack loads.
+ * Soft-deleted pages are excluded. Canonical titles, retained frontmatter
+ * titles, and slug-alias display forms all resolve to the canonical page.
  *
  * Returned gazetteer is keyed by lowercase first token; entries with the
  * same first token co-exist in the same bucket (e.g. "Acme" + "Acme Corp").
@@ -156,36 +230,99 @@ export async function buildGazetteer(
   engine: BrainEngine,
   opts: BuildGazetteerOpts = {},
 ): Promise<Gazetteer> {
-  const typeList = LINKABLE_ENTITY_TYPES.map(t => `'${t}'`).join(', ');
-  const rows = await engine.executeRaw<{ slug: string; source_id: string | null; title: string | null }>(
-    `SELECT slug, source_id, title
+  const activePack = opts.activePack === undefined
+    ? await resolveActivePack(engine, opts.sourceId)
+    : opts.activePack;
+  const entityTypes = entityTypesFromPack(activePack);
+  if (entityTypes.length === 0) return new Map();
+
+  const typePlaceholders = entityTypes.map((_, index) => `$${index + 1}`).join(', ');
+  const sourcePredicate = opts.sourceId
+    ? `AND source_id = $${entityTypes.length + 1}`
+    : '';
+  const queryParams = opts.sourceId
+    ? [...entityTypes, opts.sourceId]
+    : [...entityTypes];
+  const rows = await engine.executeRaw<{
+    slug: string;
+    source_id: string | null;
+    title: string | null;
+    frontmatter: unknown;
+  }>(
+    `SELECT slug, source_id, title, frontmatter
      FROM pages
-     WHERE type IN (${typeList})
+     WHERE type IN (${typePlaceholders})
+       ${sourcePredicate}
        AND deleted_at IS NULL`,
-    [],
+    queryParams,
   );
 
-  // Pre-build the existing-slug Set so the ignore-list rule can check
-  // "does this name already correspond to a real page?" in O(1).
-  const existingTitles = new Set<string>();
-  for (const r of rows) {
-    if (r.title) existingTitles.add(r.title);
+  let aliases: Array<{
+    source_id: string;
+    alias_slug: string;
+    canonical_slug: string;
+  }> = [];
+  try {
+    aliases = await engine.executeRaw(
+      `SELECT sa.source_id, sa.alias_slug, sa.canonical_slug
+         FROM slug_aliases sa
+         JOIN pages p
+           ON p.source_id = sa.source_id
+          AND p.slug = sa.canonical_slug
+        WHERE p.type IN (${typePlaceholders})
+          ${opts.sourceId ? `AND sa.source_id = $${entityTypes.length + 1}` : ''}
+          AND p.deleted_at IS NULL`,
+      queryParams,
+    );
+  } catch {
+    // Pre-v105 brains do not have slug_aliases; canonical titles still work.
   }
+
+  const candidates: Array<{ slug: string; source_id: string; title: string }> = [];
+  for (const r of rows) {
+    if (r.title) candidates.push({
+      slug: r.slug,
+      source_id: r.source_id ?? 'default',
+      title: r.title,
+    });
+    const alternateTitle = frontmatterTitle(r.frontmatter);
+    if (alternateTitle && alternateTitle !== r.title) candidates.push({
+      slug: r.slug,
+      source_id: r.source_id ?? 'default',
+      title: alternateTitle,
+    });
+  }
+  for (const alias of aliases) {
+    candidates.push({
+      slug: alias.canonical_slug,
+      source_id: alias.source_id,
+      title: aliasDisplayName(alias.alias_slug),
+    });
+  }
+
+  // A canonical title, retained frontmatter title, or slug alias is an
+  // explicit operator-created entity name, preserving CK12's rule that
+  // explicit gazetteer entries win over the built-in ambiguity list.
+  const existingTitles = new Set(candidates.map(candidate => candidate.title));
   const ignoreSet = new Set<string>([...DEFAULT_IGNORE_LIST, ...(opts.extraIgnore ?? [])]);
 
   const gazetteer: Gazetteer = new Map();
-  for (const row of rows) {
-    if (!row.title || row.title.length < MIN_NAME_LENGTH) continue;
-    if (ignoreSet.has(row.title) && !existingTitles.has(row.title)) continue;
+  const seenEntries = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate.title.length < MIN_NAME_LENGTH) continue;
+    if (ignoreSet.has(candidate.title) && !existingTitles.has(candidate.title)) continue;
 
-    const tokens = tokenizeTitle(row.title);
+    const tokens = tokenizeTitle(candidate.title);
     if (tokens.length === 0) continue;
     if (tokens[0]!.length < MIN_NAME_LENGTH && tokens.length === 1) continue;
 
+    const identity = `${candidate.source_id}\0${candidate.slug}\0${candidate.title}`;
+    if (seenEntries.has(identity)) continue;
+    seenEntries.add(identity);
     const entry: GazetteerEntry = {
-      slug: row.slug,
-      source_id: row.source_id ?? 'default',
-      title: row.title,
+      slug: candidate.slug,
+      source_id: candidate.source_id,
+      title: candidate.title,
       tokens,
     };
     const key = tokens[0]!;

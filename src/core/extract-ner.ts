@@ -31,8 +31,8 @@ export interface ExtractNerOpts {
   /** Only scan pages with updated_at after this ISO date. */
   since?: string;
   /**
-   * Pre-built gazetteer (T7+: combined `--by-mention --ner` walk shares
-   * one gazetteer across both passes). When omitted, this fn builds its own.
+   * Pre-built gazetteer for a source-scoped walk. When omitted, this function
+   * builds one gazetteer per source so schema-pack overrides stay isolated.
    */
   gazetteer?: Gazetteer;
   /** Optional progress hook called per processed page. */
@@ -102,32 +102,43 @@ export async function extractNerLinks(
   opts: ExtractNerOpts = {},
 ): Promise<ExtractNerResult> {
   const dryRun = opts.dryRun ?? false;
+  const allRefs = opts.sourceIdFilter
+    ? (await engine.listAllPageRefs()).filter((r) => r.source_id === opts.sourceIdFilter)
+    : await engine.listAllPageRefs();
+  const sourceIds = [...new Set(allRefs.map(ref => ref.source_id))];
 
-  // Pack best-effort: no pack → no inference → nothing to do.
-  const pack = await loadActivePackBestEffort({ engine } as never);
-  if (!pack || !pack.manifest?.link_types || pack.manifest.link_types.length === 0) {
-    return { pages: 0, created: 0, pack_unavailable: true };
-  }
-  // Require at least one link_type with an inference.regex; otherwise NER
-  // has no patterns to match and we'd waste a full walk.
-  const hasRegex = pack.manifest.link_types.some(
-    (lt) => lt.inference && typeof lt.inference === 'object' && 'regex' in lt.inference,
-  );
-  if (!hasRegex) return { pages: 0, created: 0, pack_unavailable: true };
+  // Resolve inference policy per source. An unscoped federated walk may mix
+  // sources whose packs define different entity types and link verbs.
+  const manifests = new Map<string, Parameters<typeof inferNerLinkType>[0]>();
+  await Promise.all(sourceIds.map(async sourceId => {
+    const pack = await loadActivePackBestEffort({
+      engine,
+      remote: false,
+      sourceId,
+    } as never);
+    const hasRegex = pack?.manifest.link_types.some(
+      lt => lt.inference && typeof lt.inference === 'object' && 'regex' in lt.inference,
+    );
+    if (pack && hasRegex) manifests.set(sourceId, pack.manifest);
+  }));
+  if (manifests.size === 0) return { pages: 0, created: 0, pack_unavailable: true };
 
-  const gazetteer = opts.gazetteer ?? await buildGazetteer(engine);
-  if (gazetteer.size === 0) {
+  const gazetteers = new Map<string, Gazetteer>();
+  await Promise.all(sourceIds.map(async sourceId => {
+    if (!manifests.has(sourceId)) return;
+    const gazetteer = opts.gazetteer && sourceId === opts.sourceIdFilter
+      ? opts.gazetteer
+      : await buildGazetteer(engine, { sourceId });
+    gazetteers.set(sourceId, gazetteer);
+  }));
+  if ([...gazetteers.values()].every(gazetteer => gazetteer.size === 0)) {
     return { pages: 0, created: 0, pack_unavailable: false };
   }
 
   // Pre-fetch target entity types so inferLinkType has the type signal
   // without an N+1 getPage round-trip. Pulls the slug→type map from
   // listAllPageRefs + a single listPages projection.
-  const targetTypeMap = await buildTargetTypeMap(engine);
-
-  const allRefs = opts.sourceIdFilter
-    ? (await engine.listAllPageRefs()).filter((r) => r.source_id === opts.sourceIdFilter)
-    : await engine.listAllPageRefs();
+  const targetTypeMap = await buildTargetTypeMap(engine, opts.sourceIdFilter);
 
   let processed = 0;
   let created = 0;
@@ -150,6 +161,9 @@ export async function extractNerLinks(
   }
 
   for (const { slug, source_id } of allRefs) {
+    const manifest = manifests.get(source_id);
+    const gazetteer = gazetteers.get(source_id);
+    if (!manifest || !gazetteer) continue;
     const page = await engine.getPage(slug, { sourceId: source_id });
     if (!page) continue;
     if (opts.typeFilter && page.type !== opts.typeFilter) continue;
@@ -172,7 +186,7 @@ export async function extractNerLinks(
     for (const m of mentions) {
       const targetType = targetTypeMap.get(`${m.source_id}::${m.slug}`);
       const context = getContextWindow(body, m.offset, m.name.length);
-      const verb = inferNerLinkType(pack.manifest, targetType, context);
+      const verb = inferNerLinkType(manifest, targetType, context);
       if (!verb) continue;
 
       batch.push({
@@ -198,13 +212,18 @@ export async function extractNerLinks(
  * One round-trip via listPages. Targets cached at extraction-start so
  * inferNerLinkType doesn't pay an N+1 cost per mention.
  */
-async function buildTargetTypeMap(engine: BrainEngine): Promise<Map<string, string>> {
+async function buildTargetTypeMap(
+  engine: BrainEngine,
+  sourceId?: string,
+): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
+    const sourcePredicate = sourceId ? 'AND source_id = $1' : '';
     const result = await engine.executeRaw<{ slug: string; source_id: string; type: string }>(
       `SELECT slug, source_id, type FROM pages
-         WHERE type IN ('person', 'company', 'organization', 'entity')
-           AND deleted_at IS NULL`,
+         WHERE deleted_at IS NULL
+           ${sourcePredicate}`,
+      sourceId ? [sourceId] : [],
     );
     for (const row of result) {
       map.set(`${row.source_id}::${row.slug}`, row.type);
