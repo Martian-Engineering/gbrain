@@ -36,18 +36,30 @@
  * phase can run hermetically in unit tests without touching the gateway.
  */
 
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
-import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
-import { writeReceipt } from '../extract/receipt-writer.ts';
-import { upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { chat as gatewayChat } from '../ai/gateway.ts';
 import { GBrainError } from '../types.ts';
-import type { OperationContext } from '../operations.ts';
+import { sourceScopeOpts, type OperationContext } from '../operations.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseStatus, CyclePhase } from '../cycle.ts';
 import { loadActivePackBestEffort } from '../schema-pack/best-effort.ts';
 import { extractableTypesFromPack } from '../schema-pack/extractable.ts';
 import { buildTakeMiningInput } from './take-mining-input.ts';
+import {
+  createTakeMiningRunner,
+  takeMiningWorkBatchSize,
+  type TakeMiningRunnerOptions,
+  type TakeMiningRunnerWork,
+} from './take-mining-runner.ts';
+
+export {
+  TakeMiningRunnerError,
+  TAKE_MINING_LOCK_NAME,
+  type TakeMiningRunResult,
+  type TakeMiningRunnerOptions,
+  type TakeMiningStopReason,
+} from './take-mining-runner.ts';
 
 /**
  * Bump when the extractor prompt or the JSON output shape changes. Old
@@ -154,6 +166,8 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   _workBatchSize?: number;
   /** Test seam for synchronizing workers immediately before atomic claim. */
   _beforeClaim?: (pageSlug: string) => Promise<void>;
+  /** Test seam for model-price coverage. */
+  _estimatedPageSpendUsd?: number | null;
 }
 
 export interface ProposeTakesResult {
@@ -325,9 +339,10 @@ interface TakeMiningWorkCursor {
   page_slug: string;
 }
 
-const DEFAULT_CLAIM_LEASE_SECONDS = 10 * 60;
-const MIN_WORK_BATCH_SIZE = 25;
-const MAX_WORK_BATCH_SIZE = 250;
+interface TakeMiningSelector {
+  admission: 'immediate' | 'deferred';
+  batchId?: string;
+}
 
 function sourcePredicate(scope: ScopedReadOpts, params: unknown[]): string {
   if (scope.sourceIds && scope.sourceIds.length > 0) {
@@ -355,6 +370,7 @@ async function loadEligibleWorkBatch(
   scope: ScopedReadOpts,
   extractableTypes: ReadonlySet<string>,
   promptVersion: string,
+  selector: TakeMiningSelector,
   cursor: TakeMiningWorkCursor | undefined,
   batchSize: number,
 ): Promise<TakeMiningWorkRow[]> {
@@ -367,6 +383,13 @@ async function loadEligibleWorkBatch(
   });
   params.push(promptVersion);
   const promptParam = `$${params.length}`;
+  params.push(selector.admission);
+  const admissionParam = `$${params.length}`;
+  let batchPredicate = '';
+  if (selector.admission === 'deferred') {
+    params.push(selector.batchId);
+    batchPredicate = `AND w.batch_id = $${params.length}`;
+  }
   let cursorPredicate = '';
   if (cursor) {
     params.push(cursor.priority);
@@ -408,7 +431,8 @@ async function loadEligibleWorkBatch(
          ON p.source_id = w.source_id
         AND p.slug = w.page_slug
       WHERE ${scoped}
-        AND w.admission = 'immediate'
+        AND w.admission = ${admissionParam}
+        ${batchPredicate}
         AND p.deleted_at IS NULL
         AND p.page_kind = 'markdown'
         AND p.type IN (${typePlaceholders.join(', ')})
@@ -438,6 +462,7 @@ async function loadCandidateWork(
   scope: ScopedReadOpts,
   extractableTypes: ReadonlySet<string>,
   promptVersion: string,
+  selector: TakeMiningSelector,
   pageLimit: number,
   batchSize: number,
   skipPagesWithFence: boolean,
@@ -465,6 +490,7 @@ async function loadCandidateWork(
       scope,
       extractableTypes,
       promptVersion,
+      selector,
       cursor,
       batchSize,
     );
@@ -498,7 +524,7 @@ async function loadCandidateWork(
 
 async function claimScan(
   engine: BrainEngine,
-  work: TakeMiningWorkRow,
+  work: TakeMiningRunnerWork,
   promptVersion: string,
   attemptId: string,
   proposalRunId: string,
@@ -539,7 +565,7 @@ async function claimScan(
 
 async function releaseClaim(
   engine: BrainEngine,
-  work: TakeMiningWorkRow,
+  work: TakeMiningRunnerWork,
   promptVersion: string,
   attemptId: string,
 ): Promise<void> {
@@ -556,6 +582,216 @@ async function releaseClaim(
 }
 
 class ScanOwnershipLostError extends Error {}
+
+function workPredicate(
+  scope: ScopedReadOpts,
+  selector: TakeMiningSelector,
+  params: unknown[],
+): string {
+  const scoped = sourcePredicate(scope, params);
+  params.push(selector.admission);
+  let predicate = `${scoped} AND w.admission = $${params.length}`;
+  if (selector.admission === 'deferred') {
+    params.push(selector.batchId);
+    predicate += ` AND w.batch_id = $${params.length}`;
+  }
+  return predicate;
+}
+
+async function countRemainingWork(
+  engine: BrainEngine,
+  scope: ScopedReadOpts,
+  selector: TakeMiningSelector,
+): Promise<number> {
+  const params: unknown[] = [];
+  const predicate = workPredicate(scope, selector, params);
+  const [row] = await engine.executeRaw<{ count: number }>(
+    `SELECT COUNT(*)::int AS count
+       FROM take_mining_work w
+      WHERE ${predicate}`,
+    params,
+  );
+  return row?.count ?? 0;
+}
+
+async function persistExtractedProposals(
+  engine: BrainEngine,
+  work: TakeMiningRunnerWork,
+  promptVersion: string,
+  attemptId: string,
+  proposalRunId: string,
+  modelId: string,
+  proposals: ProposedTake[],
+  existingTakes: ReturnType<typeof extractExistingTakesForDedup>,
+): Promise<number> {
+  return engine.transaction(async tx => {
+    const inserted = await insertProposals(
+      tx,
+      work,
+      promptVersion,
+      proposalRunId,
+      modelId,
+      proposals,
+      existingTakes,
+    );
+    await completeOwnedScan(tx, work, promptVersion, attemptId, proposals.length);
+    await deleteMatchingWork(tx, work);
+    return inserted;
+  });
+}
+
+/** Insert proposal rows while preserving per-claim idempotency. */
+async function insertProposals(
+  engine: BrainEngine,
+  work: TakeMiningRunnerWork,
+  promptVersion: string,
+  proposalRunId: string,
+  modelId: string,
+  proposals: ProposedTake[],
+  existingTakes: ReturnType<typeof extractExistingTakesForDedup>,
+): Promise<number> {
+  let insertedCount = 0;
+  for (const proposal of proposals) {
+    const inserted = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id, page_slug, content_hash, prompt_version, proposal_run_id,
+          claim_text, kind, holder, weight, domain, dedup_against_fence_rows,
+          model_id, claim_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (
+         source_id, page_slug, content_hash, prompt_version, claim_hash
+       ) DO NOTHING
+       RETURNING id`,
+      [
+        work.source_id,
+        work.page_slug,
+        work.mining_input_hash,
+        promptVersion,
+        proposalRunId,
+        proposal.claim_text,
+        proposal.kind,
+        proposal.holder,
+        proposal.weight,
+        proposal.domain ?? null,
+        JSON.stringify(existingTakes),
+        modelId,
+        claimHash(proposal.claim_text),
+      ],
+    );
+    insertedCount += inserted.length;
+  }
+  return insertedCount;
+}
+
+/** Complete only the scan lease still owned by this attempt. */
+async function completeOwnedScan(
+  engine: BrainEngine,
+  work: TakeMiningRunnerWork,
+  promptVersion: string,
+  attemptId: string,
+  proposalCount: number,
+): Promise<void> {
+  const completed = await engine.executeRaw<{ attempt_id: string }>(
+    `UPDATE take_proposal_scans
+        SET status = 'succeeded',
+            lease_expires_at = NULL,
+            proposal_count = $6,
+            completed_at = now(),
+            updated_at = now()
+      WHERE source_id = $1
+        AND page_slug = $2
+        AND mining_input_hash = $3
+        AND prompt_version = $4
+        AND status = 'in_progress'
+        AND attempt_id = $5
+      RETURNING attempt_id`,
+    [
+      work.source_id,
+      work.page_slug,
+      work.mining_input_hash,
+      promptVersion,
+      attemptId,
+      proposalCount,
+    ],
+  );
+  if (completed.length !== 1) throw new ScanOwnershipLostError();
+}
+
+/** Delete only the semantic revision that the completed scan consumed. */
+async function deleteMatchingWork(
+  engine: BrainEngine,
+  work: TakeMiningRunnerWork,
+): Promise<void> {
+  await engine.executeRaw(
+    `DELETE FROM take_mining_work
+      WHERE source_id = $1
+        AND page_slug = $2
+        AND mining_input_hash = $3`,
+    [work.source_id, work.page_slug, work.mining_input_hash],
+  );
+}
+
+function runnerScope(
+  ctx: OperationContext,
+  opts: TakeMiningRunnerOptions,
+): ScopedReadOpts {
+  return opts.admission === 'deferred'
+    ? { sourceId: opts.sourceId }
+    : sourceScopeOpts(ctx);
+}
+
+function runnerSelector(opts: TakeMiningRunnerOptions): TakeMiningSelector {
+  return {
+    admission: opts.admission,
+    ...(opts.admission === 'deferred' ? { batchId: opts.batchId } : {}),
+  };
+}
+
+async function selectRunnerWork(
+  ctx: OperationContext,
+  opts: TakeMiningRunnerOptions,
+) {
+  const extractableTypes = await resolveExtractableTypes(ctx, {
+    _extractableTypes: opts._extractableTypes,
+  });
+  if (!extractableTypes) return null;
+  return loadCandidateWork(
+    ctx.engine,
+    runnerScope(ctx, opts),
+    extractableTypes,
+    opts.promptVersion,
+    runnerSelector(opts),
+    opts.pageCap,
+    takeMiningWorkBatchSize(opts.pageCap, opts._workBatchSize),
+    opts.skipPagesWithFence ?? false,
+  );
+}
+
+async function countRunnerWork(
+  ctx: OperationContext,
+  opts: TakeMiningRunnerOptions,
+): Promise<number> {
+  return countRemainingWork(
+    ctx.engine,
+    runnerScope(ctx, opts),
+    runnerSelector(opts),
+  );
+}
+
+/**
+ * Process immediate or exact deferred work with shared pacing and persistence.
+ */
+export const runTakeMiningWork = createTakeMiningRunner({
+  promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+  defaultExtractor,
+  select: selectRunnerWork,
+  countRemaining: countRunnerWork,
+  claim: claimScan,
+  release: releaseClaim,
+  existingTakes: extractExistingTakesForDedup,
+  persist: persistExtractedProposals,
+  isOwnershipLost: error => error instanceof ScanOwnershipLostError,
+});
 
 /**
  * BaseCyclePhase subclass. Claims admitted semantic work and writes proposals.
@@ -575,267 +811,35 @@ class ProposeTakesPhase extends BaseCyclePhase {
   }
 
   protected async process(
-    engine: BrainEngine,
-    scope: ScopedReadOpts,
+    _engine: BrainEngine,
+    _scope: ScopedReadOpts,
     ctx: OperationContext,
     opts: ProposeTakesOpts,
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
-    const extractor = opts.extractor ?? defaultExtractor;
-    const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
-    const pageLimit = Math.max(0, Math.floor(opts.pageLimit ?? 100));
-    const skipPagesWithFence = opts.skipPagesWithFence ?? false;
-    const leaseSeconds = opts._leaseSeconds ?? DEFAULT_CLAIM_LEASE_SECONDS;
-    const workBatchSize = Math.max(
-      1,
-      Math.floor(opts._workBatchSize ?? Math.max(
-        MIN_WORK_BATCH_SIZE,
-        Math.min(pageLimit * 2, MAX_WORK_BATCH_SIZE),
-      )),
-    );
-    const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
-
-    const result: ProposeTakesResult = {
-      eligible_pages: 0,
-      pages_scanned: 0,
-      cache_hits: 0,
-      cache_misses: 0,
-      proposals_extracted: 0,
-      proposals_inserted: 0,
-      budget_exhausted: false,
-      warnings: [],
-    };
-
-    const extractableTypes = await resolveExtractableTypes(ctx, opts);
-    if (!extractableTypes) {
-      result.warnings.push(
-        'active schema pack could not be resolved; take mining skipped safely',
-      );
-      return {
-        summary: 'propose_takes: skipped because active schema pack is unavailable',
-        details: { ...result, prompt_version: promptVersion },
-        status: 'warn',
-      };
-    }
-
-    // SQL removes ineligible and successfully scanned work. Bounded keyset
-    // pagination continues past stale or canonically empty rows so they do not
-    // consume the operator-facing page limit.
-    const selection = await loadCandidateWork(
-      engine,
-      scope,
-      extractableTypes,
-      promptVersion,
-      pageLimit,
-      workBatchSize,
-      skipPagesWithFence,
-    );
-    if (selection.staleCount > 0) {
-      result.warnings.push(
-        `${selection.staleCount} take-mining work item${selection.staleCount === 1 ? '' : 's'} had stale semantic hashes and ${selection.staleCount === 1 ? 'was' : 'were'} preserved`,
-      );
-    }
-    if (selection.emptyCount > 0) {
-      result.warnings.push(
-        `${selection.emptyCount} take-mining work item${selection.emptyCount === 1 ? '' : 's'} had no canonical prose and ${selection.emptyCount === 1 ? 'was' : 'were'} preserved`,
-      );
-    }
-    const candidates = selection.candidates;
-    result.eligible_pages = candidates.length;
-    if (opts.reporter) {
-      opts.reporter.start('propose_takes.pages' as never, candidates.length);
-    }
-
-    const modelId = opts.model ?? getChatModel();
-
-    for (const { work, input } of candidates) {
-      this.tick(opts);
-
-      // Dry-run performs only eligibility reads: no claim or downstream write.
-      if (opts.dryRun) continue;
-
-      const budget = this.checkBudget({
-        modelId,
-        estimatedInputTokens: 1500,
-        maxOutputTokens: 500,
-      });
-      if (!budget.allowed) {
-        result.budget_exhausted = true;
-        result.warnings.push(
-          `budget exhausted before ${work.page_slug} (cumulative $${budget.cumulativeCostUsd.toFixed(4)} / cap $${budget.budgetUsd.toFixed(2)})`,
-        );
-        break;
-      }
-
-      await opts._beforeClaim?.(work.page_slug);
-      const attemptId = randomUUID();
-      const claimed = await claimScan(
-        engine,
-        work,
-        promptVersion,
-        attemptId,
-        proposalRunId,
-        modelId,
-        leaseSeconds,
-      );
-      if (!claimed) {
-        result.cache_hits += 1;
-        continue;
-      }
-      result.pages_scanned += 1;
-      result.cache_misses += 1;
-
-      const existingTakes = extractExistingTakesForDedup(work.compiled_truth);
-      let proposals: ProposedTake[];
-      try {
-        proposals = await extractor({
-          pagePath: work.page_slug,
-          pageBody: input.prose,
-          existingTakes,
-          modelHint: opts.model,
-        });
-      } catch (err) {
-        await releaseClaim(engine, work, promptVersion, attemptId);
-        const msg = err instanceof Error ? err.message : String(err);
-        result.warnings.push(`extractor failed on ${work.page_slug}: ${msg}`);
-        continue;
-      }
-      result.proposals_extracted += proposals.length;
-
-      try {
-        const insertedCount = await engine.transaction(async tx => {
-          let insertedCount = 0;
-          for (const proposal of proposals) {
-            const inserted = await tx.executeRaw<{ id: number }>(
-              `INSERT INTO take_proposals
-                 (source_id, page_slug, content_hash, prompt_version, proposal_run_id,
-                  claim_text, kind, holder, weight, domain, dedup_against_fence_rows,
-                  model_id, claim_hash)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-               ON CONFLICT (
-                 source_id, page_slug, content_hash, prompt_version, claim_hash
-               ) DO NOTHING
-               RETURNING id`,
-              [
-                work.source_id,
-                work.page_slug,
-                work.mining_input_hash,
-                promptVersion,
-                proposalRunId,
-                proposal.claim_text,
-                proposal.kind,
-                proposal.holder,
-                proposal.weight,
-                proposal.domain ?? null,
-                JSON.stringify(existingTakes),
-                modelId,
-                claimHash(proposal.claim_text),
-              ],
-            );
-            insertedCount += inserted.length;
-          }
-
-          const completed = await tx.executeRaw<{ attempt_id: string }>(
-            `UPDATE take_proposal_scans
-                SET status = 'succeeded',
-                    lease_expires_at = NULL,
-                    proposal_count = $6,
-                    completed_at = now(),
-                    updated_at = now()
-              WHERE source_id = $1
-                AND page_slug = $2
-                AND mining_input_hash = $3
-                AND prompt_version = $4
-                AND status = 'in_progress'
-                AND attempt_id = $5
-              RETURNING attempt_id`,
-            [
-              work.source_id,
-              work.page_slug,
-              work.mining_input_hash,
-              promptVersion,
-              attemptId,
-              proposals.length,
-            ],
-          );
-          if (completed.length !== 1) throw new ScanOwnershipLostError();
-
-          // Hash predicate preserves a newer work revision admitted while the
-          // extractor was running.
-          await tx.executeRaw(
-            `DELETE FROM take_mining_work
-              WHERE source_id = $1
-                AND page_slug = $2
-                AND mining_input_hash = $3`,
-            [work.source_id, work.page_slug, work.mining_input_hash],
-          );
-          return insertedCount;
-        });
-        result.proposals_inserted += insertedCount;
-      } catch (err) {
-        if (err instanceof ScanOwnershipLostError) {
-          result.warnings.push(`scan ownership lost for ${work.page_slug}`);
-          continue;
-        }
-        await releaseClaim(engine, work, promptVersion, attemptId);
-        throw err;
-      }
-    }
-
-    if (opts.reporter) opts.reporter.finish();
-
-    if (opts.dryRun) {
-      return {
-        summary:
-          `(dry-run) would scan ${result.eligible_pages} eligible ` +
-          `page${result.eligible_pages === 1 ? '' : 's'}`,
-        details: {
-          ...result,
-          dry_run: true,
-          prompt_version: promptVersion,
-          work_batches_read: selection.batchesRead,
-        },
-        status: 'ok',
-      };
-    }
-
-    // v0.42 Wave B3: receipt + rollup for propose_takes. Source-scoped
-    // via the read scope. Receipt only when proposals actually written.
-    const sourceIdForReceipt = scope.sourceId ?? 'default';
-    if (result.proposals_inserted > 0) {
-      try {
-        await writeReceipt(engine, {
-          kind: 'takes.proposed',
-          source_id: sourceIdForReceipt,
-          run_id: proposalRunId,
-          round: 'single',
-          extracted_at: new Date().toISOString(),
-          total_rows: result.proposals_inserted,
-          cost_usd: 0, // tracker isn't exposed at this layer; cost tracked centrally
-          summary:
-            `Extracted ${result.proposals_extracted} takes and created ` +
-            `${result.proposals_inserted} proposals from ${result.pages_scanned} pages ` +
-            `(${result.cache_hits} cached).`,
-        });
-      } catch (err) {
-        console.error(`[propose_takes] receipt write failed: ${(err as Error).message}`);
-      }
-    }
-    await upsertExtractRollup(engine, {
-      kind: 'takes.proposed',
-      source_id: sourceIdForReceipt,
-      round_completed_delta: result.budget_exhausted ? 0 : 1,
-      halt_delta: result.budget_exhausted ? 1 : 0,
+    const result = await runTakeMiningWork(ctx, {
+      admission: 'immediate',
+      promptVersion: opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: Math.max(0, Math.floor(opts.pageLimit ?? 100)),
+      model: opts.model,
+      extractor: opts.extractor,
+      dryRun: opts.dryRun,
+      skipPagesWithFence: opts.skipPagesWithFence,
+      reporter: opts.reporter,
+      _extractableTypes: opts._extractableTypes,
+      _leaseSeconds: opts._leaseSeconds,
+      _workBatchSize: opts._workBatchSize,
+      _beforeClaim: opts._beforeClaim,
+      _estimatedPageSpendUsd: opts._estimatedPageSpendUsd,
+      _checkRunBudget: estimate => this.checkBudget(estimate),
     });
 
+    const summary = result.dry_run
+      ? `(dry-run) would scan ${result.eligible_pages} eligible page${result.eligible_pages === 1 ? '' : 's'}`
+      : `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_extracted} extracted, ${result.proposals_inserted} new proposals (run ${result.proposal_run_id})`;
     return {
-      summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_extracted} extracted, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
-      details: {
-        ...result,
-        proposal_run_id: proposalRunId,
-        prompt_version: promptVersion,
-        work_batches_read: selection.batchesRead,
-      },
-      status: result.budget_exhausted ? 'warn' : 'ok',
+      summary,
+      details: { ...result },
+      status: result.stopped ? 'warn' : 'ok',
     };
   }
 }

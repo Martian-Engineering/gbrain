@@ -173,6 +173,8 @@ describe('propose_takes explicit work queue', () => {
     });
 
     expect(paths).toEqual(['writing/eligible-first']);
+    expect(result.status).toBe('ok');
+    expect(result.details.stopped).toBe(false);
     expect(result.details.pages_scanned).toBe(1);
     expect(await count('take_mining_work')).toBe(4);
   });
@@ -550,6 +552,7 @@ describe('propose_takes explicit work queue', () => {
 
     await runPhaseProposeTakes(ctx(), {
       _extractableTypes: NOTE_TYPES,
+      _estimatedPageSpendUsd: 0.001,
       extractor: async () => [{
         claim_text: 'Configured model claim',
         kind: 'take',
@@ -579,6 +582,7 @@ describe('propose_takes explicit work queue', () => {
 
     const result = await runPhaseProposeTakes(ctx(), {
       _extractableTypes: NOTE_TYPES,
+      _estimatedPageSpendUsd: 0.001,
       meter,
       extractor: async () => [{
         claim_text: 'Nested provider model claim',
