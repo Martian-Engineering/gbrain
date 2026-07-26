@@ -1566,6 +1566,7 @@ const rename_page: Operation = {
           sourceId,
           renamed.alias.old_source_path,
           oldSlug,
+          writeThrough.path,
         )
         : { file_removed: false };
       const cache = await invalidateQueryCache(ctx.engine, sourceId);

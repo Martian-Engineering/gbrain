@@ -6,6 +6,16 @@ import {
   expect,
   test,
 } from 'bun:test';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { OperationContext } from '../src/core/operations.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -27,18 +37,24 @@ beforeEach(async () => {
   await resetPgliteState(engine);
 });
 
-function page(title: string) {
+function page(title: string, sourcePath: string | null = null) {
   return {
     type: 'person',
     title,
     compiled_truth: `${title} is an engineer.`,
     timeline: '',
     frontmatter: { title },
+    source_path: sourcePath,
   };
 }
 
-async function seedPage(slug: string, title: string, sourceId = 'default') {
-  await engine.putPage(slug, page(title), { sourceId });
+async function seedPage(
+  slug: string,
+  title: string,
+  sourceId = 'default',
+  sourcePath: string | null = null,
+) {
+  await engine.putPage(slug, page(title, sourcePath), { sourceId });
 }
 
 function ctx(
@@ -152,6 +168,50 @@ describe('rename_page operation', () => {
       old_slug: 'people/rowan-old',
       new_slug: 'people/rowan-north',
     });
+  });
+
+  test('keeps the destination when the origin source path is the rename target', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-rename-same-path-'));
+    const destinationFile = join(repo, 'people', 'rowan-north.md');
+    try {
+      await engine.executeRaw(
+        `UPDATE sources SET local_path = $1 WHERE id = 'default'`,
+        [repo],
+      );
+      await seedPage(
+        'people/rowan-old',
+        'Rowan Old',
+        'default',
+        'people/rowan-north.md',
+      );
+      mkdirSync(join(repo, 'people'), { recursive: true });
+      writeFileSync(destinationFile, '# Rowan Old\n');
+      const sourceAdmin = {
+        token: 'token',
+        clientId: 'source-admin',
+        scopes: ['read', 'write', 'source_admin'],
+        sourceId: 'default',
+      };
+
+      const result = await operationsByName.rename_page.handler(
+        ctx('default', sourceAdmin),
+        {
+          old_slug: 'people/rowan-old',
+          new_slug: 'people/rowan-north',
+          content: renamedContent,
+          remove_file: true,
+        },
+      );
+
+      expect(result).toMatchObject({
+        status: 'renamed',
+        file_removed: false,
+      });
+      expect(existsSync(destinationFile)).toBe(true);
+      expect(readFileSync(destinationFile, 'utf8')).toContain('Rowan North');
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 
   test('preserves the origin suppression fence on the destination', async () => {

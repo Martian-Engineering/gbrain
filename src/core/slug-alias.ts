@@ -355,13 +355,15 @@ async function resolveMergedPageFile(
 /**
  * Remove one source-owned file after the alias transaction has committed.
  * File handling is fail-soft and path-confined; a Git durability commit is
- * best-effort and never changes the removal result.
+ * best-effort and never changes the removal result. A caller may protect the
+ * destination path when a rename reuses the origin's recorded file.
  */
 export async function removeSyncedSourceFile(
   engine: BrainEngine,
   sourceId: string,
   sourcePath: string | null,
   aliasSlug: string,
+  preservePath?: string,
 ): Promise<RemoveSyncedSourceFileResult> {
   try {
     const resolved = await resolveMergedPageFile(
@@ -375,6 +377,9 @@ export async function removeSyncedSourceFile(
         file_removed: false,
         file_remove_error: resolved.error,
       };
+    }
+    if (preservePath && resolve(preservePath) === resolved.file) {
+      return { file_removed: false };
     }
 
     unlinkSync(resolved.file);
