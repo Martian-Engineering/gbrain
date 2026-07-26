@@ -4510,6 +4510,12 @@ const run_take_mining_batch: Operation = {
   mutating: true,
   localOnly: false,
   handler: async (ctx, p) => {
+    if (ctx.remote !== false && !hasScope(ctx.auth?.scopes ?? [], 'admin')) {
+      throw new OperationError(
+        'permission_denied',
+        'run_take_mining_batch requires an authenticated caller with the `admin` scope.',
+      );
+    }
     const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
     const sourceCtx = { ...ctx, sourceId };
     const batchId = takeMiningId(p.batch_id, 'batch_id');

@@ -20,6 +20,7 @@ import {
 } from '../src/core/operations.ts';
 import { PROTECTED_JOB_NAMES } from '../src/core/minions/protected-names.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 describe('take-mining operation contracts', () => {
@@ -241,6 +242,65 @@ describe('take-mining operation behavior', () => {
       name: 'take-mining-drain',
       data: {},
     })).rejects.toMatchObject({ code: 'permission_denied' });
+  });
+
+  test('legacy MCP dispatch denies a caller without admin scope', async () => {
+    const result = await dispatchToolCall(engine, 'run_take_mining_batch', {
+      source_id: 'default',
+      batch_id: 'history',
+      request_id: 'legacy-reader',
+      page_cap: 10,
+      proposal_cap: 20,
+      max_estimated_spend_usd: 1,
+    }, {
+      remote: true,
+      sourceId: 'default',
+      auth: {
+        token: 'legacy-token',
+        clientId: 'legacy-reader',
+        scopes: [],
+        sourceId: 'default',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      error: 'permission_denied',
+    });
+    expect(await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM minion_jobs`,
+    )).toEqual([{ count: 0 }]);
+  });
+
+  test('MCP dispatch allows an admin caller to submit the protected batch', async () => {
+    const result = await dispatchToolCall(engine, 'run_take_mining_batch', {
+      source_id: 'default',
+      batch_id: 'history',
+      request_id: 'admin-request',
+      page_cap: 10,
+      proposal_cap: 20,
+      max_estimated_spend_usd: 1,
+    }, {
+      remote: true,
+      sourceId: 'default',
+      auth: {
+        token: 'admin-token',
+        clientId: 'admin-client',
+        scopes: ['admin'],
+        sourceId: 'default',
+      },
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      submitted: true,
+      source_id: 'default',
+      batch_id: 'history',
+      request_id: 'admin-request',
+    });
+    expect(await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM minion_jobs`,
+    )).toEqual([{ count: 1 }]);
   });
 
   test('submits one protected pinned job per request id and reports it', async () => {
