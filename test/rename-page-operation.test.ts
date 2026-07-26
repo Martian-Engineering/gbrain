@@ -126,6 +126,27 @@ describe('rename_page operation', () => {
       .toBe('people/rowan-north');
   });
 
+  test('rejects a destination slug that is already an alias', async () => {
+    await seedPage('people/rowan-old', 'Rowan Old');
+    await seedPage('people/existing-person', 'Existing Person');
+    await operationsByName.add_slug_alias.handler(ctx(), {
+      alias_slug: 'people/rowan-north',
+      canonical_slug: 'people/existing-person',
+    });
+
+    await expect(operationsByName.rename_page.handler(ctx(), {
+      old_slug: 'people/rowan-old',
+      new_slug: 'people/rowan-north',
+      content: renamedContent,
+    })).rejects.toMatchObject({ code: 'destination_exists' });
+    expect(await engine.getPage('people/rowan-old', { sourceId: 'default' }))
+      .not.toBeNull();
+    expect(await engine.getPage('people/rowan-north', { sourceId: 'default' }))
+      .toBeNull();
+    expect(await engine.resolveSlugWithAlias('people/rowan-north', 'default'))
+      .toBe('people/existing-person');
+  });
+
   test('rejects file removal from a source-bound write-only client', async () => {
     await seedPage('people/rowan-old', 'Rowan Old');
     const writeAuth = {

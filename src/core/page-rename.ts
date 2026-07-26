@@ -75,10 +75,16 @@ export async function renamePage(
       sourceId: opts.sourceId,
       includeDeleted: true,
     });
-    if (destination) {
+    const destinationAliases = await tx.executeRaw<{ canonical_slug: string }>(
+      `SELECT canonical_slug FROM slug_aliases
+        WHERE source_id = $1 AND alias_slug = $2
+        LIMIT 1`,
+      [opts.sourceId, opts.newSlug],
+    );
+    if (destination || destinationAliases.length > 0) {
       throw new PageRenameError(
         'destination_exists',
-        `Page '${opts.newSlug}' already exists in source '${opts.sourceId}'.`,
+        `Page or alias '${opts.newSlug}' already exists in source '${opts.sourceId}'.`,
       );
     }
 
