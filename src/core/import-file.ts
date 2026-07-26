@@ -2,7 +2,11 @@ import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname } from 'path';
 import { createHash } from 'crypto';
 import { marked } from 'marked';
-import type { BrainEngine, FileSpec } from './engine.ts';
+import type {
+  BrainEngine,
+  FileSpec,
+  PageWriteContext,
+} from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
@@ -235,6 +239,8 @@ export async function importFromContent(
   opts: {
     noEmbed?: boolean;
     sourceId?: string;
+    /** Server-owned attribution forwarded atomically with the page mutation. */
+    writeContext?: PageWriteContext;
     /**
      * v0.29.1: basename without extension for filename-date precedence on
      * `daily/`, `meetings/` slugs. importFromFile threads this from the
@@ -750,7 +756,10 @@ export async function importFromContent(
   // caller's sourceId so writes target (sourceId, slug) rather than the
   // schema DEFAULT — required for multi-source brains; harmless ('default')
   // for single-source callers.
-  const txOpts = sourceId ? { sourceId } : undefined;
+  const txOpts = {
+    ...(sourceId ? { sourceId } : {}),
+    ...(opts.writeContext ? { writeContext: opts.writeContext } : {}),
+  };
   const persistImport = async (tx: BrainEngine): Promise<void> => {
     if (existing) await tx.createVersion(slug, txOpts);
 
@@ -939,6 +948,8 @@ export async function importFromFile(
     inferFrontmatter?: boolean;
     sourceId?: string;
     forceRechunk?: boolean;
+    /** Trusted attribution for this file import. Defaults conservatively to backfill. */
+    writeContext?: PageWriteContext;
     /**
      * v0.39 T1.5: active schema pack threaded through to importFromContent so
      * `parseMarkdown` uses pack-driven type inference. Load ONCE per command;
@@ -947,6 +958,10 @@ export async function importFromFile(
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
   } = {},
 ): Promise<ImportResult> {
+  const writeContext = opts.writeContext ?? {
+    actor: 'import:file',
+    writeIntent: 'backfill',
+  };
   // Defense-in-depth: reject symlinks before reading content.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {
@@ -965,6 +980,7 @@ export async function importFromFile(
     return importCodeFile(engine, relativePath, content, {
       noEmbed: opts.noEmbed,
       sourceId: opts.sourceId,
+      writeContext,
     });
   }
 
@@ -1042,6 +1058,7 @@ export async function importFromFile(
   const fileBasename = basename(relativePath, '.md');
   return importFromContent(engine, resolvedSlug, content, {
     ...opts,
+    writeContext,
     filename: fileBasename,
     sourcePath: relativePath,
   });
@@ -1073,13 +1090,21 @@ export async function importCodeFile(
   engine: BrainEngine,
   relativePath: string,
   content: string,
-  opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
+  opts: {
+    noEmbed?: boolean;
+    force?: boolean;
+    sourceId?: string;
+    writeContext?: PageWriteContext;
+  } = {},
 ): Promise<ImportResult> {
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
   const title = `${relativePath} (${lang})`;
   const sourceId = opts.sourceId;
-  const txOpts = sourceId ? { sourceId } : undefined;
+  const txOpts = {
+    ...(sourceId ? { sourceId } : {}),
+    ...(opts.writeContext ? { writeContext: opts.writeContext } : {}),
+  };
 
   const byteLength = Buffer.byteLength(content, 'utf-8');
   if (byteLength > MAX_FILE_SIZE) {
@@ -1333,6 +1358,8 @@ export interface ImportTransactionSpec {
   hadExisting: boolean;
   /** Source containing the page, chunks, file row, and type-specific writes. */
   sourceId?: string;
+  /** Trusted attribution applied to the page mutation inside this transaction. */
+  writeContext?: PageWriteContext;
   page: PageInput;
   /** When undefined, no chunk write happens. When [], deletes any prior chunks. */
   chunks?: ChunkInput[];
@@ -1347,7 +1374,10 @@ export async function withImportTransaction(
   spec: ImportTransactionSpec,
 ): Promise<void> {
   const sourceId = spec.sourceId ?? 'default';
-  const txOpts = spec.sourceId ? { sourceId: spec.sourceId } : undefined;
+  const txOpts = {
+    ...(spec.sourceId ? { sourceId: spec.sourceId } : {}),
+    ...(spec.writeContext ? { writeContext: spec.writeContext } : {}),
+  };
   await engine.transaction(async (tx) => {
     if (spec.hadExisting) await tx.createVersion(spec.slug, txOpts);
     await tx.putPage(spec.slug, spec.page, txOpts);
@@ -1557,6 +1587,8 @@ export interface ImportImageOptions {
    * with sourceId would TS-error on the importImageFile branch.
    */
   sourceId?: string;
+  /** Trusted attribution forwarded to the image page mutation. */
+  writeContext?: PageWriteContext;
 }
 
 /** Module-level limiter so concurrent imports across files share the budget. */
@@ -1679,6 +1711,7 @@ export async function importImageFile(
     slug: imageSlug,
     hadExisting: !!existing,
     sourceId: opts.sourceId,
+    writeContext: opts.writeContext,
     page: {
       type: 'image',
       page_kind: 'image',

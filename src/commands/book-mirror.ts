@@ -522,6 +522,10 @@ export async function runBookMirrorCmd(engine: BrainEngine, args: string[]): Pro
       remote: false,             // local CLI caller — operator trust path
       cliOpts: getCliOptions(),
       sourceId: 'default',       // v0.34 D4: required field; book-mirror is single-source by design
+      writeContext: {
+        actor: 'cli:book-mirror',
+        writeIntent: 'derived',
+      },
       // viaSubagent intentionally omitted — operator trust path.
       // allowedSlugPrefixes intentionally omitted — operator can write anywhere.
     },

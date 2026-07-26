@@ -8,7 +8,7 @@
 // The judge is injectable so the deterministic write path is testable without a
 // real gateway. The default judge calls the chat gateway; when no gateway is
 // configured it returns zero events (auto-emit is a no-op, never an error).
-import type { BrainEngine } from '../engine.ts';
+import type { BrainEngine, PageWriteContext } from '../engine.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 
 export interface ChronicleEventProposal {
@@ -179,7 +179,14 @@ async function supersedePriorEvents(
  */
 export async function runChronicleExtract(
   engine: BrainEngine,
-  opts: { slug: string; sourceId?: string; judge?: ChronicleJudge; tz?: string; signal?: AbortSignal },
+  opts: {
+    slug: string;
+    sourceId?: string;
+    judge?: ChronicleJudge;
+    tz?: string;
+    signal?: AbortSignal;
+    writeContext?: PageWriteContext;
+  },
 ): Promise<ChronicleExtractResult> {
   const sourceId = opts.sourceId ?? 'default';
   const tz = opts.tz ?? 'UTC';
@@ -290,7 +297,13 @@ export async function runChronicleExtract(
           captured_via: 'life-chronicle:auto',
         },
         effective_date: safeDate(when),
-      }, { sourceId });
+      }, {
+        sourceId,
+        writeContext: opts.writeContext ?? {
+          actor: 'chronicle:extract_events',
+          writeIntent: 'derived',
+        },
+      });
       if (wasChronicleSuperseded) {
         await tx.restorePage(eventSlug, { sourceId });
         await tx.removeTag(eventSlug, CHRONICLE_SUPERSEDED_TAG, { sourceId });

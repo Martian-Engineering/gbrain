@@ -134,6 +134,11 @@ async function runClear(engine: BrainEngine, args: string[]): Promise<void> {
       sourceId: page.source_id,
       noEmbed,
       forceRechunk: true,
+      writeContext: {
+        actor: 'cli:quarantine',
+        writeIntent: 'maintenance',
+        reason: 'clear',
+      },
     });
   } finally {
     if (force) {
@@ -232,6 +237,11 @@ async function runScan(engine: BrainEngine, args: string[]): Promise<void> {
       sourceId: ref.source_id,
       noEmbed,
       forceRechunk: true,
+      writeContext: {
+        actor: 'cli:quarantine',
+        writeIntent: 'maintenance',
+        reason: 'scan_apply',
+      },
     });
     if (result.quarantined) {
       quarantined++;

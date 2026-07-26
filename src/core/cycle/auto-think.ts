@@ -163,7 +163,10 @@ export async function runPhaseAutoThink(
       const warnings = [...result.warnings];
       let slug: string | undefined;
       if (config.autoCommit) {
-        const persisted = await persistSynthesis(engine, result);
+        const persisted = await persistSynthesis(engine, result, {
+          actor: 'cycle:auto-think',
+          writeIntent: 'derived',
+        });
         slug = persisted.slug || undefined;  // '' = persist-skip signal (#1698)
         warnings.push(...persisted.warnings);
       }

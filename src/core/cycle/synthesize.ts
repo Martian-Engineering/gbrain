@@ -1345,7 +1345,14 @@ async function writeSummaryPage(
     compiled_truth: parsed.compiled_truth,
     timeline: parsed.timeline,
     frontmatter: parsed.frontmatter,
-  }, { sourceId });
+  }, {
+    sourceId,
+    writeContext: {
+      actor: 'cycle:synthesize',
+      writeIntent: 'derived',
+      batchId: summarySlug,
+    },
+  });
 
   // Also write to disk (orchestrator dual-write).
   try {

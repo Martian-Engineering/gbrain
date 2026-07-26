@@ -43,6 +43,7 @@
 import type {
   IngestionEvent,
   IngestionSource,
+  IngestionSourceMode,
   IngestionSourceContext,
   IngestionSourceHealth,
 } from './types.ts';
@@ -89,6 +90,11 @@ export type DispatchOutcome =
 
 export type IngestionDispatcher = (
   event: IngestionEvent,
+  context: {
+    /** Trusted registration metadata; never sourced from event payload. */
+    sourceId: string;
+    mode: IngestionSourceMode;
+  },
 ) => Promise<DispatchOutcome>;
 
 export interface IngestionDaemonOpts {
@@ -467,7 +473,10 @@ export class IngestionDaemon {
 
     // 4. Dispatch.
     try {
-      const outcome = await this.opts.dispatch(effectiveEvent);
+      const outcome = await this.opts.dispatch(effectiveEvent, {
+        sourceId,
+        mode: sourceMode,
+      });
       if (outcome.kind === 'failed') {
         this.opts.logger.warn(
           `[ingestion] source '${sourceId}' dispatch failed: ${outcome.error}`,

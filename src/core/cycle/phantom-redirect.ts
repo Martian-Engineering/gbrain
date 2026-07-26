@@ -468,6 +468,12 @@ export async function tryRedirectPhantom(
     reparsed.compiled_truth,
     reparsed.timeline,
     newContentHash,
+    {
+      writeContext: {
+        actor: 'maintenance:phantom_redirect',
+        writeIntent: 'maintenance',
+      },
+    },
   );
 
   // Codex #3/#4/#12: lossless DB migration. Re-runs return migrated=0.

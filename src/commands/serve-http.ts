@@ -2067,6 +2067,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           'ingest_capture',
           {
             event,
+            ingestionMode: 'trickle',
             ...(callerSlug ? { slug: callerSlug } : {}),
           },
           {
@@ -2079,6 +2080,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
             // can't fill the queue.
             maxWaiting: 50,
           },
+          { allowProtectedSubmit: true },
         );
 
         const latency = Date.now() - startTime;

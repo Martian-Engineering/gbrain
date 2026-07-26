@@ -242,7 +242,14 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     // all silently defaulted to source_id='default', so non-default-source
     // tags / timeline / raw / links were either dropped or attached to the
     // wrong row.
-    const sourceOpts = { sourceId: page.source_id };
+    const sourceOpts = {
+      sourceId: page.source_id,
+      writeContext: {
+        actor: 'cli:migrate-engine',
+        writeIntent: 'backfill' as const,
+        batchId: `migrate:${targetId}:${manifest.started_at}`,
+      },
+    };
 
     // Copy page (preserve source_id)
     await targetEngine.putPage(page.slug, {

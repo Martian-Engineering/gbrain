@@ -638,7 +638,14 @@ async function runOneQuestion(
     const p = adapterPages[i];
     const date = dates[i];
     pageMeta.push({ slug: p.slug, content: p.content, date });
-    await importFromContent(engine, p.slug, p.content, { noEmbed: opts.keywordOnly });
+    await importFromContent(engine, p.slug, p.content, {
+      noEmbed: opts.keywordOnly,
+      writeContext: {
+        actor: 'eval:longmemeval',
+        writeIntent: 'derived',
+        batchId: q.question_id,
+      },
+    });
     // v0.40.2.0 — inline Haiku extractor populates the facts table so
     // trajectory routing has data to retrieve. Full-haystack
     // preprocessing — methodology disclosed at the envelope + stderr

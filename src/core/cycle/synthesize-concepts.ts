@@ -72,6 +72,7 @@ export async function runPhaseSynthesizeConcepts(
   opts: SynthesizeConceptsOpts = {},
 ): Promise<PhaseResult> {
   const chat = opts._chat ?? gatewayChat;
+  const runId = `concepts-${Date.now().toString(36)}`;
 
   // 1. Get atom pages (test seam OR DB query)
   let atoms = opts._atoms ?? [];
@@ -239,6 +240,11 @@ export async function runPhaseSynthesizeConcepts(
       );
       await importFromContent(engine, `concepts/${title}`, md, {
         noEmbed: !isAvailable('embedding'),
+        writeContext: {
+          actor: 'cycle:synthesize_concepts',
+          writeIntent: 'derived',
+          batchId: runId,
+        },
       });
     }
     conceptsWritten++;
@@ -256,7 +262,6 @@ export async function runPhaseSynthesizeConcepts(
   // only fires when concepts were actually written; rollup always fires so
   // doctor sees the phase ran.
   if (!opts.dryRun && conceptsWritten > 0) {
-    const runId = `concepts-${Date.now().toString(36)}`;
     try {
       await writeReceipt(engine, {
         kind: 'concepts',

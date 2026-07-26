@@ -30,10 +30,20 @@ export async function seedChronicleEvalCorpus(engine: BrainEngine): Promise<void
   await engine.putPage('meetings/2026-03-02-am', {
     type: 'meeting', title: 'Morning standup', compiled_truth: 'x'.repeat(120),
     frontmatter: { attendees: [ALICE] }, effective_date: new Date('2026-03-02T09:00:00Z'),
+  }, {
+    writeContext: {
+      actor: 'eval:chronicle',
+      writeIntent: 'derived',
+    },
   });
   await engine.putPage('meetings/2026-03-02-pm', {
     type: 'meeting', title: 'Afternoon review', compiled_truth: 'y'.repeat(120),
     frontmatter: { attendees: [ALICE] }, effective_date: new Date('2026-03-02T15:00:00Z'),
+  }, {
+    writeContext: {
+      actor: 'eval:chronicle',
+      writeIntent: 'derived',
+    },
   });
   const judge = (when: string, what: string): ChronicleJudge => async () => ({
     events: [{ when, who: [ALICE], what, kind: 'meeting' }],

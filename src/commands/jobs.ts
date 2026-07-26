@@ -1579,6 +1579,11 @@ export async function registerBuiltinHandlers(
       sourceId,
       tz,
       signal: (job as { signal?: AbortSignal }).signal,
+      writeContext: {
+        actor: `minion:chronicle_extract:${job.id}`,
+        writeIntent: 'derived',
+        batchId: `job:${job.id}`,
+      },
     });
   });
 
@@ -1647,7 +1652,13 @@ export async function registerBuiltinHandlers(
     const importArgs: string[] = [];
     if (job.data.dir) importArgs.push(String(job.data.dir));
     if (job.data.noEmbed) importArgs.push('--no-embed');
-    await runImport(engine, importArgs);
+    await runImport(engine, importArgs, {
+      writeContext: {
+        actor: `minion:import:${job.id}`,
+        writeIntent: 'backfill',
+        batchId: `job:${job.id}`,
+      },
+    });
     return { imported: true };
   });
 

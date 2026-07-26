@@ -217,6 +217,10 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
                 sourceId: row.source_id,
                 inferFrontmatter: false,
                 forceRechunk: true,
+                writeContext: {
+                  actor: 'cli:reindex',
+                  writeIntent: 'maintenance',
+                },
               });
               reindexed++;
               return;
@@ -243,6 +247,10 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
             sourceId: row.source_id,
             noEmbed: !!opts.noEmbed,
             forceRechunk: true,
+            writeContext: {
+              actor: 'cli:reindex',
+              writeIntent: 'maintenance',
+            },
           });
           reindexed++;
         } catch (err) {

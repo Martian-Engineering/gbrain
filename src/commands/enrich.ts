@@ -386,6 +386,10 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
     dryRun: false,
     remote: false,
     sourceId,
+    writeContext: {
+      actor: 'cli:enrich',
+      writeIntent: 'derived',
+    },
   };
   await putPageOp.handler(opCtx, { slug, content });
 

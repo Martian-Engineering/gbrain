@@ -7,6 +7,7 @@
  */
 
 import type { BrainEngine } from '../core/engine.ts';
+import type { PageWriteContext } from '../core/engine.ts';
 import { operations, OperationError } from '../core/operations.ts';
 import type { Operation, OperationContext, AuthInfo } from '../core/operations.ts';
 import { loadConfig } from '../core/config.ts';
@@ -30,6 +31,8 @@ export interface ToolResult {
 export interface DispatchOpts {
   /** Defaults to true (remote/untrusted). Local CLI callers (`gbrain call`) pass false. */
   remote?: boolean;
+  /** Trusted server attribution for semantic page writes. Never read from tool params. */
+  writeContext?: PageWriteContext;
   /** Override the default stderr logger (e.g. CLI uses console.* directly). */
   logger?: OperationContext['logger'];
   /**
@@ -202,6 +205,7 @@ export function buildOperationContext(
     config: loadConfig() || { engine: 'postgres' },
     logger: opts.logger || stderrLogger,
     dryRun: !!params.dry_run,
+    writeContext: opts.writeContext,
     remote: opts.remote ?? true,
     takesHoldersAllowList: opts.takesHoldersAllowList,
     // v0.34 D4: sourceId is REQUIRED at the type level. Auto-fill 'default'

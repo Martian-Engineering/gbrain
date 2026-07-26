@@ -123,7 +123,10 @@ prints what would have been the input (exit 0).
 
       // Persist if --save (the runThink path doesn't auto-persist; CLI does it explicitly)
       if (save) {
-        const persisted = await persistSynthesis(engine, result);
+        const persisted = await persistSynthesis(engine, result, {
+          actor: 'cli:think',
+          writeIntent: 'derived',
+        });
         savedSlug = persisted.slug || undefined;  // '' = persist-skip signal (#10)
         evidenceInserted = persisted.evidenceInserted;
         for (const w of persisted.warnings) result.warnings.push(w);

@@ -201,7 +201,14 @@ export async function writeReceipt(
       compiled_truth,
       frontmatter,
     },
-    { sourceId: input.source_id },
+    {
+      sourceId: input.source_id,
+      writeContext: {
+        actor: `extract:${input.kind}`,
+        writeIntent: 'derived',
+        batchId: input.run_id,
+      },
+    },
   );
 
   return { slug, page };

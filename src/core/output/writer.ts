@@ -17,7 +17,7 @@
  * a bad citation or dangling back-link never lands on disk.
  */
 
-import type { BrainEngine } from '../engine.ts';
+import type { BrainEngine, PageWriteContext } from '../engine.ts';
 import type { PageType, TimelineInput } from '../types.ts';
 import type { ResolverContext } from '../resolvers/interface.ts';
 import { SlugRegistry } from './slug-registry.ts';
@@ -37,6 +37,8 @@ export interface BrainWriterOptions {
    * follow-on release after soak).
    */
   strictMode?: StrictMode;
+  /** Trusted attribution applied to each semantic page mutation. */
+  writeContext?: PageWriteContext;
 }
 
 export interface EntityInput {
@@ -124,6 +126,7 @@ class WriteTxImpl implements WriteTx {
   constructor(
     private engine: BrainEngine,
     public readonly context: ResolverContext,
+    private readonly writeContext?: PageWriteContext,
   ) {
     this.slugRegistry = new SlugRegistry(engine);
   }
@@ -159,7 +162,7 @@ class WriteTxImpl implements WriteTx {
       compiled_truth: input.compiledTruth,
       timeline: input.timeline ?? '',
       frontmatter: input.frontmatter ?? {},
-    });
+    }, { writeContext: this.writeContext });
     this.touchedSlugs.add(slug);
     return slug;
   }
@@ -178,7 +181,7 @@ class WriteTxImpl implements WriteTx {
       compiled_truth: body,
       timeline: existing.timeline,
       frontmatter: existing.frontmatter,
-    });
+    }, { writeContext: this.writeContext });
     this.touchedSlugs.add(slug);
   }
 
@@ -192,7 +195,7 @@ class WriteTxImpl implements WriteTx {
       compiled_truth: existing.compiled_truth,
       timeline: existing.timeline,
       frontmatter: nextFm,
-    });
+    }, { writeContext: this.writeContext });
     this.touchedSlugs.add(slug);
   }
 
@@ -219,12 +222,14 @@ class WriteTxImpl implements WriteTx {
 export class BrainWriter {
   private validators: PageValidator[] = [];
   private strictMode: StrictMode;
+  private writeContext?: PageWriteContext;
 
   constructor(
     private engine: BrainEngine,
     opts: BrainWriterOptions = {},
   ) {
     this.strictMode = opts.strictMode ?? 'lint';
+    this.writeContext = opts.writeContext;
   }
 
   register(validator: PageValidator): void {
@@ -244,7 +249,7 @@ export class BrainWriter {
     let report: ValidationReport | null = null;
 
     const txResult = await this.engine.transaction(async (txEngine) => {
-      const tx = new WriteTxImpl(txEngine, ctx);
+      const tx = new WriteTxImpl(txEngine, ctx, this.writeContext);
       const result = await fn(tx);
 
       // Validators run before the outer transaction commits.

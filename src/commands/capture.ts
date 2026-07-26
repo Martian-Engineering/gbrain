@@ -566,6 +566,10 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
     },
     dryRun: false,
     remote: false,
+    writeContext: {
+      actor: 'cli:capture',
+      writeIntent: 'user_edit',
+    },
     // v0.39.3.0 CV15: thread the resolved source from the canonical 6-tier
     // chain (was `parsed.source ?? 'default'` pre-fix, which silently
     // ignored env / dotfile / local_path / brain_default tiers — divergent

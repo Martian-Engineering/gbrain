@@ -13,7 +13,7 @@
  * page type/slug prefix since SearchResult has no metadata.skill field.
  */
 
-import type { BrainEngine } from './engine.ts';
+import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { waitForCapacity } from './backoff.ts';
 
 // ---------------------------------------------------------------------------
@@ -72,6 +72,10 @@ export function entityPagePath(name: string, type: 'person' | 'company'): string
 export async function enrichEntity(
   engine: BrainEngine,
   request: EnrichmentRequest,
+  writeContext: PageWriteContext = {
+    actor: 'service:enrichment',
+    writeIntent: 'derived',
+  },
 ): Promise<EnrichmentResult> {
   const slug = slugifyEntity(request.entityName, request.entityType);
 
@@ -105,7 +109,7 @@ export async function enrichEntity(
         source: request.sourceSlug,
         tier,
       },
-    });
+    }, { writeContext });
     action = 'created';
   }
 

@@ -20,6 +20,10 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // trusted local `submit_job` (ctx.remote=false) can insert these rows.
   'subagent',
   'subagent_aggregator',
+  // Write intent for ingest_capture is derived from trusted source-mode
+  // metadata. Remote submit_job callers must not be able to forge that mode
+  // in job.data and turn a historical migration into immediate novelty.
+  'ingest_capture',
   // v0.36+ brain-health-100 wave (D11 from outside-voice review):
   // synthesize, patterns, consolidate are cycle phases that internally
   // submit `subagent` children with allowProtectedSubmit=true. Treating

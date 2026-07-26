@@ -122,6 +122,12 @@ async function persistFenceBody(
     compiledTruth,
     page.timeline ?? '',
     contentHash,
+    {
+      writeContext: {
+        actor: 'maintenance:claim_suppression',
+        writeIntent: 'maintenance',
+      },
+    },
   );
   return writePageThrough(engine, page.slug, { sourceId });
 }

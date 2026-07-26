@@ -367,6 +367,11 @@ export async function persistSavedIdea(
       noEmbed: true,
       sourceId,
       sourcePath: `${args.slug}.md`,
+      writeContext: {
+        actor: 'cli:brainstorm',
+        writeIntent: 'derived',
+        reason: args.provenanceVia,
+      },
     });
     dbSaved = true;
   } catch (err) {

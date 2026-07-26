@@ -300,6 +300,10 @@ export async function runReindexCode(
                 noEmbed: opts.noEmbed,
                 force: opts.force,
                 sourceId: opts.sourceId,
+                writeContext: {
+                  actor: 'cli:reindex-code',
+                  writeIntent: 'maintenance',
+                },
               });
               if (result.status === 'imported') reindexed++;
               else if (result.status === 'skipped') skipped++;

@@ -5,7 +5,7 @@
 
 import { lstatSync, realpathSync } from 'fs';
 import { resolve, relative, sep } from 'path';
-import type { BrainEngine } from './engine.ts';
+import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
@@ -351,6 +351,8 @@ export interface OperationContext {
   config: GBrainConfig;
   logger: Logger;
   dryRun: boolean;
+  /** Server-owned attribution for semantic page writes. Never sourced from operation params. */
+  writeContext?: PageWriteContext;
   /**
    * OAuth auth info (v0.8+). Present when the caller authenticated via OAuth 2.1
    * through `gbrain serve --http`. Contains clientId and granted scopes for
@@ -464,6 +466,38 @@ export interface OperationContext {
    * satisfied even on single-source brains.
    */
   sourceId: string;
+}
+
+/** Resolve trusted runtime identity into page-write attribution. */
+export function pageWriteContextForOperation(
+  ctx: OperationContext,
+): PageWriteContext {
+  if (ctx.writeContext) return ctx.writeContext;
+
+  if (ctx.viaSubagent === true || ctx.jobId !== undefined) {
+    const actor = ctx.subagentId !== undefined
+      ? `subagent:${ctx.subagentId}`
+      : ctx.jobId !== undefined
+        ? `minion:${ctx.jobId}`
+        : 'subagent:unspecified';
+    return {
+      actor,
+      writeIntent: 'derived',
+      ...(ctx.jobId !== undefined ? { batchId: `job:${ctx.jobId}` } : {}),
+    };
+  }
+
+  if (ctx.remote !== false) {
+    return {
+      actor: ctx.auth?.clientId ? `mcp:${ctx.auth.clientId}` : 'mcp:stdio',
+      writeIntent: 'live_ingest',
+    };
+  }
+
+  return {
+    actor: 'cli:put_page',
+    writeIntent: 'user_edit',
+  };
 }
 
 /**
@@ -1006,6 +1040,7 @@ const put_page: Operation = {
     );
     const result = await importFromContent(ctx.engine, slug, content, {
       noEmbed,
+      writeContext: pageWriteContextForOperation(ctx),
       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
       // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
@@ -3200,7 +3235,10 @@ const think: Operation = {
     let savedSlug: string | undefined;
     let evidenceInserted = 0;
     if (safeSave) {
-      const persisted = await persistSynthesis(ctx.engine, result);
+      const persisted = await persistSynthesis(ctx.engine, result, {
+        actor: 'operation:think',
+        writeIntent: 'derived',
+      });
       savedSlug = persisted.slug;
       evidenceInserted = persisted.evidenceInserted;
       for (const w of persisted.warnings) result.warnings.push(w);
@@ -3912,7 +3950,13 @@ const revert_version: Operation = {
     // v0.31.8 (D7): thread ctx.sourceId so multi-source brains revert the
     // intended page row instead of whichever same-slug row Postgres returns
     // first.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const sourceOpts = {
+      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+      writeContext: {
+        actor: 'operation:revert_page',
+        writeIntent: 'user_edit' as const,
+      },
+    };
     await ctx.engine.createVersion(p.slug as string, sourceOpts);
     await ctx.engine.revertToVersion(p.slug as string, p.version_id as number, sourceOpts);
     return { status: 'reverted' };

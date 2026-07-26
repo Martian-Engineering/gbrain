@@ -2144,6 +2144,11 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       }
     }
   }
+  const incrementalWriteContext = {
+    actor: 'cli:sync:incremental',
+    writeIntent: 'live_ingest' as const,
+    batchId: pin,
+  };
 
   // v0.20.0 Cathedral II Layer 12 (codex SP-1 fix): before returning
   // 'up_to_date' on git-HEAD equality, check the chunker version gate.
@@ -2745,7 +2750,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       const filePath = join(gitContextRoot, to);
       if (existsSync(filePath) && isPathSafe(filePath, gitContextRoot)) {
         try {
-          const result = await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack });
+          const result = await importFile(engine, filePath, to, {
+            noEmbed,
+            sourceId: opts.sourceId,
+            activePack: syncActivePack,
+            writeContext: incrementalWriteContext,
+          });
           if (result.status === 'imported') chunksCreated += result.chunks;
           else if (result.status === 'skipped' && (result as { error?: string }).error) {
             failedFiles.push({ path: to, error: String((result as { error?: string }).error) });
@@ -2951,7 +2961,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         // 'default' was applied even for non-default sources, fabricating
         // duplicate rows that crashed bare-slug subqueries with Postgres 21000.
         const result = await observed(pacer, () =>
-          importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
+          importFile(eng, filePath, path, {
+            noEmbed,
+            sourceId: opts.sourceId,
+            activePack: syncActivePack,
+            writeContext: incrementalWriteContext,
+          }));
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);
@@ -3475,6 +3490,11 @@ async function performFullSync(
     commit: headCommit,
     strategy: opts.strategy,
     sourceId: opts.sourceId,
+    writeContext: {
+      actor: 'cli:sync:full',
+      writeIntent: 'backfill',
+      batchId: headCommit,
+    },
     exclude: opts.exclude,
     slugRoot,
     // issue #1939: performFullSync owns the failure ledger + bookmark via the

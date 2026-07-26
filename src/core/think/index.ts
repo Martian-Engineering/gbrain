@@ -18,7 +18,7 @@
  */
 
 import type Anthropic from '@anthropic-ai/sdk';
-import type { BrainEngine, SynthesisEvidenceInput } from '../engine.ts';
+import type { BrainEngine, PageWriteContext, SynthesisEvidenceInput } from '../engine.ts';
 import { runGather, renderPagesBlock, takesHitToTakeForPrompt } from './gather.ts';
 import { renderTakesBlock } from './sanitize.ts';
 import { buildThinkSystemPrompt, buildThinkUserMessage } from './prompt.ts';
@@ -560,6 +560,10 @@ export async function runThink(
 export async function persistSynthesis(
   engine: BrainEngine,
   result: ThinkResult,
+  writeContext: PageWriteContext = {
+    actor: 'think:synthesis',
+    writeIntent: 'derived',
+  },
 ): Promise<{ slug: string; evidenceInserted: number; warnings: string[] }> {
   // #1698: never persist an empty synthesis. Returned signal (NOT a throw, F3) so
   // the MCP `think` op can return the gather result + warning instead of a bare error
@@ -599,7 +603,7 @@ export async function persistSynthesis(
       pages_gathered: result.pagesGathered,
       takes_gathered: result.takesGathered,
     },
-  });
+  }, { writeContext });
 
   const persisted = await persistCitations(engine, page.id, result.citations);
   return { slug, evidenceInserted: persisted.inserted, warnings: persisted.warnings };

@@ -16,6 +16,7 @@ import {
   type IngestionEvent,
 } from '../../src/core/ingestion/types.ts';
 import type { MinionJobContext } from '../../src/core/minions/types.ts';
+import { isProtectedJobName } from '../../src/core/minions/protected-names.ts';
 
 let engine: PGLiteEngine;
 
@@ -69,6 +70,10 @@ function makeJob(data: Record<string, unknown>): MinionJobContext {
 }
 
 describe('defaultSlugForEvent', () => {
+  test('requires a trusted submitter because job data carries source mode', () => {
+    expect(isProtectedJobName('ingest_capture')).toBe(true);
+  });
+
   test('builds inbox/YYYY-MM-DD-<hash6> slug', () => {
     const ev = makeEvent({ content_hash: 'abcdef1234567890'.padEnd(64, '0') });
     const slug = defaultSlugForEvent(ev, new Date('2026-05-20T00:00:00Z'));
@@ -228,6 +233,59 @@ describe('ingest_capture handler — provenance write-through (#1522)', () => {
 });
 
 describe('ingest_capture handler — integration with importFromContent', () => {
+  async function latestMutation(slug: string): Promise<{
+    actor: string;
+    write_intent: string;
+    batch_id: string | null;
+  }> {
+    const rows = await engine.executeRaw<{
+      actor: string;
+      write_intent: string;
+      batch_id: string | null;
+    }>(
+      `SELECT actor, write_intent, batch_id
+         FROM page_mutations
+        WHERE source_id = 'default' AND page_slug = $1
+        ORDER BY id DESC
+        LIMIT 1`,
+      [slug],
+    );
+    return rows[0]!;
+  }
+
+  test('trusted trickle mode becomes live ingestion under Minion identity', async () => {
+    const handler = makeIngestCaptureHandler(engine);
+    const ev = makeEvent({ content: '# current capture' });
+
+    await handler(makeJob({
+      event: ev,
+      slug: 'wiki/trickle-capture',
+      ingestionMode: 'trickle',
+    }));
+
+    expect(await latestMutation('wiki/trickle-capture')).toEqual({
+      actor: 'minion:ingest_capture:1',
+      write_intent: 'live_ingest',
+      batch_id: 'job:1',
+    });
+  });
+
+  test('trusted migration mode becomes backfill and missing mode fails closed', async () => {
+    const handler = makeIngestCaptureHandler(engine);
+    await handler(makeJob({
+      event: makeEvent({ content: '# historical capture' }),
+      slug: 'wiki/migration-capture',
+      ingestionMode: 'migration',
+    }));
+    await handler(makeJob({
+      event: makeEvent({ content: '# unspecified capture' }),
+      slug: 'wiki/unspecified-capture',
+    }));
+
+    expect((await latestMutation('wiki/migration-capture')).write_intent).toBe('backfill');
+    expect((await latestMutation('wiki/unspecified-capture')).write_intent).toBe('backfill');
+  });
+
   test('imported event lands as a page in the DB', async () => {
     const handler = makeIngestCaptureHandler(engine);
     const ev = makeEvent({

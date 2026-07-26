@@ -2,7 +2,8 @@ import { readdirSync, lstatSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join, relative } from 'path';
 import { cpus, totalmem } from 'os';
-import type { BrainEngine } from '../core/engine.ts';
+import { randomUUID } from 'crypto';
+import type { BrainEngine, PageWriteContext } from '../core/engine.ts';
 import { importFile, importImageFile, isImageFilePath } from '../core/import-file.ts';
 import { loadConfig, gbrainPath } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
@@ -52,6 +53,8 @@ export async function runImport(
     commit?: string;
     strategy?: SyncStrategy;
     sourceId?: string;
+    /** Trusted caller attribution. One context is reused for the whole run. */
+    writeContext?: PageWriteContext;
     managedBookmark?: boolean;
     /**
      * #753/#774: glob patterns to exclude from the import (same semantics as
@@ -71,6 +74,11 @@ export async function runImport(
   const noEmbed = args.includes('--no-embed');
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
+  const writeContext = opts.writeContext ?? {
+    actor: 'cli:import',
+    writeIntent: 'backfill' as const,
+    batchId: `import:${randomUUID()}`,
+  };
 
   // T7 (D9): refuse cleanly when init persisted the deferred-setup sentinel,
   // unless the user is explicitly skipping embedding via `--no-embed` (in
@@ -293,8 +301,17 @@ export async function runImport(
       // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
       // unreachable when the gate is off; defense-in-depth check anyway.
       const result = isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
-        ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
-        : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack });
+        ? await importImageFile(eng, filePath, importRelPath, {
+            noEmbed,
+            sourceId,
+            writeContext,
+          })
+        : await importFile(eng, filePath, importRelPath, {
+            noEmbed,
+            sourceId,
+            activePack: importActivePack,
+            writeContext,
+          });
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);

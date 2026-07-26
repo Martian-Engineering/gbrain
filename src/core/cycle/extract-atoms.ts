@@ -383,6 +383,7 @@ export async function runPhaseExtractAtoms(
   opts: ExtractAtomsOpts = {},
 ): Promise<PhaseResult> {
   const sourceId = opts.sourceId ?? 'default';
+  const runId = `atoms-${Date.now().toString(36)}-${sourceId.slice(0, 4)}`;
   const chat = opts._chat ?? gatewayChat;
 
   // 1a. Get transcripts (test seam OR production discovery).
@@ -592,7 +593,14 @@ export async function runPhaseExtractAtoms(
               },
               timeline: '',
             },
-            { sourceId },
+            {
+              sourceId,
+              writeContext: {
+                actor: 'cycle:extract_atoms',
+                writeIntent: 'derived',
+                batchId: runId,
+              },
+            },
           );
           totalAtomsExtracted++;
         }
@@ -616,7 +624,6 @@ export async function runPhaseExtractAtoms(
   // actually extracted atoms. Both are best-effort per F-OUT-19 —
   // audit-trail / search-visibility surfaces don't block the phase result.
   if (!opts.dryRun && totalAtomsExtracted > 0) {
-    const runId = `atoms-${Date.now().toString(36)}-${sourceId.slice(0, 4)}`;
     try {
       await writeReceipt(engine, {
         kind: 'atoms',

@@ -31,7 +31,7 @@
 
 import type { MinionJobContext } from '../types.ts';
 import type { BrainEngine } from '../../engine.ts';
-import type { IngestionEvent } from '../../ingestion/types.ts';
+import type { IngestionEvent, IngestionSourceMode } from '../../ingestion/types.ts';
 import { validateIngestionEvent } from '../../ingestion/types.ts';
 import { importFromContent } from '../../import-file.ts';
 
@@ -55,7 +55,11 @@ export function defaultSlugForEvent(event: IngestionEvent, now: Date = new Date(
 
 export function makeIngestCaptureHandler(engine: BrainEngine) {
   return async function ingestCaptureHandler(job: MinionJobContext): Promise<IngestCaptureResult> {
-    const data = job.data as { event?: unknown; slug?: unknown };
+    const data = job.data as {
+      event?: unknown;
+      slug?: unknown;
+      ingestionMode?: IngestionSourceMode;
+    };
     const event = data.event as IngestionEvent | undefined;
     if (!event) {
       throw new Error('ingest_capture: job.data.event is required');
@@ -142,6 +146,14 @@ export function makeIngestCaptureHandler(engine: BrainEngine) {
       source_kind: event.source_kind,
       source_uri: event.source_uri,
       ingested_via: 'ingest_capture',
+      writeContext: {
+        actor: `minion:ingest_capture:${job.id}`,
+        writeIntent: data.ingestionMode === 'trickle' ? 'live_ingest' : 'backfill',
+        batchId: `job:${job.id}`,
+        reason: data.ingestionMode
+          ? `ingestion_mode:${data.ingestionMode}`
+          : 'ingestion_mode:unspecified',
+      },
     });
 
     return {

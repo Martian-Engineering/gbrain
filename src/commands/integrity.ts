@@ -420,7 +420,13 @@ async function cmdAuto(args: string[]): Promise<void> {
   const engine = await connect();
   const registry = getDefaultRegistry();
   registerBuiltinResolvers(registry);
-  const writer = new BrainWriter(engine, { strictMode: 'off' });
+  const writer = new BrainWriter(engine, {
+    strictMode: 'off',
+    writeContext: {
+      actor: 'cli:integrity',
+      writeIntent: 'maintenance',
+    },
+  });
 
   const ctx: ResolverContext = {
     engine,
