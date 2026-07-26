@@ -132,9 +132,15 @@ describe('rename_page operation', () => {
       .not.toBeNull();
   });
 
-  test('allows a source-bound admin client to request confined file removal', async () => {
+  test('allows a source-bound source admin to request confined file removal', async () => {
     await seedPage('people/rowan-old', 'Rowan Old');
-    const result = await operationsByName.rename_page.handler(ctx(), {
+    const sourceAdmin = {
+      token: 'token',
+      clientId: 'source-admin',
+      scopes: ['read', 'write', 'source_admin'],
+      sourceId: 'default',
+    };
+    const result = await operationsByName.rename_page.handler(ctx('default', sourceAdmin), {
       old_slug: 'people/rowan-old',
       new_slug: 'people/rowan-north',
       content: renamedContent,

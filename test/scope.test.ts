@@ -15,7 +15,14 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('hasScope — admin implies all (escape hatch)', () => {
-  const all: Scope[] = ['read', 'write', 'admin', 'sources_admin', 'users_admin'];
+  const all: Scope[] = [
+    'read',
+    'write',
+    'admin',
+    'source_admin',
+    'sources_admin',
+    'users_admin',
+  ];
   for (const required of all) {
     test(`admin → ${required}`, () => {
       expect(hasScope(['admin'], required)).toBe(true);
@@ -42,6 +49,14 @@ describe('hasScope — write implies read but not admin variants', () => {
 });
 
 describe('hasScope — sibling non-implication for *_admin scopes', () => {
+  test('source_admin → source-local read and write only', () => {
+    expect(hasScope(['source_admin'], 'source_admin')).toBe(true);
+    expect(hasScope(['source_admin'], 'write')).toBe(true);
+    expect(hasScope(['source_admin'], 'read')).toBe(true);
+    expect(hasScope(['source_admin'], 'sources_admin')).toBe(false);
+    expect(hasScope(['source_admin'], 'users_admin')).toBe(false);
+    expect(hasScope(['source_admin'], 'admin')).toBe(false);
+  });
   test('sources_admin → sources_admin only', () => {
     expect(hasScope(['sources_admin'], 'sources_admin')).toBe(true);
     expect(hasScope(['sources_admin'], 'users_admin')).toBe(false);
@@ -129,11 +144,12 @@ describe('F3 refresh-token subset semantics under hasScope', () => {
 // ---------------------------------------------------------------------------
 
 describe('ALLOWED_SCOPES — exact list pinned', () => {
-  test('contains the 6 canonical scopes (v0.38: agent added)', () => {
-    expect(ALLOWED_SCOPES.size).toBe(6);
+  test('contains the 7 canonical scopes', () => {
+    expect(ALLOWED_SCOPES.size).toBe(7);
     expect(ALLOWED_SCOPES.has('read')).toBe(true);
     expect(ALLOWED_SCOPES.has('write')).toBe(true);
     expect(ALLOWED_SCOPES.has('admin')).toBe(true);
+    expect(ALLOWED_SCOPES.has('source_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('sources_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('users_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('agent')).toBe(true);
@@ -143,6 +159,7 @@ describe('ALLOWED_SCOPES — exact list pinned', () => {
       'admin',
       'agent',
       'read',
+      'source_admin',
       'sources_admin',
       'users_admin',
       'write',
@@ -153,6 +170,7 @@ describe('ALLOWED_SCOPES — exact list pinned', () => {
 describe('isScope', () => {
   test('accepts allowed strings', () => {
     expect(isScope('read')).toBe(true);
+    expect(isScope('source_admin')).toBe(true);
     expect(isScope('sources_admin')).toBe(true);
   });
   test('rejects unknown strings', () => {

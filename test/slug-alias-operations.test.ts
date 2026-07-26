@@ -599,7 +599,7 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     });
   });
 
-  test('remote admin caller can remove the confined merged-page source file', async () => {
+  test('remote source admin can remove the confined merged-page source file', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-admin-source-'));
     const sourceFile = join(repo, 'old.md');
     try {
@@ -612,8 +612,8 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
       await seedPage('canonical');
       const auth = {
         token: 't',
-        clientId: 'admin-client',
-        scopes: ['admin'],
+        clientId: 'source-admin-client',
+        scopes: ['read', 'write', 'source_admin'],
         sourceId: 'default',
       };
 
@@ -672,7 +672,8 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
           },
         )).rejects.toMatchObject({
           code: 'permission_denied',
-          message: 'remove_file is available only to trusted local callers.',
+          message:
+            'remove_file is available only to trusted local or source-admin callers.',
         });
       });
       expect(readFileSync(sourceFile, 'utf8')).toBe('# old\n');

@@ -86,7 +86,7 @@ export async function renamePage(
       tx,
       opts.oldSlug,
       opts.sourceId,
-    );
+    ) ?? [];
     if (suppressions.some((claim) => claim.active)) {
       const candidate = parseMarkdown(opts.content, `${opts.newSlug}.md`);
       const matches = findSuppressedClaimMatches(

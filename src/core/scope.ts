@@ -1,7 +1,7 @@
 /**
  * gbrain OAuth scope hierarchy + allowlist (v0.28).
  *
- * Single source of truth for the 5 scope strings. Used by:
+ * Single source of truth for the 7 scope strings. Used by:
  *  - src/commands/serve-http.ts (scopesSupported, request-time hasScope)
  *  - src/core/oauth-provider.ts (F3 refresh, token issuance, registration)
  *  - src/commands/auth.ts (CLI register-client validation)
@@ -10,24 +10,35 @@
  *
  * Hierarchy (see plan ASCII diagram):
  *
- *                    admin
- *                      │
- *      ┌──────────┬────┴────┬──────────┐
+ *                         admin
+ *                           │
+ *      ┌──────────┬─────────┼──────────┐
  *      ▼          ▼         ▼          ▼
- *   sources_admin  users_admin  write  read
- *                                │      ▲
- *                                └──────┘
+ *   sources_admin  users_admin  source_admin  write
+ *                                  │          │
+ *                                  └────┬─────┘
+ *                                       ▼
+ *                                      read
  *
- * sources_admin and users_admin are siblings (different axes — sources-mgmt
- * vs user-account-mgmt — neither implies the other).
+ * The three narrow admin scopes are sibling axes: source-local file effects,
+ * source registry management, and user-account management. None implies
+ * another.
  */
 
-export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent';
+export type Scope =
+  | 'read'
+  | 'write'
+  | 'admin'
+  | 'source_admin'
+  | 'sources_admin'
+  | 'users_admin'
+  | 'agent';
 
 export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'read',
   'write',
   'admin',
+  'source_admin',
   'sources_admin',
   'users_admin',
   'agent',
@@ -41,6 +52,7 @@ export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
   'admin',
   'agent',
   'read',
+  'source_admin',
   'sources_admin',
   'users_admin',
   'write',
@@ -49,7 +61,8 @@ export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
 /**
  * Hierarchy table: which required scopes are implied by which granted scope.
  * `admin` implies all (escape hatch for legacy + super-admin tokens).
- * `write` implies `read`. The two `*_admin` siblings only imply themselves.
+ * `source_admin` implies source-local write and read. `write` implies `read`.
+ * The other narrow admin scopes imply only themselves.
  *
  * v0.38 (D13): `agent` is a SIBLING, not implied by admin. A super-admin
  * token still needs to be re-registered with explicit bindings to submit
@@ -57,7 +70,15 @@ export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
  * agent-dispatch capability on upgrade.
  */
 const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
-  admin: new Set(['admin', 'sources_admin', 'users_admin', 'write', 'read']),
+  admin: new Set([
+    'admin',
+    'source_admin',
+    'sources_admin',
+    'users_admin',
+    'write',
+    'read',
+  ]),
+  source_admin: new Set(['source_admin', 'write', 'read']),
   write: new Set(['write', 'read']),
   sources_admin: new Set(['sources_admin']),
   users_admin: new Set(['users_admin']),
@@ -68,6 +89,7 @@ const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
 /**
  * Does the granted scope set include something that satisfies `required`?
  * - admin in granted → true for any required
+ * - source_admin in granted → true for {source_admin, write, read}
  * - write in granted → true for {write, read}
  * - sources_admin in granted → true for {sources_admin}
  * - users_admin in granted → true for {users_admin}

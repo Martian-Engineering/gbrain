@@ -193,8 +193,9 @@ fallback when no path is recorded, still exists beneath the source's registered
 `alias add --remove-file` instead removes that confined source file after the
 database transaction commits and best-effort commits the deletion when the
 source repository has hardened Git durability. This host-filesystem option is
-available only to trusted local callers; remote callers can still perform the
-database alias mutation without it. The next sync's Git-diff deletion sweep
+available only to trusted local callers or source-bound OAuth clients carrying
+`source_admin`; ordinary remote writers can still perform the database alias
+mutation without it. The next sync's Git-diff deletion sweep
 hard-deletes the tombstone, collapsing the 72-hour restore window. Before that
 sync, undo by removing the alias and restoring the page; afterward, restore the
 file through Git.
