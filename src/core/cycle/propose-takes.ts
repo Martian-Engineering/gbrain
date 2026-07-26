@@ -618,6 +618,53 @@ async function countRemainingWork(
   return row?.count ?? 0;
 }
 
+/**
+ * Settle queued revisions already covered by this prompt's successful scan.
+ *
+ * The hash predicate is deliberately evaluated inside the DELETE so a page
+ * updated while cleanup waits on its row lock is rechecked and preserved.
+ */
+async function settleSatisfiedWork(
+  engine: BrainEngine,
+  scope: ScopedReadOpts,
+  selector: TakeMiningSelector,
+  promptVersion: string,
+  dryRun: boolean,
+): Promise<number> {
+  const params: unknown[] = [];
+  const predicate = workPredicate(scope, selector, params);
+  params.push(promptVersion);
+  const promptParam = `$${params.length}`;
+  const satisfiedPredicate = `${predicate}
+        AND EXISTS (
+          SELECT 1
+            FROM take_proposal_scans s
+           WHERE s.source_id = w.source_id
+             AND s.page_slug = w.page_slug
+             AND s.mining_input_hash = w.mining_input_hash
+             AND s.prompt_version = ${promptParam}
+             AND s.status = 'succeeded'
+        )`;
+
+  if (dryRun) {
+    const [row] = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count
+         FROM take_mining_work w
+        WHERE ${satisfiedPredicate}`,
+      params,
+    );
+    return row?.count ?? 0;
+  }
+
+  const retired = await engine.executeRaw<{ page_slug: string }>(
+    `DELETE FROM take_mining_work w
+      WHERE ${satisfiedPredicate}
+      RETURNING page_slug`,
+    params,
+  );
+  return retired.length;
+}
+
 async function persistExtractedProposals(
   engine: BrainEngine,
   work: TakeMiningRunnerWork,
@@ -759,16 +806,26 @@ async function selectRunnerWork(
     _extractableTypes: opts._extractableTypes,
   });
   if (!extractableTypes) return null;
-  return loadCandidateWork(
+  const scope = runnerScope(ctx, opts);
+  const selector = runnerSelector(opts);
+  const satisfiedCount = await settleSatisfiedWork(
     ctx.engine,
-    runnerScope(ctx, opts),
+    scope,
+    selector,
+    opts.promptVersion,
+    opts.dryRun ?? false,
+  );
+  const selection = await loadCandidateWork(
+    ctx.engine,
+    scope,
     extractableTypes,
     opts.promptVersion,
-    runnerSelector(opts),
+    selector,
     opts.pageCap,
     takeMiningWorkBatchSize(opts.pageCap, opts._workBatchSize),
     opts.skipPagesWithFence ?? false,
   );
+  return { ...selection, satisfiedCount };
 }
 
 async function countRunnerWork(

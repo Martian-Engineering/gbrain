@@ -393,4 +393,94 @@ describe('shared take-mining runner', () => {
       `SELECT mining_input_hash FROM take_mining_work`,
     )).toEqual([{ mining_input_hash: beforeHash }]);
   });
+
+  test('retires successful work only inside the exact deferred batch', async () => {
+    await queueWork('notes/cached-a', 'Cached A prose.', 'deferred', 'batch-a');
+    await queueWork('notes/cached-b', 'Cached B prose.', 'deferred', 'batch-b');
+    const rows = await engine.executeRaw<{
+      page_slug: string;
+      mining_input_hash: string;
+    }>(
+      `SELECT page_slug, mining_input_hash
+         FROM take_mining_work
+        ORDER BY page_slug`,
+    );
+    for (const row of rows) {
+      await engine.executeRaw(
+        `INSERT INTO take_proposal_scans (
+           source_id, page_slug, mining_input_hash, prompt_version,
+           status, attempt_id, proposal_run_id, model_id,
+           proposal_count, completed_at
+         ) VALUES (
+           'default', $1, $2, $3,
+           'succeeded', $4, 'cached-run', $5,
+           0, now()
+         )`,
+        [
+          row.page_slug,
+          row.mining_input_hash,
+          PROPOSE_TAKES_PROMPT_VERSION,
+          `cached-${row.page_slug}`,
+          MODEL_ID,
+        ],
+      );
+    }
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'batch-a',
+      async () => {
+        throw new Error('must not call');
+      },
+    ));
+
+    expect(result).toMatchObject({
+      eligible_pages: 0,
+      pages_scanned: 0,
+      cache_hits: 1,
+      remaining_work: 0,
+    });
+    expect(await engine.executeRaw<{ page_slug: string; batch_id: string }>(
+      `SELECT page_slug, batch_id
+         FROM take_mining_work`,
+    )).toEqual([{ page_slug: 'notes/cached-b', batch_id: 'batch-b' }]);
+  });
+
+  test('preserves a newer queued hash when only the previous hash succeeded', async () => {
+    const slug = 'notes/newer-hash';
+    const originalBody = 'Original semantic prose.';
+    await queueWork(slug, originalBody, 'deferred', 'batch-a');
+    const originalHash = buildTakeMiningInput(originalBody).mining_input_hash;
+    await engine.executeRaw(
+      `INSERT INTO take_proposal_scans (
+         source_id, page_slug, mining_input_hash, prompt_version,
+         status, attempt_id, proposal_run_id, model_id,
+         proposal_count, completed_at
+       ) VALUES (
+         'default', $1, $2, $3,
+         'succeeded', 'old-attempt', 'old-run', $4,
+         0, now()
+       )`,
+      [slug, originalHash, PROPOSE_TAKES_PROMPT_VERSION, MODEL_ID],
+    );
+
+    const newerBody = 'Newer semantic prose.';
+    await queueWork(slug, newerBody, 'deferred', 'batch-a');
+    const newerHash = buildTakeMiningInput(newerBody).mining_input_hash;
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'batch-a',
+      async () => {
+        throw new Error('must not call');
+      },
+      { _extractableTypes: [] },
+    ));
+
+    expect(result.cache_hits).toBe(0);
+    expect(result.remaining_work).toBe(1);
+    expect(await engine.executeRaw<{ mining_input_hash: string }>(
+      `SELECT mining_input_hash
+         FROM take_mining_work
+        WHERE source_id = 'default' AND page_slug = $1`,
+      [slug],
+    )).toEqual([{ mining_input_hash: newerHash }]);
+  });
 });

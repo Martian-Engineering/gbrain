@@ -141,6 +141,8 @@ export interface TakeMiningRunnerCandidate {
 /** Bounded selection plus diagnostic counts. */
 export interface TakeMiningRunnerSelection {
   candidates: TakeMiningRunnerCandidate[];
+  /** Queued revisions already covered by a successful scan for this prompt. */
+  satisfiedCount: number;
   staleCount: number;
   emptyCount: number;
   batchesRead: number;
@@ -422,6 +424,7 @@ function applySelectionDiagnostics(
   selection: TakeMiningRunnerSelection,
 ): void {
   result.eligible_pages = selection.candidates.length;
+  result.cache_hits += selection.satisfiedCount;
   result.work_batches_read = selection.batchesRead;
   if (selection.staleCount > 0) {
     result.warnings.push(

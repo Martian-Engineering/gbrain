@@ -177,7 +177,7 @@ describe('propose_takes explicit work queue', () => {
     expect(result.status).toBe('ok');
     expect(result.details.stopped).toBe(false);
     expect(result.details.pages_scanned).toBe(1);
-    expect(await count('take_mining_work')).toBe(4);
+    expect(await count('take_mining_work')).toBe(3);
   });
 
   test('excludes generated, deleted, non-extractable, and canonically empty pages', async () => {
@@ -267,6 +267,99 @@ describe('propose_takes explicit work queue', () => {
       proposal_count: 0,
       mining_input_hash: hash,
     }]);
+  });
+
+  test('retires A work when an A to B to A edit returns to a successful scan', async () => {
+    const slug = 'writing/semantic-revert';
+    let calls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      calls++;
+      return [];
+    };
+    await queuePage(slug, 'Semantic revision A.');
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+
+    await queuePage(slug, 'Semantic revision B.');
+    await queuePage(slug, 'Semantic revision A.');
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+
+    expect(calls).toBe(1);
+    expect(result.details).toMatchObject({
+      eligible_pages: 0,
+      pages_scanned: 0,
+      cache_hits: 1,
+      remaining_work: 0,
+    });
+    expect(await count('take_mining_work')).toBe(0);
+  });
+
+  test('dry-run reports satisfied revert work without retiring it', async () => {
+    const slug = 'writing/semantic-revert-preview';
+    await queuePage(slug, 'Semantic revision A.');
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: noProposals,
+    });
+    await queuePage(slug, 'Semantic revision B.');
+    await queuePage(slug, 'Semantic revision A.');
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      dryRun: true,
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        throw new Error('must not call');
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      dry_run: true,
+      eligible_pages: 0,
+      pages_scanned: 0,
+      cache_hits: 1,
+      remaining_work: 1,
+    });
+    expect(await count('take_mining_work')).toBe(1);
+    expect(await count('take_proposal_scans')).toBe(1);
+  });
+
+  test('does not retire work satisfied only by a previous prompt version', async () => {
+    const slug = 'writing/old-prompt';
+    const hash = await queuePage(slug, 'Prompt-sensitive prose.');
+    await engine.executeRaw(
+      `INSERT INTO take_proposal_scans (
+         source_id, page_slug, mining_input_hash, prompt_version,
+         status, attempt_id, proposal_run_id, model_id,
+         proposal_count, completed_at
+       ) VALUES (
+         'default', $1, $2, 'previous-prompt',
+         'succeeded', 'old-attempt', 'old-run', 'test-model',
+         0, now()
+       )`,
+      [slug, hash],
+    );
+    let calls = 0;
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        calls++;
+        return [];
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(result.details).toMatchObject({
+      cache_hits: 0,
+      cache_misses: 1,
+      remaining_work: 0,
+    });
+    expect(await count('take_proposal_scans')).toBe(2);
   });
 
   test('extractor failure releases its claim and leaves work retryable', async () => {
