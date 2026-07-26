@@ -416,6 +416,7 @@ describe('resolve_take_proposal', () => {
 
     expect(result).toMatchObject({
       id,
+      source_id: 'default',
       status: 'rejected',
       acted_by: 'review-client',
       resolution_note: 'Contradicted by the source material.',
@@ -451,6 +452,7 @@ describe('resolve_take_proposal', () => {
 
     expect(result).toMatchObject({
       id,
+      source_id: 'default',
       status: 'accepted',
       promoted_row_num: 1,
       acted_by: 'local',
@@ -665,6 +667,7 @@ describe('resolve_take_proposal', () => {
       dry_run: true,
       action: 'accept',
       id,
+      source_id: 'default',
       page_slug: 'proposal-page',
       claim_text: 'Preview edit',
       kind: 'bet',
@@ -686,6 +689,33 @@ describe('resolve_take_proposal', () => {
       `SELECT COUNT(*)::int AS count FROM takes`,
     );
     expect(Number(takes[0]?.count)).toBe(0);
+  });
+
+  test('dry-run reject reports the caller write source without mutating', async () => {
+    const id = await seedProposal({
+      pageSlug: 'proposal-page',
+      claimText: 'Preview rejection',
+      proposedAt: '2026-07-20T10:00:00Z',
+    });
+
+    const result = await resolveProposal(ctx(), {
+      id,
+      action: 'reject',
+      dry_run: true,
+    });
+
+    expect(result).toEqual({
+      dry_run: true,
+      action: 'reject',
+      id,
+      source_id: 'default',
+      resolution_note: null,
+    });
+    const rows = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]?.status).toBe('pending');
   });
 
   test('a second resolution fails with the current non-pending status', async () => {
