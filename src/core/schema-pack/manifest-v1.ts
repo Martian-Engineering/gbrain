@@ -132,6 +132,12 @@ const PageTypeSchema = z.object({
    */
   expert_routing: z.boolean().default(false),
   /**
+   * Whether deterministic timeline propagation must also persist a Markdown
+   * wikilink on the referenced entity page. The write must go through
+   * trusted `put_page` so its auto-link hook reconciles the reverse edge.
+   */
+  materialized_backlinks: z.boolean().optional(),
+  /**
    * v0.42 (T3, plan D5): per-type subtype declarations. `media` declaring
    * subtypes: [{name: video, when: {path_pattern: "^videos/"}}] means
    * inferTypeAndSubtypeFromPack returns `{type: 'media', subtype: 'video'}`

@@ -231,6 +231,7 @@ page_types:
     aliases: []
     extractable: true
     expert_routing: false
+    materialized_backlinks: true
 
   # v0.41.11+ — long-running chat/transcript pages. Lives under
   # conversations/. `temporal` primitive (events through time, not an
@@ -274,6 +275,7 @@ page_types:
     aliases: []
     extractable: false
     expert_routing: false
+    materialized_backlinks: true
 
   - name: diary
     primitive: temporal

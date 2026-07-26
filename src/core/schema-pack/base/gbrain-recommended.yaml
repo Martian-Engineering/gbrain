@@ -52,6 +52,7 @@ page_types:
     aliases: []
     extractable: true
     expert_routing: false
+    materialized_backlinks: true
 
   - name: concept
     primitive: concept

@@ -310,6 +310,7 @@ page_types:
     aliases: []
     extractable: false
     expert_routing: false
+    materialized_backlinks: true
 
   - name: diary
     primitive: temporal

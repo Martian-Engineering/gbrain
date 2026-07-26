@@ -925,7 +925,11 @@ Status (v0.42):
         result.timeline_entries_created = r.entries_created;
         result.pages_processed = r.meetings_scanned;
         if (!jsonMode) {
-          console.log(`Timeline from meetings: ${r.entries_created} entries on ${r.entities_touched} entity pages from ${r.meetings_scanned} meetings`);
+          console.log(
+            `Timeline from meeting/event pages: ${r.entries_created} entries on ` +
+            `${r.entities_touched} entity pages from ${r.meetings_scanned} source pages; ` +
+            `${r.materialized_backlinks_written} materialized backlink(s)`,
+          );
         }
         // #2057 (codex): batch failures are no longer swallowed silently — make
         // them visible at the command surface (and non-zero exit) instead of
@@ -935,6 +939,13 @@ Status (v0.42):
             `[extract timeline] ${r.batch_errors} batch(es) failed to insert` +
             (r.first_batch_error ? ` (first error: ${r.first_batch_error})` : '') +
             ` — timeline is incomplete.`,
+          );
+          setCliExitVerdict(1);
+        }
+        if (r.materialized_backlink_errors > 0) {
+          console.error(
+            `[extract timeline] ${r.materialized_backlink_errors} entity page(s) failed ` +
+            `materialized backlink write — graph back-references are incomplete.`,
           );
           setCliExitVerdict(1);
         }

@@ -78,6 +78,33 @@ describe('manifest-v1: parse + validate', () => {
       name: 'TestPack',
     })).toThrow(/lowercase slug-shape/);
   });
+
+  test('page types opt into materialized backlinks explicitly', () => {
+    const omitted = parseSchemaPackManifest(minimalManifest({
+      page_types: [{
+        name: 'event',
+        primitive: 'temporal',
+        path_prefixes: ['life/events/'],
+        aliases: [],
+        extractable: false,
+        expert_routing: false,
+      }],
+    } as never));
+    expect(omitted.page_types[0]!.materialized_backlinks).toBeUndefined();
+
+    const enabled = parseSchemaPackManifest(minimalManifest({
+      page_types: [{
+        name: 'event',
+        primitive: 'temporal',
+        path_prefixes: ['life/events/'],
+        aliases: [],
+        extractable: false,
+        expert_routing: false,
+        materialized_backlinks: true,
+      }],
+    } as never));
+    expect(enabled.page_types[0]!.materialized_backlinks).toBe(true);
+  });
 });
 
 describe('manifest-v1: sha8 + identity', () => {

@@ -95,6 +95,10 @@ Every read + write path consults the active pack at runtime:
 - **`whoknows` / `find_experts`** scopes candidates to `expert_routing:
   true` types in the active pack.
 - **`extract_facts`** runs only on `extractable: true` types.
+- **Timeline propagation** selects the pack's `meeting` / `event` page types
+  (including declared aliases). A type with `materialized_backlinks: true`
+  also persists entity-page Timeline wikilinks through trusted `put_page`,
+  so the auto-link hook reconciles reverse graph edges.
 - **`enrichment-service`** routes person/company enrichment based on the
   pack's primitive declarations.
 - **Search hybrid cache** (`knobsHash`) folds in pack name + version
@@ -157,6 +161,7 @@ page_types:
     aliases: []
     extractable: false
     expert_routing: false
+    materialized_backlinks: false
 
   # Add more types here. Each maps a path prefix to a primitive +
   # opt-in flags. See src/core/schema-pack/base/gbrain-recommended.yaml

@@ -2113,8 +2113,8 @@ export async function registerBuiltinHandlers(
   });
 
   // v0.41.18.0 (A11, T8): extract-timeline-from-meetings handler. Wraps
-  // extractTimelineFromMeetings. NOT in PROTECTED_JOB_NAMES (pure SQL + string
-  // scan, no LLM spend).
+  // extractTimelineFromMeetings. NOT in PROTECTED_JOB_NAMES (deterministic
+  // scan + trusted put_page materialization, no LLM spend).
   worker.register('extract-timeline-from-meetings', async (job) => {
     const { extractTimelineFromMeetings } = await import('../core/extract-timeline-from-meetings.ts');
     const data = (job.data ?? {}) as { sourceId?: string };
