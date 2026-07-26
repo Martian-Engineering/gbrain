@@ -25,6 +25,10 @@ import {
   resolveImportTargetDir,
   resumeFilter,
 } from '../core/import-checkpoint.ts';
+import {
+  parseIngestionMode,
+  writeIntentForIngestionMode,
+} from '../core/ingestion-mode.ts';
 
 function defaultWorkers(): number {
   const cpuCount = cpus().length;
@@ -74,9 +78,10 @@ export async function runImport(
   const noEmbed = args.includes('--no-embed');
   const fresh = args.includes('--fresh');
   const jsonOutput = args.includes('--json');
+  const ingestionMode = parseIngestionMode(args) ?? 'backfill';
   const writeContext = opts.writeContext ?? {
     actor: 'cli:import',
-    writeIntent: 'backfill' as const,
+    writeIntent: writeIntentForIngestionMode(ingestionMode),
     batchId: `import:${randomUUID()}`,
   };
 
@@ -144,6 +149,7 @@ export async function runImport(
   // Programmatic callers continue passing `opts.sourceId` directly;
   // CLI callers' flag wins over opts when both are set.
   const sourceIdIdx = args.indexOf('--source-id');
+  const ingestionModeIdx = args.indexOf('--ingestion-mode');
   const flagSourceId = sourceIdIdx !== -1 ? args[sourceIdIdx + 1] : null;
   let sourceId: string | undefined = flagSourceId ?? opts.sourceId;
 
@@ -190,10 +196,11 @@ export async function runImport(
   const flagValues = new Set<number>();
   if (workersIdx !== -1) flagValues.add(workersIdx + 1);
   if (sourceIdIdx !== -1) flagValues.add(sourceIdIdx + 1);
+  if (ingestionModeIdx !== -1) flagValues.add(ingestionModeIdx + 1);
   const dirArg = args.find((a, i) => !a.startsWith('--') && !flagValues.has(i));
 
   if (!dirArg) {
-    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--source-id <id>] [--json]');
+    console.error('Usage: gbrain import <dir> [--no-embed] [--workers N] [--fresh] [--source-id <id>] [--ingestion-mode live|backfill] [--json]');
     process.exit(1);
   }
   // #1728: capture the import target ONCE as an absolute real path. Every

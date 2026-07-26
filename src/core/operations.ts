@@ -1309,6 +1309,49 @@ const put_page: Operation = {
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };
 
+/**
+ * Historical page ingestion is a distinct trusted surface rather than extra
+ * attribution knobs on put_page. The wrapper delegates every page invariant
+ * and side effect to put_page while replacing write attribution from server
+ * authentication state.
+ */
+const put_historical_page: Operation = {
+  name: 'put_historical_page',
+  description: 'Admin-only historical page write. Reuses put_page validation and processing, but records a server-owned backfill mutation in the requested batch so take mining remains deferred.',
+  params: {
+    source_id: { type: 'string', required: true, description: 'Authenticated write source' },
+    batch_id: { type: 'string', required: true, description: 'Stable historical ingestion batch id' },
+    slug: put_page.params.slug,
+    content: put_page.params.content,
+  },
+  mutating: true,
+  scope: 'admin',
+  localOnly: false,
+  handler: async (ctx, p) => {
+    const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
+    const batchId = takeMiningId(p.batch_id, 'batch_id');
+    const actor = ctx.remote === false
+      ? 'cli:put_historical_page'
+      : ctx.auth?.clientId
+        ? `mcp:${ctx.auth.clientId}`
+        : 'mcp:stdio';
+
+    return put_page.handler({
+      ...ctx,
+      sourceId,
+      writeContext: {
+        actor,
+        writeIntent: 'backfill',
+        batchId,
+        reason: 'historical_page_write',
+      },
+    }, {
+      slug: p.slug,
+      content: p.content,
+    });
+  },
+};
+
 // v0.31.2: isFactsBackstopEligible moved to src/core/facts/eligibility.ts
 // so sync.ts, file_upload, code_import, and runFactsBackstop all share one
 // predicate. Imported above.
@@ -7284,7 +7327,8 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, validate_links, put_page, delete_page, rename_page, list_pages,
+  get_page, validate_links, put_page, put_historical_page, delete_page,
+  rename_page, list_pages,
   // Page-owned durable prose refutations
   suppress_claim, unsuppress_claim, list_suppressed_claims,
   // Source-scoped slug redirects

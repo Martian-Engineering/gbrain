@@ -67,6 +67,11 @@ import {
 } from '../core/console-prefix.ts';
 import { loadStorageConfig } from '../core/storage-config.ts';
 import { getDefaultSourcePath } from '../core/source-resolver.ts';
+import {
+  parseIngestionMode,
+  writeIntentForIngestionMode,
+  type IngestionMode,
+} from '../core/ingestion-mode.ts';
 // v0.41.32.0: stamp the durable newest-COMMIT timestamp at sync time so the
 // remote staleness path reads a column instead of shelling out to git.
 // lagFromContentMs is the remote/column comparator (buildSyncStatusReport
@@ -720,6 +725,12 @@ export interface SyncOpts {
   noPull?: boolean;
   noEmbed?: boolean;
   noExtract?: boolean;
+  /**
+   * Trusted operator declaration for the material being ingested.
+   * Omitted preserves existing defaults: full sync is backfill and an
+   * incremental sync is live ingestion.
+   */
+  ingestionMode?: IngestionMode;
   /** Bug 9 — acknowledge + skip past current failure set (CLI --skip-failed). */
   skipFailed?: boolean;
   /** Bug 9 — re-attempt unacknowledged failures explicitly (CLI --retry-failed). */
@@ -2146,7 +2157,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   }
   const incrementalWriteContext = {
     actor: 'cli:sync:incremental',
-    writeIntent: 'live_ingest' as const,
+    writeIntent: writeIntentForIngestionMode(opts.ingestionMode ?? 'live'),
     batchId: pin,
   };
 
@@ -3492,7 +3503,7 @@ async function performFullSync(
     sourceId: opts.sourceId,
     writeContext: {
       actor: 'cli:sync:full',
-      writeIntent: 'backfill',
+      writeIntent: writeIntentForIngestionMode(opts.ingestionMode ?? 'backfill'),
       batchId: headCommit,
     },
     exclude: opts.exclude,
@@ -3982,6 +3993,8 @@ Options:
   --repo <path>        Path to the brain repo. Defaults to the path
                        saved by 'gbrain init'.
   --full               Force a full re-sync (rare; usually incremental).
+  --ingestion-mode     Declare incoming material as live or backfill.
+                       Defaults remain incremental=live and full=backfill.
   --src-subpath <dir>  Sync only this subdirectory of the git repo (monorepo
                        pattern: N logical sources in one repo). Git pull/diff
                        run at the repo root; imports are scoped to the subdir
@@ -4036,6 +4049,7 @@ See also:
   const noPull = args.includes('--no-pull');
   const noEmbed = args.includes('--no-embed');
   const noExtract = args.includes('--no-extract'); // v0.42.7 #1696
+  const ingestionMode = parseIngestionMode(args);
   const skipFailed = args.includes('--skip-failed');
   const retryFailed = args.includes('--retry-failed');
   const noSchemaPack = args.includes('--no-schema-pack'); // v0.41.37.0 #1569
@@ -4392,6 +4406,7 @@ See also:
         dryRun, full, noPull,
         noEmbed: effectiveNoEmbed,
         noExtract,
+        ingestionMode,
         skipFailed, retryFailed, noSchemaPack,
         sourceId: src.id,
         strategy: cfg.strategy,
@@ -4607,7 +4622,7 @@ See also:
   const singleSourceInterrupt = new AbortController();
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
-    repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, sourceId,
+    repoPath, dryRun, full, noPull, noEmbed, noExtract, ingestionMode, skipFailed, retryFailed, noSchemaPack, sourceId,
     strategy: strategyArg, concurrency,
     srcSubpath,
     exclude: excludePatterns.length > 0 ? excludePatterns : undefined,

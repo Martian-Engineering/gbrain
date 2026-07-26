@@ -12,7 +12,7 @@ import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { runImport } from '../src/commands/import.ts';
-import { performSync } from '../src/commands/sync.ts';
+import { performSync, runSync } from '../src/commands/sync.ts';
 import { importFromFile } from '../src/core/import-file.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -97,6 +97,30 @@ describe('import write-intent boundaries', () => {
     expect(rows[1]?.batch_id).toBe(rows[0]?.batch_id);
   });
 
+  test('explicit CLI import ingestion mode can classify current material as live', async () => {
+    const dir = makeImportDir({
+      'one.md': '---\ntitle: One\ntype: note\n---\n\nCurrent prose.',
+    });
+
+    const result = await runImport(engine, [
+      dir,
+      '--no-embed',
+      '--ingestion-mode',
+      'live',
+    ]);
+    expect(result.imported).toBe(1);
+
+    expect(await mutations()).toEqual([{
+      page_slug: 'one',
+      actor: 'cli:import',
+      write_intent: 'live_ingest',
+      batch_id: expect.stringMatching(/^import:/),
+    }]);
+    expect(await engine.executeRaw<{ admission: string }>(
+      `SELECT admission FROM take_mining_work WHERE page_slug = 'one'`,
+    )).toEqual([{ admission: 'immediate' }]);
+  });
+
   test('full sync is backfill while the next incremental commit is live ingestion', async () => {
     const dir = makeImportDir({
       'one.md': '---\ntitle: One\ntype: note\n---\n\nHistorical page.',
@@ -115,6 +139,7 @@ describe('import write-intent boundaries', () => {
 
     await performSync(engine, {
       repoPath: dir,
+      sourceId: 'default',
       noPull: true,
       noEmbed: true,
       full: true,
@@ -145,6 +170,7 @@ describe('import write-intent boundaries', () => {
 
     await performSync(engine, {
       repoPath: dir,
+      sourceId: 'default',
       noPull: true,
       noEmbed: true,
     });
@@ -156,5 +182,66 @@ describe('import write-intent boundaries', () => {
       write_intent: 'live_ingest',
       batch_id: updatedHead,
     });
+  });
+
+  test('explicit CLI sync backfill mode defers an incremental archive commit', async () => {
+    const dir = makeImportDir({
+      'one.md': '---\ntitle: One\ntype: note\n---\n\nInitial page.',
+    });
+    execFileSync('git', ['init', '--quiet'], { cwd: dir });
+    execFileSync('git', ['add', 'one.md'], { cwd: dir });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--quiet', '-m', 'initial'],
+      { cwd: dir },
+    );
+    await performSync(engine, {
+      repoPath: dir,
+      sourceId: 'default',
+      noPull: true,
+      noEmbed: true,
+      full: true,
+    });
+
+    writeFileSync(
+      join(dir, 'one.md'),
+      '---\ntitle: One\ntype: note\n---\n\nArchived historical addition.',
+    );
+    execFileSync('git', ['add', 'one.md'], { cwd: dir });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--quiet', '-m', 'archive'],
+      { cwd: dir },
+    );
+    const archiveHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf8',
+    }).trim();
+
+    await runSync(engine, [
+      '--repo',
+      dir,
+      '--source',
+      'default',
+      '--no-pull',
+      '--no-embed',
+      '--ingestion-mode',
+      'backfill',
+    ]);
+
+    expect((await mutations()).at(-1)).toEqual({
+      page_slug: 'one',
+      actor: 'cli:sync:incremental',
+      write_intent: 'backfill',
+      batch_id: archiveHead,
+    });
+    expect(await engine.executeRaw<{ admission: string; batch_id: string }>(
+      `SELECT admission, batch_id
+         FROM take_mining_work
+        WHERE source_id = 'default' AND page_slug = 'one'`,
+    )).toEqual([{
+      admission: 'deferred',
+      batch_id: archiveHead,
+    }]);
   });
 });

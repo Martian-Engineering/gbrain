@@ -2336,6 +2336,7 @@ SEARCH
 
 IMPORT/EXPORT
   import <dir> [--no-embed]          Import markdown directory
+    --ingestion-mode live|backfill   Declare imported material (default: backfill)
   sync [--repo <path>] [flags]       Git-to-brain incremental sync
   sync --watch [--interval N]        Continuous sync (loops until stopped)
                                      See also: autopilot --install (continuous daemon).
