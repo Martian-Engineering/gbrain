@@ -125,102 +125,84 @@ export async function addSlugAlias(
   engine: BrainEngine,
   opts: AddSlugAliasOpts,
 ): Promise<AddSlugAliasResult> {
+  return engine.transaction((tx) => addSlugAliasInTransaction(tx, opts));
+}
+
+/**
+ * Transaction-owned alias implementation for compound core operations.
+ *
+ * The caller must already hold the surrounding engine transaction. Keeping
+ * this boundary explicit lets operations such as rename_page combine page
+ * creation and alias retirement without nesting engine transactions.
+ */
+export async function addSlugAliasInTransaction(
+  tx: BrainEngine,
+  opts: AddSlugAliasOpts,
+): Promise<AddSlugAliasResult> {
   const { sourceId, aliasSlug, canonicalSlug } = opts;
   if (aliasSlug === canonicalSlug) {
     throw new SlugAliasError('self_alias', 'Alias slug and canonical slug must differ.');
   }
 
-  return engine.transaction(async (tx) => {
-    // Serialize supported alias mutations per source. This closes the race
-    // where two concurrent validations could each miss the other's edge and
-    // commit a cycle. The sources row exists for every page via the FK.
-    await tx.executeRaw(
-      `SELECT id FROM sources WHERE id = $1 FOR UPDATE`,
-      [sourceId],
-    );
-    if (!(await activePageExists(tx, canonicalSlug, sourceId))) {
-      const canonicalAlias = await tx.executeRaw<{ canonical_slug: string }>(
-        `SELECT canonical_slug FROM slug_aliases
-          WHERE source_id = $1 AND alias_slug = $2
-          LIMIT 1`,
-        [sourceId, canonicalSlug],
-      );
-      if (canonicalAlias[0]) {
-        throw new SlugAliasError(
-          'canonical_is_alias',
-          `'${canonicalSlug}' is an alias of '${canonicalAlias[0].canonical_slug}' — alias to '${canonicalAlias[0].canonical_slug}' instead.`,
-        );
-      }
-      throw new SlugAliasError(
-        'canonical_not_found',
-        `Canonical page '${canonicalSlug}' does not exist or is soft-deleted in source '${sourceId}'.`,
-      );
-    }
-
-    const existing = await tx.executeRaw<{
-      canonical_slug: string;
-      notes: string | null;
-    }>(
-      `SELECT canonical_slug, notes FROM slug_aliases
+  // Serialize supported alias mutations per source. This closes the race
+  // where two concurrent validations could each miss the other's edge and
+  // commit a cycle. The sources row exists for every page via the FK.
+  await tx.executeRaw(
+    `SELECT id FROM sources WHERE id = $1 FOR UPDATE`,
+    [sourceId],
+  );
+  if (!(await activePageExists(tx, canonicalSlug, sourceId))) {
+    const canonicalAlias = await tx.executeRaw<{ canonical_slug: string }>(
+      `SELECT canonical_slug FROM slug_aliases
         WHERE source_id = $1 AND alias_slug = $2
         LIMIT 1`,
-      [sourceId, aliasSlug],
+      [sourceId, canonicalSlug],
     );
-    const identical = existing[0]?.canonical_slug === canonicalSlug;
-    if (existing.length > 0 && opts.replace !== true) {
-      if (!identical) {
-        throw new SlugAliasError(
-          'alias_replacement_required',
-          `Alias '${aliasSlug}' already points to '${existing[0].canonical_slug}'. Pass replace: true to change it.`,
-        );
-      }
-    }
-
-    const oldPages = await tx.executeRaw<{ source_path: string | null }>(
-      `SELECT source_path FROM pages
-        WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
-        LIMIT 1`,
-      [sourceId, aliasSlug],
-    );
-    if (oldPages.length > 0 && opts.softDeleteOld !== true) {
+    if (canonicalAlias[0]) {
       throw new SlugAliasError(
-        'alias_page_collision',
-        `Alias slug '${aliasSlug}' is an active page in source '${sourceId}'. Pass soft_delete_old: true to soft-delete it atomically.`,
+        'canonical_is_alias',
+        `'${canonicalSlug}' is an alias of '${canonicalAlias[0].canonical_slug}' — alias to '${canonicalAlias[0].canonical_slug}' instead.`,
       );
     }
-
-    if (identical) {
-      let softDeletedOld = false;
-      let factsMigrated = 0;
-      if (oldPages.length > 0) {
-        softDeletedOld = (await tx.softDeletePage(aliasSlug, { sourceId })) !== null;
-        if (!softDeletedOld) {
-          throw new Error(`Active alias page '${aliasSlug}' changed during alias creation.`);
-        }
-        factsMigrated = (await tx.migrateFactsToCanonical(
-          aliasSlug,
-          canonicalSlug,
-          sourceId,
-        )).migrated;
-      }
-      return {
-        status: 'unchanged' as const,
-        source_id: sourceId,
-        alias_slug: aliasSlug,
-        canonical_slug: canonicalSlug,
-        soft_deleted_old: softDeletedOld,
-        facts_migrated: factsMigrated,
-        notes: existing[0]?.notes ?? null,
-        old_source_path: oldPages[0]?.source_path ?? null,
-      };
-    }
-
-    const aliases = await tx.executeRaw<{ alias_slug: string; canonical_slug: string }>(
-      `SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id = $1`,
-      [sourceId],
+    throw new SlugAliasError(
+      'canonical_not_found',
+      `Canonical page '${canonicalSlug}' does not exist or is soft-deleted in source '${sourceId}'.`,
     );
-    assertNoCycle(aliases, aliasSlug, canonicalSlug);
+  }
 
+  const existing = await tx.executeRaw<{
+    canonical_slug: string;
+    notes: string | null;
+  }>(
+    `SELECT canonical_slug, notes FROM slug_aliases
+      WHERE source_id = $1 AND alias_slug = $2
+      LIMIT 1`,
+    [sourceId, aliasSlug],
+  );
+  const identical = existing[0]?.canonical_slug === canonicalSlug;
+  if (existing.length > 0 && opts.replace !== true) {
+    if (!identical) {
+      throw new SlugAliasError(
+        'alias_replacement_required',
+        `Alias '${aliasSlug}' already points to '${existing[0].canonical_slug}'. Pass replace: true to change it.`,
+      );
+    }
+  }
+
+  const oldPages = await tx.executeRaw<{ source_path: string | null }>(
+    `SELECT source_path FROM pages
+      WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL
+      LIMIT 1`,
+    [sourceId, aliasSlug],
+  );
+  if (oldPages.length > 0 && opts.softDeleteOld !== true) {
+    throw new SlugAliasError(
+      'alias_page_collision',
+      `Alias slug '${aliasSlug}' is an active page in source '${sourceId}'. Pass soft_delete_old: true to soft-delete it atomically.`,
+    );
+  }
+
+  if (identical) {
     let softDeletedOld = false;
     let factsMigrated = 0;
     if (oldPages.length > 0) {
@@ -234,37 +216,67 @@ export async function addSlugAlias(
         sourceId,
       )).migrated;
     }
-
-    const status = existing.length > 0 ? 'replaced' as const : 'added' as const;
-    if (status === 'replaced') {
-      const updated = await tx.executeRaw<{ id: number }>(
-        `UPDATE slug_aliases
-            SET canonical_slug = $3,
-                notes = $4
-          WHERE source_id = $1 AND alias_slug = $2
-          RETURNING id`,
-        [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
-      );
-      if (updated.length !== 1) throw new Error(`Alias '${aliasSlug}' changed during replacement.`);
-    } else {
-      await tx.executeRaw(
-        `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug, notes)
-         VALUES ($1, $2, $3, $4)`,
-        [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
-      );
-    }
-
     return {
-      status,
+      status: 'unchanged' as const,
       source_id: sourceId,
       alias_slug: aliasSlug,
       canonical_slug: canonicalSlug,
       soft_deleted_old: softDeletedOld,
       facts_migrated: factsMigrated,
-      notes: opts.notes ?? null,
+      notes: existing[0]?.notes ?? null,
       old_source_path: oldPages[0]?.source_path ?? null,
     };
-  });
+  }
+
+  const aliases = await tx.executeRaw<{ alias_slug: string; canonical_slug: string }>(
+    `SELECT alias_slug, canonical_slug FROM slug_aliases WHERE source_id = $1`,
+    [sourceId],
+  );
+  assertNoCycle(aliases, aliasSlug, canonicalSlug);
+
+  let softDeletedOld = false;
+  let factsMigrated = 0;
+  if (oldPages.length > 0) {
+    softDeletedOld = (await tx.softDeletePage(aliasSlug, { sourceId })) !== null;
+    if (!softDeletedOld) {
+      throw new Error(`Active alias page '${aliasSlug}' changed during alias creation.`);
+    }
+    factsMigrated = (await tx.migrateFactsToCanonical(
+      aliasSlug,
+      canonicalSlug,
+      sourceId,
+    )).migrated;
+  }
+
+  const status = existing.length > 0 ? 'replaced' as const : 'added' as const;
+  if (status === 'replaced') {
+    const updated = await tx.executeRaw<{ id: number }>(
+      `UPDATE slug_aliases
+          SET canonical_slug = $3,
+              notes = $4
+        WHERE source_id = $1 AND alias_slug = $2
+        RETURNING id`,
+      [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
+    );
+    if (updated.length !== 1) throw new Error(`Alias '${aliasSlug}' changed during replacement.`);
+  } else {
+    await tx.executeRaw(
+      `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug, notes)
+       VALUES ($1, $2, $3, $4)`,
+      [sourceId, aliasSlug, canonicalSlug, opts.notes ?? null],
+    );
+  }
+
+  return {
+    status,
+    source_id: sourceId,
+    alias_slug: aliasSlug,
+    canonical_slug: canonicalSlug,
+    soft_deleted_old: softDeletedOld,
+    facts_migrated: factsMigrated,
+    notes: opts.notes ?? null,
+    old_source_path: oldPages[0]?.source_path ?? null,
+  };
 }
 
 /** Source-scoped and idempotent. Removing an alias never restores a page. */

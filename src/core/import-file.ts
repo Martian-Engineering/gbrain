@@ -293,6 +293,12 @@ export async function importFromContent(
      * leave it unset → markers preserved (the gate + CLI own them).
      */
     remote?: boolean;
+    /**
+     * Internal compound-operation seam. When true, the supplied engine is
+     * already transaction-scoped and this function must not open a nested
+     * transaction. Public callers leave this unset.
+     */
+    withinTransaction?: boolean;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -745,7 +751,7 @@ export async function importFromContent(
   // schema DEFAULT — required for multi-source brains; harmless ('default')
   // for single-source callers.
   const txOpts = sourceId ? { sourceId } : undefined;
-  await engine.transaction(async (tx) => {
+  const persistImport = async (tx: BrainEngine): Promise<void> => {
     if (existing) await tx.createVersion(slug, txOpts);
 
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
@@ -878,7 +884,12 @@ export async function importFromContent(
         );
       } catch { /* same reason — silent skip */ }
     }
-  });
+  };
+  if (opts.withinTransaction) {
+    await persistImport(engine);
+  } else {
+    await engine.transaction(persistImport);
+  }
 
   // T3 — project frontmatter `aliases:` into page_aliases (free-text alias
   // resolution for search). Runs AFTER the page write commits so the slug

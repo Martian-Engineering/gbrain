@@ -50,6 +50,7 @@ import {
   SlugAliasError,
   syncedFileWarning,
 } from './slug-alias.ts';
+import { PageRenameError, renamePage } from './page-rename.ts';
 import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
 import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
 import {
@@ -1484,6 +1485,113 @@ const delete_page: Operation = {
     return { status: 'soft_deleted', slug, recoverable_until: 'now + 72h via restore_page' };
   },
   cliHints: { name: 'delete', positional: ['slug'] },
+};
+
+const rename_page: Operation = {
+  name: 'rename_page',
+  description: 'Atomically create a renamed destination and retire the old page as a source-scoped slug alias. Database changes commit together; source-file write-through and optional old-file removal run afterward and are reported explicitly.',
+  params: {
+    old_slug: { type: 'string', required: true, description: 'Active page slug to retire' },
+    new_slug: { type: 'string', required: true, description: 'Unoccupied destination slug in the same source' },
+    content: { type: 'string', required: true, description: 'Complete renamed Markdown content' },
+    remove_file: { type: 'boolean', description: 'Trusted local or source-bound admin callers only: remove the old source file after the renamed file is written.' },
+    source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
+    source: { type: 'string', description: 'CLI spelling of source_id (--source)' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, p) => {
+    const oldSlug = p.old_slug as string;
+    const newSlug = p.new_slug as string;
+    const content = p.content as string;
+    const sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
+    validatePageSlug(oldSlug);
+    validatePageSlug(newSlug);
+    enforceSubagentSlugFence(ctx, oldSlug, 'rename_page');
+    enforceSubagentSlugFence(ctx, newSlug, 'rename_page');
+    if (
+      p.remove_file === true
+      && ctx.remote !== false
+      && !hasScope(ctx.auth?.scopes ?? [], 'admin')
+    ) {
+      throw new OperationError(
+        'permission_denied',
+        'remove_file is available only to trusted local or admin-scoped callers.',
+      );
+    }
+    const origin = await ctx.engine.getPage(oldSlug, { sourceId });
+    if (!origin) {
+      throw new OperationError(
+        'page_not_found',
+        `Page not found: ${oldSlug}`,
+        'Check the slug and source.',
+      );
+    }
+    const destination = await ctx.engine.getPage(newSlug, {
+      sourceId,
+      includeDeleted: true,
+    });
+    if (destination) {
+      throw new OperationError(
+        'page_exists',
+        `Page already exists: ${newSlug}`,
+        'Choose an unoccupied destination slug.',
+      );
+    }
+    if (ctx.dryRun) {
+      return {
+        dry_run: true,
+        action: 'rename_page',
+        source_id: sourceId,
+        old_slug: oldSlug,
+        new_slug: newSlug,
+      };
+    }
+
+    try {
+      const renamed = await renamePage(ctx.engine, {
+        sourceId,
+        oldSlug,
+        newSlug,
+        content,
+        remote: ctx.remote !== false,
+      });
+      const writeThrough = await writePageThrough(ctx.engine, newSlug, {
+        sourceId,
+        logger: ctx.logger,
+      });
+      const fileRemoval = p.remove_file === true && writeThrough.written
+        ? await removeSyncedSourceFile(
+          ctx.engine,
+          sourceId,
+          renamed.alias.old_source_path,
+          oldSlug,
+        )
+        : { file_removed: false };
+      const cache = await invalidateQueryCache(ctx.engine, sourceId);
+      return {
+        status: 'renamed',
+        source_id: sourceId,
+        old_slug: oldSlug,
+        new_slug: newSlug,
+        alias_created: true,
+        old_page_soft_deleted: renamed.alias.soft_deleted_old,
+        facts_migrated: renamed.alias.facts_migrated,
+        write_through: writeThrough,
+        ...fileRemoval,
+        cache_rows_invalidated: cache.rows_invalidated,
+      };
+    } catch (error) {
+      if (error instanceof PageRenameError || error instanceof SlugAliasError) {
+        throw new OperationError(error.code, error.message);
+      }
+      throw error;
+    }
+  },
+  cliHints: {
+    name: 'rename-page',
+    positional: ['old_slug', 'new_slug'],
+  },
 };
 
 function aliasAuditActor(ctx: OperationContext): SlugAliasAuditActor {
@@ -6815,7 +6923,7 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, validate_links, put_page, delete_page, list_pages,
+  get_page, validate_links, put_page, delete_page, rename_page, list_pages,
   // Page-owned durable prose refutations
   suppress_claim, unsuppress_claim, list_suppressed_claims,
   // Source-scoped slug redirects
