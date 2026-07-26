@@ -151,6 +151,8 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   _leaseSeconds?: number;
   /** Test seam for bounded queue pagination. */
   _workBatchSize?: number;
+  /** Test seam for asserting bounded work loading and settlement payloads. */
+  _onWorkBatch?: (metrics: TakeMiningWorkBatchMetrics) => void;
   /** Test seam for synchronizing workers immediately before atomic claim. */
   _beforeClaim?: (pageSlug: string) => Promise<void>;
   /** Test seam for model-price coverage. */
@@ -168,6 +170,14 @@ export interface ProposeTakesResult {
   proposals_inserted: number;
   budget_exhausted: boolean;
   warnings: string[];
+}
+
+/** Bounded work-selection metrics exposed only through the test seam. */
+export interface TakeMiningWorkBatchMetrics {
+  loadedRows: number;
+  classifiedRows: number;
+  canonicalEmptyRows: number;
+  serializedBytes: number;
 }
 
 /**
@@ -415,8 +425,8 @@ async function settleIneligibleWork(
   extractableTypes: ReadonlySet<string>,
   selector: TakeMiningSelector,
   dryRun: boolean,
-): Promise<{ total: number; canonicalEmpty: number }> {
-  if (dryRun) return { total: 0, canonicalEmpty: 0 };
+): Promise<number> {
+  if (dryRun) return 0;
   const params: unknown[] = [];
   const scoped = sourcePredicate(scope, params);
   params.push(selector.admission);
@@ -442,39 +452,17 @@ async function settleIneligibleWork(
         AND w.admission = ${admissionParam}
         ${batchPredicate}`;
 
-  const rows = await engine.executeRaw<{ page_slug: string }>(
-    `DELETE FROM take_mining_work w
-      WHERE ${workWhere}
-        AND NOT (${eligiblePage})
-      RETURNING page_slug`,
+  const [row] = await engine.executeRaw<{ count: number }>(
+    `WITH settled AS (
+       DELETE FROM take_mining_work w
+        WHERE ${workWhere}
+          AND NOT (${eligiblePage})
+       RETURNING 1
+     )
+     SELECT COUNT(*)::int AS count FROM settled`,
     params,
   );
-
-  // Canonical emptiness cannot be expressed safely as a SQL approximation:
-  // managed regions and visible-link normalization belong to the input
-  // builder. Classify with that same builder, then delete only the exact
-  // work/body pair observed so concurrent page edits remain queued.
-  const candidates = await engine.executeRaw<TakeMiningWorkBody>(
-    `SELECT w.source_id, w.page_slug, w.mining_input_hash, p.compiled_truth
-       FROM take_mining_work w
-       JOIN pages p
-         ON p.source_id = w.source_id
-        AND p.slug = w.page_slug
-      WHERE ${workWhere}
-        AND ${eligiblePage}`,
-    params,
-  );
-  const canonicalEmpty = candidates.filter(
-    candidate => classifyTakeMiningWork(candidate).kind === 'canonical_empty',
-  );
-  const canonicalEmptySettled = await settleCanonicalEmptyWork(
-    engine,
-    canonicalEmpty,
-  );
-  return {
-    total: rows.length + canonicalEmptySettled,
-    canonicalEmpty: canonicalEmptySettled,
-  };
+  return row?.count ?? 0;
 }
 
 async function loadCandidateWork(
@@ -486,6 +474,8 @@ async function loadCandidateWork(
   pageLimit: number,
   batchSize: number,
   skipPagesWithFence: boolean,
+  dryRun: boolean,
+  onWorkBatch?: (metrics: TakeMiningWorkBatchMetrics) => void,
 ): Promise<{
   candidates: Array<{
     work: TakeMiningWorkRow;
@@ -493,6 +483,7 @@ async function loadCandidateWork(
   }>;
   staleCount: number;
   emptyCount: number;
+  ineligibleCount: number;
   batchesRead: number;
 }> {
   const candidates: Array<{
@@ -501,6 +492,7 @@ async function loadCandidateWork(
   }> = [];
   let staleCount = 0;
   let emptyCount = 0;
+  let ineligibleCount = 0;
   let batchesRead = 0;
   let cursor: TakeMiningWorkCursor | undefined;
 
@@ -516,18 +508,39 @@ async function loadCandidateWork(
     );
     if (batch.length === 0) break;
     batchesRead++;
+    let classifiedRows = 0;
+    const canonicalEmpty: TakeMiningWorkBody[] = [];
 
     for (const work of batch) {
+      classifiedRows++;
       const classified = classifyTakeMiningWork(work);
       if (classified.kind === 'stale') {
         staleCount++;
       } else if (classified.kind === 'canonical_empty') {
         emptyCount++;
+        canonicalEmpty.push(work);
       } else if (!(skipPagesWithFence && hasCompleteFence(work.compiled_truth))) {
         candidates.push({ work, input: classified.input });
         if (candidates.length === pageLimit) break;
       }
     }
+    let serializedBytes = 0;
+    const settledCount = dryRun
+      ? 0
+      : await settleCanonicalEmptyWork(
+        engine,
+        canonicalEmpty,
+        onWorkBatch
+          ? bytes => { serializedBytes = bytes; }
+          : undefined,
+      );
+    ineligibleCount += settledCount;
+    onWorkBatch?.({
+      loadedRows: batch.length,
+      classifiedRows,
+      canonicalEmptyRows: canonicalEmpty.length,
+      serializedBytes,
+    });
 
     const last = batch.at(-1);
     if (!last || batch.length < batchSize) break;
@@ -539,7 +552,13 @@ async function loadCandidateWork(
     };
   }
 
-  return { candidates, staleCount, emptyCount, batchesRead };
+  return {
+    candidates,
+    staleCount,
+    emptyCount,
+    ineligibleCount,
+    batchesRead,
+  };
 }
 
 async function claimScan(
@@ -824,7 +843,7 @@ async function selectRunnerWork(
   if (!extractableTypes) return null;
   const scope = runnerScope(ctx, opts);
   const selector = runnerSelector(opts);
-  const settled = await settleIneligibleWork(
+  const structurallyIneligibleCount = await settleIneligibleWork(
     ctx.engine,
     scope,
     extractableTypes,
@@ -847,12 +866,14 @@ async function selectRunnerWork(
     opts.pageCap,
     takeMiningWorkBatchSize(opts.pageCap, opts._workBatchSize),
     opts.skipPagesWithFence ?? false,
+    opts.dryRun ?? false,
+    opts._onWorkBatch,
   );
   return {
     ...selection,
-    emptyCount: selection.emptyCount + settled.canonicalEmpty,
     satisfiedCount,
-    ineligibleCount: settled.total,
+    ineligibleCount:
+      structurallyIneligibleCount + selection.ineligibleCount,
   };
 }
 
@@ -920,6 +941,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
         _extractableTypes: opts._extractableTypes,
         _leaseSeconds: opts._leaseSeconds,
         _workBatchSize: opts._workBatchSize,
+        _onWorkBatch: opts._onWorkBatch,
         _beforeClaim: opts._beforeClaim,
         _estimatedPageSpendUsd: opts._estimatedPageSpendUsd,
         _checkRunBudget: estimate => this.checkBudget(estimate),

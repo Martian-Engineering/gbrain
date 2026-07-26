@@ -27,6 +27,7 @@ import type {
   ProposeTakesExtractor,
   ProposeTakesResult,
   ProposedTake,
+  TakeMiningWorkBatchMetrics,
 } from './propose-takes.ts';
 import {
   TAKE_MINING_MAX_OUTPUT_TOKENS,
@@ -96,6 +97,7 @@ interface TakeMiningRunnerCommon {
   _extractableTypes?: readonly string[];
   _leaseSeconds?: number;
   _workBatchSize?: number;
+  _onWorkBatch?: (metrics: TakeMiningWorkBatchMetrics) => void;
   _beforeClaim?: (pageSlug: string) => Promise<void>;
   _estimatedPageSpendUsd?: number | null;
   _checkRunBudget?: (estimate: SubmitEstimate) => BudgetCheckResult;

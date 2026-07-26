@@ -274,6 +274,66 @@ describe('propose_takes explicit work queue', () => {
     ]);
   });
 
+  test('bounds canonical-empty cleanup by the configured work batch', async () => {
+    const managedBody =
+      '<!-- gbrain:backlinks:begin -->\n' +
+      'x'.repeat(2_048) +
+      '\n<!-- gbrain:backlinks:end -->';
+    for (let index = 0; index < 40; index++) {
+      await queuePage(`writing/managed-batch-${index.toString().padStart(2, '0')}`, managedBody);
+    }
+    await queuePage('writing/first-eligible', 'Mine this page first.', {
+      priority: 100,
+    });
+
+    const firstMetrics: Array<{
+      loadedRows: number;
+      classifiedRows: number;
+      canonicalEmptyRows: number;
+      serializedBytes: number;
+    }> = [];
+    const first = await runPhaseProposeTakes(ctx(), {
+      pageLimit: 1,
+      _workBatchSize: 5,
+      _extractableTypes: NOTE_TYPES,
+      _onWorkBatch: metrics => firstMetrics.push(metrics),
+      extractor: noProposals,
+    });
+
+    expect(first.details).toMatchObject({
+      pages_scanned: 1,
+      ineligible_work_settled: 0,
+      remaining_work: 40,
+    });
+    expect(firstMetrics).toEqual([{
+      loadedRows: 5,
+      classifiedRows: 1,
+      canonicalEmptyRows: 0,
+      serializedBytes: 0,
+    }]);
+
+    const drainMetrics: typeof firstMetrics = [];
+    const drained = await runPhaseProposeTakes(ctx(), {
+      pageLimit: 1,
+      _workBatchSize: 5,
+      _extractableTypes: NOTE_TYPES,
+      _onWorkBatch: metrics => drainMetrics.push(metrics),
+      extractor: noProposals,
+    });
+
+    expect(drained.details).toMatchObject({
+      pages_scanned: 0,
+      ineligible_work_settled: 40,
+      remaining_work: 0,
+    });
+    expect(drainMetrics).toHaveLength(8);
+    expect(Math.max(...drainMetrics.map(metrics => metrics.loadedRows))).toBe(5);
+    expect(Math.max(...drainMetrics.map(metrics => metrics.classifiedRows))).toBe(5);
+    expect(Math.max(...drainMetrics.map(metrics => metrics.canonicalEmptyRows))).toBe(5);
+    expect(Math.max(...drainMetrics.map(metrics => metrics.serializedBytes)))
+      .toBeLessThan(managedBody.length * 6);
+  });
+
   test('passes canonical prose while preserving fence rows as dedup context', async () => {
     const body = `Opening [Atlas](https://old.example/atlas).
 

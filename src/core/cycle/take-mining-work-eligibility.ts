@@ -49,9 +49,11 @@ export function classifyTakeMiningWork(
 export async function settleCanonicalEmptyWork(
   engine: BrainEngine,
   candidates: readonly TakeMiningWorkBody[],
+  onSerialized?: (bytes: number) => void,
 ): Promise<number> {
   if (candidates.length === 0) return 0;
   const observed = JSON.stringify(candidates);
+  if (onSerialized) onSerialized(Buffer.byteLength(observed, 'utf8'));
   const settled = await engine.executeRaw<{ page_slug: string }>(
     `WITH observed AS (
        SELECT *
