@@ -18,6 +18,7 @@ import {
 } from '../src/core/cycle/propose-takes.ts';
 import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { getTakeMiningStatus } from '../src/core/take-mining-control.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -181,7 +182,7 @@ describe('propose_takes explicit work queue', () => {
     expect(await count('take_mining_work')).toBe(2);
   });
 
-  test('excludes generated, deleted, non-extractable, and canonically empty pages', async () => {
+  test('settles generated, deleted, non-extractable, whitespace-only, and canonically empty pages', async () => {
     await queuePage('writing/generated', 'Generated prose.', {
       frontmatter: { dream_generated: true },
     });
@@ -191,10 +192,12 @@ describe('propose_takes explicit work queue', () => {
         WHERE source_id = 'default' AND slug = 'writing/deleted'`,
     );
     await queuePage('writing/wrong-type', 'Wrong type prose.', { type: 'metadata' });
+    await queuePage('writing/whitespace-only', ' \n\t\n ');
     await queuePage(
       'writing/managed-only',
       '<!-- gbrain:backlinks:begin -->\nGenerated\n<!-- gbrain:backlinks:end -->',
     );
+    expect(await count('take_mining_work')).toBe(4);
 
     let calls = 0;
     const result = await runPhaseProposeTakes(ctx(), {
@@ -207,8 +210,68 @@ describe('propose_takes explicit work queue', () => {
 
     expect(calls).toBe(0);
     expect(result.details.pages_scanned).toBe(0);
-    expect(result.details.ineligible_work_settled).toBe(2);
-    expect(await count('take_mining_work')).toBe(1);
+    expect(result.details.ineligible_work_settled).toBe(4);
+    expect(result.details.remaining_work).toBe(0);
+    expect(result.details.warnings).toContain(
+      '2 take-mining work items had no canonical prose and were not eligible for mining',
+    );
+    expect(await count('take_mining_work')).toBe(0);
+    expect((await getTakeMiningStatus(ctx(), {
+      sourceId: 'default',
+    })).queue).toEqual({
+      total: 0,
+      immediate: 0,
+      deferred: 0,
+    });
+    expect(await engine.executeRaw<{ page_slug: string }>(
+      `SELECT page_slug
+         FROM page_mutations
+        WHERE source_id = 'default'
+          AND page_slug IN ('writing/managed-only', 'writing/whitespace-only')
+        ORDER BY page_slug`,
+    )).toEqual([
+      { page_slug: 'writing/managed-only' },
+      { page_slug: 'writing/whitespace-only' },
+    ]);
+  });
+
+  test('canonical-empty cleanup preserves eligible and stale work', async () => {
+    await queuePage('writing/eligible-retry', 'Eligible prose.');
+    await queuePage('writing/stale-preserved', 'Current prose.');
+    await engine.executeRaw(
+      `UPDATE take_mining_work
+          SET mining_input_hash = 'stale-hash'
+        WHERE source_id = 'default'
+          AND page_slug = 'writing/stale-preserved'`,
+    );
+    await queuePage(
+      'writing/managed-only-cleanup',
+      '<!-- gbrain:backlinks:begin -->\nGenerated\n<!-- gbrain:backlinks:end -->',
+    );
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        throw new Error('keep eligible work retryable');
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      pages_scanned: 1,
+      ineligible_work_settled: 1,
+      remaining_work: 2,
+    });
+    expect(result.details.warnings).toContain(
+      '1 take-mining work item had stale semantic hashes and was preserved',
+    );
+    expect(await engine.executeRaw<{ page_slug: string }>(
+      `SELECT page_slug
+         FROM take_mining_work
+        ORDER BY page_slug`,
+    )).toEqual([
+      { page_slug: 'writing/eligible-retry' },
+      { page_slug: 'writing/stale-preserved' },
+    ]);
   });
 
   test('passes canonical prose while preserving fence rows as dedup context', async () => {

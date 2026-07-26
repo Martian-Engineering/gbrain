@@ -61,6 +61,12 @@ import {
   type TakeMiningRunnerWork,
 } from './take-mining-runner.ts';
 import { withTakeMiningLock } from './take-mining-lock.ts';
+import {
+  classifyTakeMiningWork,
+  settleCanonicalEmptyWork,
+  takeMiningPageEligibilityPredicate,
+  type TakeMiningWorkBody,
+} from './take-mining-work-eligibility.ts';
 
 export {
   TakeMiningRunnerError,
@@ -270,11 +276,7 @@ export function parseExtractorOutput(raw: string): ProposedTake[] {
   return parseExtractorOutputResult(raw).proposals;
 }
 
-interface TakeMiningWorkRow {
-  source_id: string;
-  page_slug: string;
-  mining_input_hash: string;
-  compiled_truth: string;
+interface TakeMiningWorkRow extends TakeMiningWorkBody {
   priority: number;
   created_at: string;
 }
@@ -369,6 +371,7 @@ async function loadEligibleWorkBatch(
   }
   params.push(batchSize);
   const limitParam = `$${params.length}`;
+  const mineablePage = takeMiningPageEligibilityPredicate('p', typePlaceholders);
 
   return engine.executeRaw<TakeMiningWorkRow>(
     `SELECT w.source_id, w.page_slug, w.mining_input_hash,
@@ -380,11 +383,7 @@ async function loadEligibleWorkBatch(
       WHERE ${scoped}
         AND w.admission = ${admissionParam}
         ${batchPredicate}
-        AND p.deleted_at IS NULL
-        AND p.page_kind = 'markdown'
-        AND p.type IN (${typePlaceholders.join(', ')})
-        AND length(trim(p.compiled_truth)) > 0
-        AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+        AND ${mineablePage}
         AND NOT EXISTS (
           SELECT 1
             FROM take_proposal_scans s
@@ -416,8 +415,8 @@ async function settleIneligibleWork(
   extractableTypes: ReadonlySet<string>,
   selector: TakeMiningSelector,
   dryRun: boolean,
-): Promise<number> {
-  if (dryRun) return 0;
+): Promise<{ total: number; canonicalEmpty: number }> {
+  if (dryRun) return { total: 0, canonicalEmpty: 0 };
   const params: unknown[] = [];
   const scoped = sourcePredicate(scope, params);
   params.push(selector.admission);
@@ -431,30 +430,51 @@ async function settleIneligibleWork(
     params.push(type);
     return `$${params.length}`;
   });
-  const eligiblePage = typePlaceholders.length === 0
-    ? 'FALSE'
-    : `EXISTS (
+  const mineablePage = takeMiningPageEligibilityPredicate('p', typePlaceholders);
+  const eligiblePage = `EXISTS (
          SELECT 1
            FROM pages p
           WHERE p.source_id = w.source_id
             AND p.slug = w.page_slug
-            AND p.deleted_at IS NULL
-            AND p.page_kind = 'markdown'
-            AND p.type IN (${typePlaceholders.join(', ')})
-            AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+            AND ${mineablePage}
        )`;
-  const where = `${scoped}
+  const workWhere = `${scoped}
         AND w.admission = ${admissionParam}
-        ${batchPredicate}
-        AND NOT (${eligiblePage})`;
+        ${batchPredicate}`;
 
   const rows = await engine.executeRaw<{ page_slug: string }>(
     `DELETE FROM take_mining_work w
-      WHERE ${where}
+      WHERE ${workWhere}
+        AND NOT (${eligiblePage})
       RETURNING page_slug`,
     params,
   );
-  return rows.length;
+
+  // Canonical emptiness cannot be expressed safely as a SQL approximation:
+  // managed regions and visible-link normalization belong to the input
+  // builder. Classify with that same builder, then delete only the exact
+  // work/body pair observed so concurrent page edits remain queued.
+  const candidates = await engine.executeRaw<TakeMiningWorkBody>(
+    `SELECT w.source_id, w.page_slug, w.mining_input_hash, p.compiled_truth
+       FROM take_mining_work w
+       JOIN pages p
+         ON p.source_id = w.source_id
+        AND p.slug = w.page_slug
+      WHERE ${workWhere}
+        AND ${eligiblePage}`,
+    params,
+  );
+  const canonicalEmpty = candidates.filter(
+    candidate => classifyTakeMiningWork(candidate).kind === 'canonical_empty',
+  );
+  const canonicalEmptySettled = await settleCanonicalEmptyWork(
+    engine,
+    canonicalEmpty,
+  );
+  return {
+    total: rows.length + canonicalEmptySettled,
+    canonicalEmpty: canonicalEmptySettled,
+  };
 }
 
 async function loadCandidateWork(
@@ -498,13 +518,13 @@ async function loadCandidateWork(
     batchesRead++;
 
     for (const work of batch) {
-      const input = buildTakeMiningInput(work.compiled_truth);
-      if (input.prose.length === 0) {
-        emptyCount++;
-      } else if (input.mining_input_hash !== work.mining_input_hash) {
+      const classified = classifyTakeMiningWork(work);
+      if (classified.kind === 'stale') {
         staleCount++;
+      } else if (classified.kind === 'canonical_empty') {
+        emptyCount++;
       } else if (!(skipPagesWithFence && hasCompleteFence(work.compiled_truth))) {
-        candidates.push({ work, input });
+        candidates.push({ work, input: classified.input });
         if (candidates.length === pageLimit) break;
       }
     }
@@ -804,7 +824,7 @@ async function selectRunnerWork(
   if (!extractableTypes) return null;
   const scope = runnerScope(ctx, opts);
   const selector = runnerSelector(opts);
-  const ineligibleCount = await settleIneligibleWork(
+  const settled = await settleIneligibleWork(
     ctx.engine,
     scope,
     extractableTypes,
@@ -828,7 +848,12 @@ async function selectRunnerWork(
     takeMiningWorkBatchSize(opts.pageCap, opts._workBatchSize),
     opts.skipPagesWithFence ?? false,
   );
-  return { ...selection, satisfiedCount, ineligibleCount };
+  return {
+    ...selection,
+    emptyCount: selection.emptyCount + settled.canonicalEmpty,
+    satisfiedCount,
+    ineligibleCount: settled.total,
+  };
 }
 
 async function countRunnerWork(

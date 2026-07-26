@@ -372,7 +372,7 @@ function applySelectionDiagnostics(
   }
   if (selection.emptyCount > 0) {
     result.warnings.push(
-      `${selection.emptyCount} take-mining work item${selection.emptyCount === 1 ? '' : 's'} had no canonical prose and ${selection.emptyCount === 1 ? 'was' : 'were'} preserved`,
+      `${selection.emptyCount} take-mining work item${selection.emptyCount === 1 ? '' : 's'} had no canonical prose and ${selection.emptyCount === 1 ? 'was' : 'were'} not eligible for mining`,
     );
   }
 }
