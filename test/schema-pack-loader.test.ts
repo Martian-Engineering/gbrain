@@ -79,6 +79,22 @@ describe('manifest-v1: parse + validate', () => {
     })).toThrow(/lowercase slug-shape/);
   });
 
+  test('validates inference-neutral link directories', () => {
+    const omitted = parseSchemaPackManifest(minimalManifest());
+    expect(omitted.link_directories).toEqual([]);
+
+    const declared = parseSchemaPackManifest(minimalManifest({
+      link_directories: ['partners', 'client-records'],
+    } as never));
+    expect(declared.link_directories).toEqual(['partners', 'client-records']);
+
+    for (const directory of ['', '   ', 'Partners', 'partners/archive']) {
+      expect(() => parseSchemaPackManifest(minimalManifest({
+        link_directories: [directory],
+      } as never))).toThrow(/link director/i);
+    }
+  });
+
   test('page types opt into materialized backlinks explicitly', () => {
     const omitted = parseSchemaPackManifest(minimalManifest({
       page_types: [{

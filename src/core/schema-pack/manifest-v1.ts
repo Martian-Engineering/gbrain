@@ -168,6 +168,20 @@ const FilingRuleSchema = z.object({
 }).strict();
 
 /**
+ * Inference-neutral top-level directory recognized by link extraction.
+ *
+ * Values are directory names rather than paths: page typing remains governed
+ * exclusively by `page_types[].path_prefixes`.
+ */
+const LinkDirectorySchema = z.string()
+  .trim()
+  .min(1, 'link directory must be non-empty')
+  .regex(
+    /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
+    'link directory must be a lowercase or kebab-case directory name',
+  );
+
+/**
  * v0.41 T3 — closed registry of calibration aggregator algorithms.
  *
  * Codex outside-voice refinement of D6: domain NAMES stay open (any pack
@@ -341,6 +355,8 @@ export const SchemaPackManifestSchema = z.object({
     types: z.array(z.string()).optional(),
     link_types: z.array(z.string()).optional(),
   }).strict()).default([]),
+  /** Top-level directories recognized only by link extraction, never type inference. */
+  link_directories: z.array(LinkDirectorySchema).default([]),
   page_types: z.array(PageTypeSchema).default([]),
   link_types: z.array(LinkTypeSchema).default([]),
   frontmatter_links: z.array(FrontmatterLinkSchema).default([]),

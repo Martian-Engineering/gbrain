@@ -27,6 +27,7 @@ function makeManifest(name: string, extendsName: string | null = null): SchemaPa
     gbrain_min_version: '0.38.0',
     extends: extendsName,
     borrow_from: [],
+    link_directories: [],
     page_types: [],
     link_types: [],
     frontmatter_links: [],
@@ -76,6 +77,31 @@ describe('resolvePack — happy path', () => {
     const ra = await resolvePack(a, noop);
     const rb = await resolvePack(b, noop);
     expect(ra.identity).not.toBe(rb.identity);
+  });
+
+  test('inherits and deduplicates inference-neutral link directories', async () => {
+    const base = {
+      ...makeManifest('base'),
+      link_directories: ['partners', 'clients'],
+    };
+    const parent = {
+      ...makeManifest('parent', 'base'),
+      link_directories: ['archives', 'clients'],
+    };
+    const child = {
+      ...makeManifest('child', 'parent'),
+      link_directories: ['projects'],
+    };
+
+    const resolved = await resolvePack(child, chainLoader({ base, parent }));
+
+    expect(resolved.manifest.link_directories).toEqual([
+      'partners',
+      'clients',
+      'archives',
+      'projects',
+    ]);
+    expect(resolved.manifest.page_types).toEqual([]);
   });
 });
 

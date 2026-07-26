@@ -51,6 +51,7 @@ describe('loadActivePackBestEffort', () => {
       const result = await loadActivePackBestEffort(fakeCtx());
       expect(result).not.toBeNull();
       expect(result?.manifest.name).toBe('gbrain-base');
+      expect(result?.manifest.link_directories).toEqual(['partners', 'clients']);
     });
   });
 

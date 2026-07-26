@@ -29,6 +29,10 @@ gbrain_min_version: 0.38.0
 extends: null
 borrow_from: []
 
+# Generic workspace trees recognized by link extraction without affecting
+# page-type inference.
+link_directories: [partners, clients]
+
 # Closed enum of {fact, take, bet, hunch} — the original v41/v48 CHECK
 # constraint values. Migration v80 dropped the DB constraint; runtime
 # validation reads this list. Schema packs that extend gbrain-base can

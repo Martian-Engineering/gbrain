@@ -51,6 +51,7 @@ const PARITY_FIXTURES: ReadonlyArray<{ path: string; expected: string; reason: s
 describe('inferTypeFromPack (T7a) — gbrain-base parity', () => {
   test('parity: every known path maps to the same type via pack as via legacy', () => {
     const pack = loadPackFromFile(GBRAIN_BASE_PATH);
+    expect(pack.link_directories).toEqual(['partners', 'clients']);
     for (const { path, expected, reason } of PARITY_FIXTURES) {
       const actual = inferTypeFromPack(path, pack);
       // For parity, the pack result MUST match the legacy hardcoded result.
@@ -98,6 +99,27 @@ describe('inferTypeFromPack (T7a) — gbrain-base parity', () => {
     });
     expect(inferTypeFromPack('people/alice.md', emptyPack)).toBe('person');
     expect(inferTypeFromPack('media/foo.md', emptyPack)).toBe('media');
+  });
+
+  test('link_directories do not participate in type inference', () => {
+    const withoutLinkDirectories = parseSchemaPackManifest({
+      api_version: 'gbrain-schema-pack-v1',
+      name: 'neutral-directories-control',
+      version: '0.1.0',
+      extends: null,
+      page_types: [
+        { name: 'researcher', primitive: 'entity', path_prefixes: ['researchers/'], aliases: [], extractable: false, expert_routing: false },
+      ],
+      link_types: [],
+    });
+    const withLinkDirectories = parseSchemaPackManifest({
+      ...withoutLinkDirectories,
+      name: 'neutral-directories-test',
+      link_directories: ['partners'],
+    });
+
+    expect(inferTypeFromPack('partners/example.md', withoutLinkDirectories)).toBe('concept');
+    expect(inferTypeFromPack('partners/example.md', withLinkDirectories)).toBe('concept');
   });
 
   test('undefined filePath returns concept default', () => {

@@ -66,6 +66,7 @@ describe('extractEntityRefs', () => {
 
   test('adds top-level directories declared by schema-pack types and filing rules', () => {
     const directories = linkDirectoriesFromPack({
+      link_directories: ['archives'],
       page_types: [
         { path_prefixes: ['partners/', 'life/events/'] },
       ],
@@ -77,6 +78,7 @@ describe('extractEntityRefs', () => {
     expect(directories).toContain('partners');
     expect(directories).toContain('life');
     expect(directories).toContain('clients');
+    expect(directories).toContain('archives');
     expect(directories).toContain('people');
 
     const refs = extractEntityRefs(
@@ -92,7 +94,7 @@ describe('extractEntityRefs', () => {
 
   test('bumps the extractor version after the pack-directory change', () => {
     expect(Date.parse(LINK_EXTRACTOR_VERSION_TS))
-      .toBeGreaterThan(Date.parse('2026-05-31T00:00:00Z'));
+      .toBeGreaterThan(Date.parse('2026-07-25T00:00:00Z'));
   });
 
   test('extracts filesystem-relative refs ([Name](../people/slug.md))', () => {

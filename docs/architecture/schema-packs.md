@@ -153,6 +153,10 @@ extends: gbrain-base   # inherits everything from base; add overrides below
 description: |
   My personal pack.
 
+# Optional top-level trees recognized by wikilink extraction only. Unlike
+# path_prefixes, these entries do not participate in page-type inference.
+link_directories: [partners, clients]
+
 page_types:
   - name: project-x
     primitive: entity
@@ -174,6 +178,10 @@ frontmatter_links: []
 enrichable_types: []
 filing_rules: []
 ```
+
+`link_directories` is additive across the pack's `extends` chain. Parent
+directories remain recognized, while page-type inference continues to consult
+only the active manifest's `page_types[].path_prefixes`.
 
 ## Recovery + revert
 

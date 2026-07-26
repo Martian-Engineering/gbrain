@@ -28,7 +28,7 @@ import { ensureWellFormed } from './text-safe.ts';
  * OR updated_at > links_extracted_at`. It is an ISO-8601 string (NOT a number) —
  * the column is TIMESTAMPTZ and the predicate binds it as `::timestamptz`.
  */
-export const LINK_EXTRACTOR_VERSION_TS = '2026-07-25T00:00:00Z';
+export const LINK_EXTRACTOR_VERSION_TS = '2026-07-26T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -90,6 +90,7 @@ export const BASE_LINK_DIRECTORIES = [
 ] as const;
 
 export interface LinkDirectoryPack {
+  link_directories?: ReadonlyArray<string>;
   page_types?: ReadonlyArray<{ path_prefixes: ReadonlyArray<string> }>;
   filing_rules?: ReadonlyArray<{ directory: string }>;
 }
@@ -98,8 +99,9 @@ export interface LinkDirectoryPack {
  * Return the top-level slug directories recognized by link extraction.
  *
  * The hardcoded set stays the unconditional base. Active schema packs extend
- * it through both type path prefixes and filing rules, which covers declared
- * trees even when several kinds share one top-level directory.
+ * it through inference-neutral link directories, type path prefixes, and
+ * filing rules, which covers declared trees even when several kinds share one
+ * top-level directory.
  */
 export function linkDirectoriesFromPack(pack?: LinkDirectoryPack | null): string[] {
   const directories = new Set<string>(BASE_LINK_DIRECTORIES);
@@ -110,6 +112,7 @@ export function linkDirectoriesFromPack(pack?: LinkDirectoryPack | null): string
     directories.add(directory);
   };
 
+  for (const directory of pack?.link_directories ?? []) addPath(directory);
   for (const pageType of pack?.page_types ?? []) {
     for (const prefix of pageType.path_prefixes) addPath(prefix);
   }

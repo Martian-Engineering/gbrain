@@ -48,34 +48,25 @@ description: ""
 gbrain_min_version: 0.38.0
 extends: null
 borrow_from: []
-page_types:
-  - name: partner-record
-    primitive: entity
-    path_prefixes:
-      - partners/
-    aliases: []
-    extractable: false
-    expert_routing: false
+link_directories: [partners]
+page_types: []
 link_types: []
 frontmatter_links: []
 takes_kinds: [fact, take, bet, hunch]
 enrichable_types: []
-filing_rules:
-  - kind: partner-record
-    directory: partners/
-    examples: []
+filing_rules: []
 `, 'utf8');
   return packPath;
 }
 
 describe('pack-extensible link directories', () => {
-  test('trusted put_page honors a DB-configured pack-declared tree', async () => {
+  test('trusted put_page honors a DB-configured link_directories tree', async () => {
     const packPath = installPack();
     __setPackLocatorForTests((name) => name === 'link-pack-test' ? packPath : null);
     await engine.setConfig('schema_pack.source.default', 'link-pack-test');
 
     await engine.putPage('partners/example', {
-      type: 'partner-record',
+      type: 'concept',
       title: 'Example Partner',
       compiled_truth: '',
       timeline: '',
@@ -118,7 +109,7 @@ See [[default:partners/example|Example Partner]].
     );
     await engine.setConfig('schema_pack.source.client-a', 'link-pack-test');
     await engine.putPage('partners/example', {
-      type: 'partner-record',
+      type: 'concept',
       title: 'Example Partner',
       compiled_truth: '',
       timeline: '',

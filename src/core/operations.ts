@@ -956,6 +956,7 @@ const put_page: Operation = {
     // page_types. Best-effort: pack load failure falls back to legacy inferType
     // (parity gate preserved). Federated-read closure correction is T19's scope.
     let activePack: {
+      link_directories: ReadonlyArray<string>;
       page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }>;
       filing_rules: ReadonlyArray<{ directory: string }>;
     } | undefined;
@@ -964,6 +965,7 @@ const put_page: Operation = {
       const resolved = await loadActivePackBestEffort(ctx);
       if (!resolved) throw new Error('active schema pack unavailable');
       activePack = {
+        link_directories: resolved.manifest.link_directories,
         page_types: resolved.manifest.page_types,
         filing_rules: resolved.manifest.filing_rules,
       };

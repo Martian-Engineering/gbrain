@@ -258,6 +258,7 @@ export async function resolvePack(
   // cache snapshot (codex C6 — child cache entry must remember every
   // parent so invalidatePackCache(parentName) can cascade).
   const chain: string[] = [manifest.name];
+  const inheritedLinkDirectories: string[][] = [];
   let cursor: SchemaPackManifest | null = manifest;
   while (cursor?.extends) {
     const parentName = cursor.extends;
@@ -272,15 +273,25 @@ export async function resolvePack(
       opts.onDepthWarn?.(chain.length, chain);
     }
     cursor = await loadByName(parentName);
+    inheritedLinkDirectories.push(cursor.link_directories);
   }
 
   // For v0.38 skeleton: closure is computed on the manifest itself.
   // Full extends-merging (child-wins) is the v0.41+ T20 follow-up.
   const alias_graph = buildAliasGraph(manifest);
   const alias_closure_hash = await computeAliasClosureHash(manifest);
+  // link_directories is independently additive and inference-neutral, so it
+  // can honor the extends chain without changing page-type merge semantics.
+  const effectiveManifest: SchemaPackManifest = {
+    ...manifest,
+    link_directories: [...new Set([
+      ...inheritedLinkDirectories.reverse().flat(),
+      ...manifest.link_directories,
+    ])],
+  };
 
   const resolved: ResolvedPack = {
-    manifest,
+    manifest: effectiveManifest,
     identity: id,
     manifest_sha8: sha8,
     alias_closure_hash,
