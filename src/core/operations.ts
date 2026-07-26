@@ -79,6 +79,10 @@ import {
   LIST_SKILLS_DESCRIPTION,
   GET_SKILL_DESCRIPTION,
 } from './operations-descriptions.ts';
+import {
+  PageTimelineNotFoundError,
+  resolvePageTimelineEvents,
+} from './chronicle/page-timeline.ts';
 
 // --- Types ---
 
@@ -3412,6 +3416,49 @@ const get_timeline: Operation = {
   },
   scope: 'read',
   cliHints: { name: 'timeline', positional: ['slug'] },
+};
+
+const resolve_timeline_events: Operation = {
+  name: 'resolve_timeline_events',
+  description:
+    'Resolve canonical Chronicle event wikilinks from one page Timeline into source-scoped event metadata, depth-page destinations, and lifecycle diagnostics. Read-only: preserves the materialized Markdown and graph edges.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Page slug whose Timeline contains the event backlinks' },
+    source_id: { type: 'string', description: 'Optional source selector; must be inside the caller grant' },
+    offset: { type: 'number', description: 'Zero-based event offset (default 0)' },
+    limit: { type: 'number', description: 'Maximum events to return (default 200, max 1000)' },
+  },
+  handler: async (ctx, p) => {
+    const offset = p.offset === undefined ? 0 : Number(p.offset);
+    const limit = p.limit === undefined ? 200 : Number(p.limit);
+    if (!Number.isInteger(offset) || offset < 0) {
+      throw new OperationError('invalid_params', 'offset must be a non-negative integer');
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      throw new OperationError('invalid_params', 'limit must be an integer from 1 to 1000');
+    }
+    const sourceId = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const scope = resolveRequestedScope(ctx, sourceId);
+    try {
+      return await resolvePageTimelineEvents(ctx.engine, {
+        slug: p.slug as string,
+        ...scope,
+        offset,
+        limit,
+      });
+    } catch (error) {
+      if (error instanceof PageTimelineNotFoundError) {
+        throw new OperationError(
+          'page_not_found',
+          error.message,
+          'Check the slug and source_id.',
+        );
+      }
+      throw error;
+    }
+  },
+  scope: 'read',
+  cliHints: { name: 'timeline-events', positional: ['slug'] },
 };
 
 // --- Admin ---
@@ -6784,7 +6831,7 @@ export const operations: Operation[] = [
   // Links
   add_link, remove_link, get_links, get_backlinks, list_link_sources, traverse_graph,
   // Timeline
-  add_timeline_entry, get_timeline,
+  add_timeline_entry, get_timeline, resolve_timeline_events,
   // Admin
   get_stats, get_health, run_doctor, get_versions, revert_version,
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)

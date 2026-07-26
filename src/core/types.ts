@@ -1326,6 +1326,62 @@ export interface ChronicleTimelineRow {
   who?: string[] | null;      // event participants; null for raw or malformed rows
 }
 
+export type PageTimelineEventState =
+  | 'active'
+  | 'soft_deleted'
+  | 'missing'
+  | 'graph_missing';
+
+export type PageTimelineEventTargetState =
+  | 'active'
+  | 'soft_deleted'
+  | 'missing';
+
+/** User-facing depth page associated with one internal Chronicle event. */
+export interface PageTimelineEventTarget {
+  slug: string;
+  title: string | null;
+  type: string | null;
+  state: PageTimelineEventTargetState;
+}
+
+/** Structured enrichment for one graph-bearing Chronicle timeline wikilink. */
+export interface PageTimelineEvent {
+  date: string;
+  event_slug: string;
+  authored_label: string;
+  source_order: number;
+  state: PageTimelineEventState;
+  graph_edge_present: boolean;
+  summary: string;
+  event_title: string | null;
+  effective_date: string | null;
+  when: string | null;
+  kind: string | null;
+  owner: string | null;
+  who: string[] | null;
+  where: string | null;
+  depth: PageTimelineEventTarget | null;
+}
+
+/** Bounded page-level Chronicle event resolution returned to MCP clients. */
+export interface PageTimelineEventResult {
+  schema_version: 1;
+  page_slug: string;
+  source_id: string;
+  total: number;
+  offset: number;
+  limit: number;
+  truncated: boolean;
+  events: PageTimelineEvent[];
+  issue_counts: {
+    soft_deleted: number;
+    missing: number;
+    graph_missing: number;
+    depth_missing: number;
+  };
+}
+
 export interface ChronicleTimelineOpts {
   /** getTimelineForDate: expand to the ISO week (Mon–Sun) containing `date`. */
   week?: boolean;
