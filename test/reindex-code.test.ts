@@ -106,6 +106,15 @@ describe('Layer 13 E2 — runReindexCode', () => {
     expect(result.failed).toBeGreaterThanOrEqual(1);
     expect(result.failures).toBeDefined();
     expect(result.failures!.some(f => f.slug === 'src-bad-ts')).toBe(true);
+    const receipts = await engine.executeRaw<{ batch_id: string; actor: string }>(
+      `SELECT DISTINCT batch_id, actor
+         FROM page_mutations
+        WHERE actor = 'cli:reindex-code'`,
+    );
+    expect(receipts).toEqual([{
+      batch_id: expect.stringMatching(/^cli:reindex-code:/),
+      actor: 'cli:reindex-code',
+    }]);
   });
 
   test('empty brain returns ok with zero counts', async () => {

@@ -420,11 +420,13 @@ async function cmdAuto(args: string[]): Promise<void> {
   const engine = await connect();
   const registry = getDefaultRegistry();
   registerBuiltinResolvers(registry);
+  const requestId = `integrity-auto-${Date.now()}`;
   const writer = new BrainWriter(engine, {
     strictMode: 'off',
     writeContext: {
       actor: 'cli:integrity',
       writeIntent: 'maintenance',
+      batchId: requestId,
     },
   });
 
@@ -436,7 +438,7 @@ async function cmdAuto(args: string[]): Promise<void> {
       warn: (msg) => console.warn(msg),
       error: (msg) => console.error(msg),
     },
-    requestId: `integrity-auto-${Date.now()}`,
+    requestId,
     remote: false,
   };
 

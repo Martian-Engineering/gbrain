@@ -37,6 +37,7 @@ import { withBudgetTracker } from '../core/ai/gateway.ts';
 // auto-aborts via the worker-pool's D13 bypass.
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
+import { createPageWriteBatchId } from '../core/page-mutation.ts';
 
 export interface ReindexCodeOpts {
   sourceId?: string;
@@ -246,6 +247,7 @@ export async function runReindexCode(
   // the original importCodeFile call). Progress via stderr reporter.
   const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
   reporter.start('reindex_code.pages', totalPages);
+  const writeBatchId = createPageWriteBatchId('cli:reindex-code');
 
   let reindexed = 0;
   let skipped = 0;
@@ -303,6 +305,7 @@ export async function runReindexCode(
                 writeContext: {
                   actor: 'cli:reindex-code',
                   writeIntent: 'maintenance',
+                  batchId: writeBatchId,
                 },
               });
               if (result.status === 'imported') reindexed++;

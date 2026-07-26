@@ -52,6 +52,8 @@ describe('take-mining operation contracts', () => {
     expect(run.params.page_cap.required).toBe(true);
     expect(run.params.proposal_cap.required).toBe(true);
     expect(run.params.max_estimated_spend_usd.required).toBe(true);
+    expect(status.params.batch_cursor).toBeDefined();
+    expect(status.params.batch_limit).toBeDefined();
   });
 
   test('protects the paid drain and recognizes its config namespace', () => {
@@ -314,5 +316,51 @@ describe('take-mining operation behavior', () => {
       request_id: 'b:c',
     }) as { job_id: number };
     expect(second.job_id).not.toBe(first.job_id);
+  });
+
+  test('exposes paginated outstanding batches through remote admin status', async () => {
+    for (const [slug, batchId] of [
+      ['notes/batch-a', 'batch-a'],
+      ['notes/batch-b', 'batch-b'],
+      ['notes/batch-c', 'batch-c'],
+    ] as const) {
+      await engine.putPage(slug, {
+        type: 'note',
+        title: batchId,
+        compiled_truth: `Prose for ${batchId}.`,
+      }, {
+        writeContext: {
+          actor: 'maintenance:test',
+          writeIntent: 'maintenance',
+          batchId,
+        },
+      });
+    }
+
+    const first = await operationsByName.get_take_mining_status.handler(ctx, {
+      source_id: 'default',
+      batch_limit: 2,
+    }) as {
+      outstanding_batches: Array<{ batch_id: string; queued_pages: number }>;
+      next_batch_cursor: string | null;
+    };
+    expect(first.outstanding_batches).toEqual([
+      expect.objectContaining({ batch_id: 'batch-a', queued_pages: 1 }),
+      expect.objectContaining({ batch_id: 'batch-b', queued_pages: 1 }),
+    ]);
+    expect(first.next_batch_cursor).toBe('batch-b');
+
+    const second = await operationsByName.get_take_mining_status.handler(ctx, {
+      source_id: 'default',
+      batch_limit: 2,
+      batch_cursor: first.next_batch_cursor,
+    }) as {
+      outstanding_batches: Array<{ batch_id: string }>;
+      next_batch_cursor: string | null;
+    };
+    expect(second.outstanding_batches).toEqual([
+      expect.objectContaining({ batch_id: 'batch-c' }),
+    ]);
+    expect(second.next_batch_cursor).toBeNull();
   });
 });

@@ -66,6 +66,16 @@ describe('gbrain reindex --markdown (v0.32.7)', () => {
       `SELECT chunker_version FROM pages WHERE slug IN ('note-c', 'note-d')`,
     );
     expect(rows.every(r => Number(r.chunker_version) === MARKDOWN_CHUNKER_VERSION)).toBe(true);
+
+    const receipts = await engine.executeRaw<{ batch_id: string; actor: string }>(
+      `SELECT DISTINCT batch_id, actor
+         FROM page_mutations
+        WHERE page_slug IN ('note-c', 'note-d')`,
+    );
+    expect(receipts).toEqual([{
+      batch_id: expect.stringMatching(/^cli:reindex:/),
+      actor: 'cli:reindex',
+    }]);
   });
 
   test('idempotent: re-run on a fully-updated brain reports nothing to do', async () => {

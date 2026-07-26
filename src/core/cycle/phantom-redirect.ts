@@ -56,6 +56,7 @@ import { parseMarkdown, splitBody, serializeMarkdown } from '../markdown.ts';
 import { tryAcquireDbLock, syncLockId, type DbLockHandle } from '../db-lock.ts';
 import { isAborted } from '../abort-check.ts';
 import { logPhantomEvent, type PhantomOutcome } from '../facts/phantom-audit.ts';
+import { createPageWriteBatchId } from '../page-mutation.ts';
 
 /** Tagged-union outcome of a single phantom-redirect attempt. */
 export type RedirectOutcome =
@@ -384,6 +385,7 @@ export async function tryRedirectPhantom(
   sourceId: string,
   brainDir: string,
   dryRun: boolean,
+  writeBatchId = createPageWriteBatchId('maintenance:phantom_redirect'),
 ): Promise<RedirectResult> {
   // Predicate (D2): unprefixed AND alive (deleted_at filter done by caller).
   if (page.slug.includes('/')) return { outcome: 'not_phantom' };
@@ -472,6 +474,7 @@ export async function tryRedirectPhantom(
       writeContext: {
         actor: 'maintenance:phantom_redirect',
         writeIntent: 'maintenance',
+        batchId: writeBatchId,
       },
     },
   );
@@ -532,6 +535,7 @@ export async function runPhantomRedirectPass(
   signal?: AbortSignal,
 ): Promise<PhantomPassResult> {
   const result = emptyPhantomPassResult();
+  const writeBatchId = createPageWriteBatchId('maintenance:phantom_redirect');
   const limitRaw = process.env.GBRAIN_PHANTOM_REDIRECT_LIMIT;
   const limit = (() => {
     if (limitRaw === undefined || limitRaw === '') return DEFAULT_PHANTOM_LIMIT;
@@ -575,7 +579,14 @@ export async function runPhantomRedirectPass(
 
       let redirectResult: RedirectResult;
       try {
-        redirectResult = await tryRedirectPhantom(engine, page, sourceId, brainDir, dryRun);
+        redirectResult = await tryRedirectPhantom(
+          engine,
+          page,
+          sourceId,
+          brainDir,
+          dryRun,
+          writeBatchId,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[gbrain] phantom-redirect: ${slug} failed (${msg}); skipping\n`);

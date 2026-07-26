@@ -17,6 +17,8 @@ const DEFAULT_DISCOVERY_BATCH_SIZE = 250;
 const DEFAULT_MAX_DISCOVERY_ROWS = 25_000;
 const MAX_PAGE_CAP = 5_000;
 const MAX_EXACT_SLUGS = 1_000;
+const DEFAULT_BATCH_STATUS_LIMIT = 50;
+const MAX_BATCH_STATUS_LIMIT = 200;
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -100,6 +102,12 @@ export interface TakeMiningBatchStatus {
   newestAt: string | null;
 }
 
+/** One bounded page of outstanding deferred batches for a source. */
+export interface TakeMiningBatchPage {
+  items: TakeMiningBatchStatus[];
+  nextCursor: string | null;
+}
+
 /** Current daily take-mining usage and configured caps when available. */
 export interface TakeMiningDailyStatus {
   localDate: string;
@@ -118,6 +126,7 @@ export interface TakeMiningStatus {
   sourceId: string;
   queue: TakeMiningQueueStatus;
   batch: TakeMiningBatchStatus | null;
+  outstandingBatches: TakeMiningBatchPage;
   daily: TakeMiningDailyStatus;
 }
 
@@ -210,16 +219,33 @@ export async function enqueueTakeMiningWork(
 /** Read current queue, optional batch, and daily usage state without writes. */
 export async function getTakeMiningStatus(
   ctx: OperationContext,
-  input: { sourceId: string; batchId?: string },
+  input: {
+    sourceId: string;
+    batchId?: string;
+    batchCursor?: string;
+    batchLimit?: number;
+  },
 ): Promise<TakeMiningStatus> {
   assertSourceAccess(ctx, input.sourceId);
   if (input.batchId !== undefined) validateBatchId(input.batchId);
+  if (input.batchCursor !== undefined) validateBatchId(input.batchCursor);
+  const batchLimit = positiveInteger(
+    input.batchLimit ?? DEFAULT_BATCH_STATUS_LIMIT,
+    'batchLimit',
+    MAX_BATCH_STATUS_LIMIT,
+  );
 
-  const [queue, batch, daily] = await Promise.all([
+  const [queue, batch, outstandingBatches, daily] = await Promise.all([
     readQueueStatus(ctx.engine, input.sourceId),
     input.batchId
       ? readBatchStatus(ctx.engine, input.sourceId, input.batchId)
       : Promise.resolve(null),
+    readOutstandingBatches(
+      ctx.engine,
+      input.sourceId,
+      input.batchCursor,
+      batchLimit,
+    ),
     readDailyStatus(ctx.engine),
   ]);
   return {
@@ -227,6 +253,7 @@ export async function getTakeMiningStatus(
     sourceId: input.sourceId,
     queue,
     batch,
+    outstandingBatches,
     daily,
   };
 }
@@ -688,6 +715,51 @@ async function readBatchStatus(
     queuedPages: row.queued_pages,
     oldestAt: isoDate(row.oldest_at),
     newestAt: isoDate(row.newest_at),
+  };
+}
+
+async function readOutstandingBatches(
+  engine: BrainEngine,
+  sourceId: string,
+  cursor: string | undefined,
+  limit: number,
+): Promise<TakeMiningBatchPage> {
+  const params: unknown[] = [sourceId];
+  const cursorClause = cursor === undefined
+    ? ''
+    : `AND batch_id > $${params.push(cursor)}`;
+  params.push(limit + 1);
+  const rows = await engine.executeRaw<{
+    batch_id: string;
+    queued_pages: number;
+    oldest_at: Date | string | null;
+    newest_at: Date | string | null;
+  }>(
+    `SELECT batch_id,
+            COUNT(*)::int AS queued_pages,
+            MIN(created_at) AS oldest_at,
+            MAX(updated_at) AS newest_at
+       FROM take_mining_work
+      WHERE source_id = $1
+        AND admission = 'deferred'
+        AND batch_id IS NOT NULL
+        ${cursorClause}
+      GROUP BY batch_id
+      ORDER BY batch_id
+      LIMIT $${params.length}`,
+    params,
+  );
+  const hasMore = rows.length > limit;
+  const visible = hasMore ? rows.slice(0, limit) : rows;
+  const items = visible.map(row => ({
+    batchId: row.batch_id,
+    queuedPages: row.queued_pages,
+    oldestAt: isoDate(row.oldest_at),
+    newestAt: isoDate(row.newest_at),
+  }));
+  return {
+    items,
+    nextCursor: hasMore ? (items.at(-1)?.batchId ?? null) : null,
   };
 }
 

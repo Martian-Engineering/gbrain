@@ -9,6 +9,10 @@ import {
 } from '../src/core/take-mining-control.ts';
 import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
 import { renderTakeMiningRequest } from '../src/core/cycle/take-mining-request.ts';
+import {
+  PROPOSE_TAKES_PROMPT_VERSION,
+  runTakeMiningWork,
+} from '../src/core/cycle/propose-takes.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 const dependencies: TakeMiningControlDependencies = {
@@ -317,6 +321,90 @@ describe('take-mining enrollment control', () => {
       'SELECT COUNT(*)::int AS count FROM take_mining_work',
     );
     expect(rows).toEqual([{ count: 2 }]);
+  });
+
+  test('pages every deferred batch so fallback mutation batches stay discoverable', async () => {
+    await insertPage(engine, 'notes/maintenance-a', 'Original A', '2023-01-01');
+    await insertPage(engine, 'notes/maintenance-b', 'Original B', '2023-01-02');
+    await insertPage(engine, 'notes/derived', 'Original derived', '2023-01-03');
+
+    await engine.putPage('notes/maintenance-a', {
+      type: 'note',
+      title: 'Maintenance A',
+      compiled_truth: 'Maintenance A changed.',
+    }, {
+      writeContext: {
+        actor: 'maintenance:test',
+        writeIntent: 'maintenance',
+      },
+    });
+    await engine.putPage('notes/maintenance-b', {
+      type: 'note',
+      title: 'Maintenance B',
+      compiled_truth: 'Maintenance B changed.',
+    }, {
+      writeContext: {
+        actor: 'maintenance:test',
+        writeIntent: 'maintenance',
+      },
+    });
+    await engine.putPage('notes/derived', {
+      type: 'note',
+      title: 'Derived',
+      compiled_truth: 'Derived prose changed.',
+    }, {
+      writeContext: {
+        actor: 'derived:test',
+        writeIntent: 'derived',
+      },
+    });
+
+    const first = await getTakeMiningStatus(ctx, {
+      sourceId: 'default',
+      batchLimit: 2,
+    });
+    expect(first.outstandingBatches.items).toHaveLength(2);
+    expect(first.outstandingBatches.items.map(batch => batch.batchId)).toEqual([
+      'mutation:1',
+      'mutation:2',
+    ]);
+    expect(first.outstandingBatches.nextCursor).toBe('mutation:2');
+
+    const second = await getTakeMiningStatus(ctx, {
+      sourceId: 'default',
+      batchLimit: 2,
+      batchCursor: first.outstandingBatches.nextCursor ?? undefined,
+    });
+    expect(second.outstandingBatches.items.map(batch => batch.batchId)).toEqual([
+      'mutation:3',
+    ]);
+    expect(second.outstandingBatches.nextCursor).toBeNull();
+    expect([
+      ...first.outstandingBatches.items,
+      ...second.outstandingBatches.items,
+    ].map(batch => batch.queuedPages)).toEqual([1, 1, 1]);
+
+    for (const batch of [
+      ...first.outstandingBatches.items,
+      ...second.outstandingBatches.items,
+    ]) {
+      const drained = await runTakeMiningWork(ctx, {
+        admission: 'deferred',
+        sourceId: 'default',
+        batchId: batch.batchId,
+        promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+        pageCap: 1,
+        proposalCap: 10,
+        maxEstimatedSpendUsd: 1,
+        _extractableTypes: ['note'],
+        _estimatedPageSpendUsd: 0.01,
+        extractor: async () => [],
+      });
+      expect(drained.pages_scanned).toBe(1);
+    }
+    const settled = await getTakeMiningStatus(ctx, { sourceId: 'default' });
+    expect(settled.queue.deferred).toBe(0);
+    expect(settled.outstandingBatches.items).toEqual([]);
   });
 
   test('uses shared non-negative fallbacks for invalid daily cap config', async () => {

@@ -61,6 +61,7 @@ import {
   parseSynthesis,
   type EnrichEvidence,
 } from '../core/enrich/thin.ts';
+import { createPageWriteBatchId } from '../core/page-mutation.ts';
 
 // ---------------------------------------------------------------------------
 // Tunables (exported for tests).
@@ -283,6 +284,7 @@ interface EnrichOneCtx {
   done: Set<string>;
   signal?: AbortSignal;
   config: ReturnType<typeof loadConfig>;
+  writeBatchId: string;
 }
 
 async function enrichOne(ctx: EnrichOneCtx, candidate: EnrichCandidate): Promise<void> {
@@ -389,6 +391,7 @@ async function enrichOneLocked(ctx: EnrichOneCtx, candidate: EnrichCandidate): P
     writeContext: {
       actor: 'cli:enrich',
       writeIntent: 'derived',
+      batchId: ctx.writeBatchId,
     },
   };
   await putPageOp.handler(opCtx, { slug, content });
@@ -467,6 +470,7 @@ export async function runEnrichCore(
       done,
       signal,
       config,
+      writeBatchId: createPageWriteBatchId('cli:enrich'),
     };
 
     let lastFlush = 0;

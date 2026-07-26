@@ -437,6 +437,17 @@ I believe shipping fast is a moral imperative.
       const phantom = await engine.getPage('alice', { sourceId: 'default' });
       const result = await tryRedirectPhantom(engine, phantom!, 'default', brainDir, false);
       expect(result.outcome).toBe('redirected');
+      expect(await engine.executeRaw<{ batch_id: string }>(
+        `SELECT batch_id
+           FROM page_mutations
+          WHERE source_id = 'default'
+            AND page_slug = 'people/alice-example'
+            AND actor = 'maintenance:phantom_redirect'
+          ORDER BY id DESC
+          LIMIT 1`,
+      )).toEqual([{
+        batch_id: expect.stringMatching(/^maintenance:phantom_redirect:/),
+      }]);
 
       // After redirect: facts under canonical preserve metadata verbatim
       const facts2 = await engine.executeRaw<{ valid_until: Date | null; visibility: string; notability: string; confidence: number; source_markdown_slug: string }>(

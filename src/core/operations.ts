@@ -4391,6 +4391,13 @@ function mapTakeMiningStatus(
         newest_at: status.batch.newestAt,
       } : {}),
     },
+    outstanding_batches: status.outstandingBatches.items.map(batch => ({
+      batch_id: batch.batchId,
+      queued_pages: batch.queuedPages,
+      oldest_at: batch.oldestAt,
+      newest_at: batch.newestAt,
+    })),
+    next_batch_cursor: status.outstandingBatches.nextCursor,
     jobs,
     daily: {
       date: status.daily.localDate,
@@ -4568,10 +4575,12 @@ const run_take_mining_batch: Operation = {
 
 const get_take_mining_status: Operation = {
   name: 'get_take_mining_status',
-  description: 'Report source-scoped take-mining work, active jobs, and daily safety-cap usage.',
+  description: 'Report source-scoped take-mining work, discover outstanding deferred batches, active jobs, and daily safety-cap usage.',
   params: {
     source_id: { type: 'string', required: true },
     batch_id: { type: 'string' },
+    batch_cursor: { type: 'string', description: 'Resume outstanding-batch listing after this batch id' },
+    batch_limit: { type: 'number', description: 'Outstanding batches to return (default 50, max 200)' },
   },
   scope: 'admin',
   localOnly: false,
@@ -4581,10 +4590,21 @@ const get_take_mining_status: Operation = {
     const batchId = p.batch_id === undefined
       ? undefined
       : takeMiningId(p.batch_id, 'batch_id');
+    const batchCursor = p.batch_cursor === undefined
+      ? undefined
+      : takeMiningId(p.batch_cursor, 'batch_cursor');
+    const batchLimit = p.batch_limit === undefined
+      ? undefined
+      : takeMiningInteger(p.batch_limit, 'batch_limit', 200);
     const { getTakeMiningStatus } = await import('./take-mining-control.ts');
     try {
       const [status, jobs] = await Promise.all([
-        getTakeMiningStatus(sourceCtx, { sourceId, batchId }),
+        getTakeMiningStatus(sourceCtx, {
+          sourceId,
+          batchId,
+          batchCursor,
+          batchLimit,
+        }),
         takeMiningJobs(ctx, sourceId, batchId),
       ]);
       return mapTakeMiningStatus(status, jobs);

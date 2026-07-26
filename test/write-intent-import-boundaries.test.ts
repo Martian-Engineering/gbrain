@@ -111,6 +111,34 @@ describe('import write-intent boundaries', () => {
     expect(rows[1]?.batch_id).toBe(rows[0]?.batch_id);
   });
 
+  test('announces a generated batch before the first imported page write', async () => {
+    const dir = makeImportDir({
+      'one.md': '---\ntitle: One\ntype: note\n---\n\nHistorical prose.',
+    });
+    const stderr: string[] = [];
+    const error = spyOn(console, 'error').mockImplementation((...values) => {
+      stderr.push(values.map(String).join(' '));
+    });
+    const originalPutPage = PGLiteEngine.prototype.putPage;
+    let announcedBeforeWrite: string | undefined;
+    const put = spyOn(PGLiteEngine.prototype, 'putPage').mockImplementation(async function (
+      this: PGLiteEngine,
+      ...args
+    ) {
+      announcedBeforeWrite = stderr.find(line => line.includes('Take-mining batch:'));
+      return originalPutPage.call(this, ...args);
+    });
+
+    const result = await runImport(engine, [dir, '--no-embed'])
+      .finally(() => {
+        put.mockRestore();
+        error.mockRestore();
+      });
+
+    expect(announcedBeforeWrite).toBe(`Take-mining batch: ${result.batchId}`);
+    expect((await mutations())[0]?.batch_id).toBe(result.batchId);
+  });
+
   test('explicit CLI batch id is reported and drains the imported batch end to end', async () => {
     const dir = makeImportDir({
       'one.md': '---\ntitle: One\ntype: note\n---\n\nHistorical prediction.',

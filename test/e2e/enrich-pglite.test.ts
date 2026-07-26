@@ -218,6 +218,17 @@ describe('runEnrichCore', () => {
     expect(page!.compiled_truth).toContain('[Source: meetings/2026-summit]');
     expect(page!.frontmatter.enriched_by).toBe('cli:enrich');
     expect(typeof page!.frontmatter.enriched_at).toBe('string');
+    expect(await engine.executeRaw<{ batch_id: string }>(
+      `SELECT batch_id
+         FROM page_mutations
+        WHERE source_id = 'default'
+          AND page_slug = 'people/alice-example'
+          AND actor = 'cli:enrich'
+        ORDER BY id DESC
+        LIMIT 1`,
+    )).toEqual([{
+      batch_id: expect.stringMatching(/^cli:enrich:/),
+    }]);
   }, 30000);
 
   test('no context → skipped_insufficient, no write, no LLM call', async () => {

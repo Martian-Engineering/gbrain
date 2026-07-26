@@ -295,6 +295,16 @@ export async function runImport(
   }
   const files = resumeFilter(allFiles, dir, completed);
 
+  // Announce the drain key before any page write. If the process is
+  // interrupted, operators and automation can still discover and target the
+  // partially written batch. JSON mode keeps stdout reserved for its final
+  // result while providing a machine-readable readiness event on stderr.
+  if (jsonOutput) {
+    console.error(JSON.stringify({ status: 'ready', batch_id: batchId }));
+  } else {
+    console.error(`Take-mining batch: ${batchId}`);
+  }
+
   // Determine actual worker count
   const actualWorkers = workerCount > 1 ? workerCount : 1;
   if (actualWorkers > 1) {

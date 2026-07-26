@@ -33,6 +33,7 @@ import { resolve } from 'path';
 // v0.41.15.0 (T10, D9): per-batch parallel workers.
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
+import { createPageWriteBatchId } from '../core/page-mutation.ts';
 
 interface ReindexOpts {
   /** Cap total pages reindexed. Useful for triage runs on huge brains. */
@@ -180,6 +181,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
 
   const reporter = createProgress(cliOptsToProgressOptions(getCliOptions()));
   reporter.start('reindex.markdown', target);
+  const writeBatchId = createPageWriteBatchId('cli:reindex');
 
   let reindexed = 0;
   let skipped = 0;
@@ -220,6 +222,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
                 writeContext: {
                   actor: 'cli:reindex',
                   writeIntent: 'maintenance',
+                  batchId: writeBatchId,
                 },
               });
               reindexed++;
@@ -250,6 +253,7 @@ export async function runReindex(engine: BrainEngine, args: string[]): Promise<R
             writeContext: {
               actor: 'cli:reindex',
               writeIntent: 'maintenance',
+              batchId: writeBatchId,
             },
           });
           reindexed++;

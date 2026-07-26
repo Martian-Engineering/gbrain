@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { classifyTakeMiningAdmission } from './take-mining-admission.ts';
 import { buildTakeMiningInput } from './cycle/take-mining-input.ts';
@@ -8,6 +9,17 @@ export const DEFAULT_PAGE_WRITE_CONTEXT: Readonly<PageWriteContext> = {
   writeIntent: 'maintenance',
   reason: 'missing_write_context',
 };
+
+/**
+ * Create one public-safe batch id for a producer-owned write run.
+ *
+ * Producers call this once at their orchestration boundary and reuse the
+ * result for every page write in that run.
+ */
+export function createPageWriteBatchId(actor: string): string {
+  const prefix = actor.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 80);
+  return `${prefix || 'write'}:${randomUUID()}`;
+}
 
 /** Resolve the explicit server context or the conservative internal fallback. */
 export function resolvePageWriteContext(
