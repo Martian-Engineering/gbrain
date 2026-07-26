@@ -19,16 +19,25 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Bun stages compiled output beside the repository before renaming it into
-# place. Keep the destination on that same filesystem so Docker bind mounts do
-# not turn the final rename into a cross-filesystem failure.
-mkdir -p "$REPO_ROOT/.context"
-OUT_BIN="$(mktemp "$REPO_ROOT/.context/gbrain-wasm-check.XXXXXX")"
-trap 'rm -f "$OUT_BIN"' EXIT
+# Bun stages compiled output beside the source tree before renaming it into
+# place. Docker Desktop bind mounts cannot complete that rename, even when the
+# requested output also lives on the mount, so compile this disposable fixture
+# entirely on the runner's local filesystem.
+BUILD_ROOT="$(mktemp -d /tmp/gbrain-wasm-build.XXXXXX)"
+trap 'rm -rf -- "$BUILD_ROOT"' EXIT
+mkdir -p "$BUILD_ROOT/scripts"
+cp "$REPO_ROOT/scripts/chunker-smoketest.ts" "$BUILD_ROOT/scripts/"
+cp -R "$REPO_ROOT/src" "$BUILD_ROOT/src"
+cp "$REPO_ROOT/package.json" "$REPO_ROOT/tsconfig.json" "$REPO_ROOT/bunfig.toml" "$BUILD_ROOT/"
+TREE_SITTER_ENTRY="$(bun -e 'console.log(Bun.fileURLToPath(import.meta.resolve("web-tree-sitter")))')"
+DEPENDENCY_ROOT="$(dirname "$(dirname "$TREE_SITTER_ENTRY")")"
+ln -s "$DEPENDENCY_ROOT" "$BUILD_ROOT/node_modules"
+OUT_BIN="$BUILD_ROOT/gbrain-wasm-check"
 
 # Build a minimal smoketest binary that imports the chunker. We compile this
 # instead of the full gbrain CLI so the failure mode is laser-focused on
 # chunker + WASM path resolution, not unrelated CLI wiring.
+cd "$BUILD_ROOT"
 bun build --compile --outfile "$OUT_BIN" scripts/chunker-smoketest.ts >/dev/null 2>&1
 
 # Run it and capture JSON output.
