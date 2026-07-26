@@ -286,31 +286,53 @@ describe('propose_takes explicit work queue', () => {
 
   test('only one concurrent worker claims a semantic input', async () => {
     await queuePage('writing/concurrent', 'Only one extractor may run.');
-    let releaseExtractor!: () => void;
-    let notifyEntered!: () => void;
-    const entered = new Promise<void>(resolve => { notifyEntered = resolve; });
-    const released = new Promise<void>(resolve => { releaseExtractor = resolve; });
+    let releaseClaims!: () => void;
+    let notifyBothSelected!: () => void;
+    const bothSelected = new Promise<void>(resolve => { notifyBothSelected = resolve; });
+    const claimsReleased = new Promise<void>(resolve => { releaseClaims = resolve; });
+    let selectedWorkers = 0;
+    const beforeClaim = async () => {
+      selectedWorkers++;
+      if (selectedWorkers === 2) notifyBothSelected();
+      await claimsReleased;
+    };
     let calls = 0;
     const extractor: ProposeTakesExtractor = async () => {
       calls++;
-      notifyEntered();
-      await released;
       return [];
     };
 
     const first = runPhaseProposeTakes(ctx(), {
       _extractableTypes: NOTE_TYPES,
+      _beforeClaim: beforeClaim,
       extractor,
     });
-    await entered;
     const second = runPhaseProposeTakes(ctx(), {
       _extractableTypes: NOTE_TYPES,
+      _beforeClaim: beforeClaim,
       extractor,
     });
-    releaseExtractor();
-    await Promise.all([first, second]);
+    await bothSelected;
+    releaseClaims();
+    const results = await Promise.all([first, second]);
 
     expect(calls).toBe(1);
+    expect(results.reduce(
+      (sum, result) => sum + Number(result.details.eligible_pages),
+      0,
+    )).toBe(2);
+    expect(results.reduce(
+      (sum, result) => sum + Number(result.details.pages_scanned),
+      0,
+    )).toBe(1);
+    expect(results.reduce(
+      (sum, result) => sum + Number(result.details.cache_misses),
+      0,
+    )).toBe(1);
+    expect(results.reduce(
+      (sum, result) => sum + Number(result.details.cache_hits),
+      0,
+    )).toBe(1);
     expect(await count('take_proposal_scans')).toBe(1);
   });
 
@@ -338,6 +360,100 @@ describe('propose_takes explicit work queue', () => {
     );
     expect(scans[0]?.status).toBe('succeeded');
     expect(scans[0]?.attempt_id).not.toBe('expired-attempt');
+  });
+
+  test('reclaimed ownership prevents the old worker from committing or deleting newer work', async () => {
+    await queuePage('writing/reclaimed-race', 'Original semantic prose.');
+    let notifyFirstEntered!: () => void;
+    let notifySecondEntered!: () => void;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstEntered = new Promise<void>(resolve => { notifyFirstEntered = resolve; });
+    const secondEntered = new Promise<void>(resolve => { notifySecondEntered = resolve; });
+    const firstReleased = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondReleased = new Promise<void>(resolve => { releaseSecond = resolve; });
+    let extractorCalls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      extractorCalls++;
+      if (extractorCalls === 1) {
+        notifyFirstEntered();
+        await firstReleased;
+        return [{
+          claim_text: 'Superseded worker claim',
+          kind: 'take',
+          holder: 'brain',
+          weight: 0.5,
+        }];
+      }
+      notifySecondEntered();
+      await secondReleased;
+      return [{
+        claim_text: 'Reclaimed worker claim',
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      }];
+    };
+
+    const oldWorker = runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+    await firstEntered;
+    await engine.executeRaw(
+      `UPDATE take_proposal_scans
+          SET lease_expires_at = now() - interval '1 second'
+        WHERE source_id = 'default'
+          AND page_slug = 'writing/reclaimed-race'
+          AND status = 'in_progress'`,
+    );
+
+    const reclaimingWorker = runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+    await secondEntered;
+
+    const newerBody = 'Newer semantic prose.';
+    const newerHash = buildTakeMiningInput(newerBody).mining_input_hash;
+    await engine.putPage('writing/reclaimed-race', {
+      type: 'note',
+      title: 'Reclaimed race',
+      compiled_truth: newerBody,
+    });
+    await engine.executeRaw(
+      `UPDATE take_mining_work
+          SET mining_input_hash = $1, updated_at = now()
+        WHERE source_id = 'default'
+          AND page_slug = 'writing/reclaimed-race'`,
+      [newerHash],
+    );
+
+    releaseFirst();
+    const oldResult = await oldWorker;
+    expect(oldResult.details).toMatchObject({
+      eligible_pages: 1,
+      pages_scanned: 1,
+      cache_misses: 1,
+      proposals_inserted: 0,
+    });
+    expect(oldResult.details.warnings).toContain(
+      'scan ownership lost for writing/reclaimed-race',
+    );
+    expect(await count('take_proposals')).toBe(0);
+    expect(await engine.executeRaw<{ mining_input_hash: string }>(
+      `SELECT mining_input_hash FROM take_mining_work`,
+    )).toEqual([{ mining_input_hash: newerHash }]);
+
+    releaseSecond();
+    const reclaimedResult = await reclaimingWorker;
+    expect(reclaimedResult.details.proposals_inserted).toBe(1);
+    expect(await engine.executeRaw<{ claim_text: string }>(
+      `SELECT claim_text FROM take_proposals`,
+    )).toEqual([{ claim_text: 'Reclaimed worker claim' }]);
+    expect(await engine.executeRaw<{ mining_input_hash: string }>(
+      `SELECT mining_input_hash FROM take_mining_work`,
+    )).toEqual([{ mining_input_hash: newerHash }]);
   });
 
   test('does not delete newer work admitted while extraction is running', async () => {
@@ -378,9 +494,11 @@ describe('propose_takes explicit work queue', () => {
 
     expect(result.details).toMatchObject({
       dry_run: true,
-      pages_scanned: 1,
-      cache_misses: 1,
+      eligible_pages: 1,
+      pages_scanned: 0,
+      cache_misses: 0,
     });
+    expect(result.summary).toContain('would scan 1 eligible page');
     expect(calls).toBe(0);
     expect(await count('take_mining_work')).toBe(1);
     expect(await count('take_proposal_scans')).toBe(0);
@@ -494,7 +612,13 @@ describe('propose_takes explicit work queue', () => {
     });
 
     expect(result.status).toBe('warn');
-    expect(result.details.budget_exhausted).toBe(true);
+    expect(result.details).toMatchObject({
+      budget_exhausted: true,
+      eligible_pages: 1,
+      pages_scanned: 0,
+      cache_hits: 0,
+      cache_misses: 0,
+    });
     expect(result.details.warnings).toEqual([
       expect.stringContaining('budget exhausted before writing/over-budget'),
     ]);

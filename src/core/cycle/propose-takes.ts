@@ -152,9 +152,14 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   _leaseSeconds?: number;
   /** Test seam for bounded queue pagination. */
   _workBatchSize?: number;
+  /** Test seam for synchronizing workers immediately before atomic claim. */
+  _beforeClaim?: (pageSlug: string) => Promise<void>;
 }
 
 export interface ProposeTakesResult {
+  /** Canonical candidates selected before budget checks and atomic claims. */
+  eligible_pages: number;
+  /** Work items successfully claimed for an extraction attempt. */
   pages_scanned: number;
   cache_hits: number;
   cache_misses: number;
@@ -590,6 +595,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
     const result: ProposeTakesResult = {
+      eligible_pages: 0,
       pages_scanned: 0,
       cache_hits: 0,
       cache_misses: 0,
@@ -634,8 +640,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
       );
     }
     const candidates = selection.candidates;
-    result.pages_scanned = candidates.length;
-    result.cache_misses = candidates.length;
+    result.eligible_pages = candidates.length;
     if (opts.reporter) {
       opts.reporter.start('propose_takes.pages' as never, candidates.length);
     }
@@ -661,6 +666,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
         break;
       }
 
+      await opts._beforeClaim?.(work.page_slug);
       const attemptId = randomUUID();
       const claimed = await claimScan(
         engine,
@@ -673,9 +679,10 @@ class ProposeTakesPhase extends BaseCyclePhase {
       );
       if (!claimed) {
         result.cache_hits += 1;
-        result.cache_misses -= 1;
         continue;
       }
+      result.pages_scanned += 1;
+      result.cache_misses += 1;
 
       const existingTakes = extractExistingTakesForDedup(work.compiled_truth);
       let proposals: ProposedTake[];
@@ -779,9 +786,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
     if (opts.dryRun) {
       return {
         summary:
-          `(dry-run) would scan ${result.pages_scanned} pages: ` +
-          `${result.cache_hits} cache hit${result.cache_hits === 1 ? '' : 's'}, ` +
-          `${result.cache_misses} cache miss${result.cache_misses === 1 ? '' : 'es'}`,
+          `(dry-run) would scan ${result.eligible_pages} eligible ` +
+          `page${result.eligible_pages === 1 ? '' : 's'}`,
         details: {
           ...result,
           dry_run: true,
