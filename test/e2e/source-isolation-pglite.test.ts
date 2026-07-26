@@ -148,6 +148,34 @@ describe('v0.34.1 source-isolation regression (#861)', () => {
     expect(titles.has('Bob Source-B Only')).toBe(true);
   });
 
+  test('list_pages operation identifies the source of every federated row', async () => {
+    const { operations } = await import('../../src/core/operations.ts');
+    const listPagesOp = operations.find(o => o.name === 'list_pages');
+    expect(listPagesOp).toBeDefined();
+
+    const ctx = {
+      engine,
+      config: { engine: 'pglite' as const },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      dryRun: false,
+      remote: true,
+      sourceId: 'default',
+      auth: {
+        token: 'test',
+        clientId: 'test',
+        scopes: ['read'],
+        sourceId: 'default',
+        allowedSources: ['default', 'src-b'],
+      },
+    };
+    const result = await listPagesOp!.handler(ctx as any, { limit: 100 });
+    const rows = result as Array<{ title: string; source_id?: string }>;
+
+    expect(rows.find(row => row.title === 'Alice Source-A')?.source_id).toBe('default');
+    expect(rows.find(row => row.title === 'Alice Source-B')?.source_id).toBe('src-b');
+    expect(rows.find(row => row.title === 'Bob Source-B Only')?.source_id).toBe('src-b');
+  });
+
   test('traverseGraph with sourceId=default does not surface src-b roots', async () => {
     // Seeding the walk at src-b's bob with sourceId=default produces an
     // empty result — the seed itself is filtered out, so the walk never

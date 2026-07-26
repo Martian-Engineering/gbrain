@@ -87,6 +87,7 @@ describe('v0.29 — get_recent_transcripts description', () => {
 describe('v0.29 — redirect hints on existing ops', () => {
   test('list_pages mentions sort=updated_desc as the recency-question answer', () => {
     expect(operationsByName['list_pages'].description).toBe(LIST_PAGES_DESCRIPTION);
+    expect(LIST_PAGES_DESCRIPTION).toContain('Every result includes source_id');
     expect(LIST_PAGES_DESCRIPTION).toContain("sort=updated_desc");
     expect(LIST_PAGES_DESCRIPTION).toContain("what did I touch this week");
   });

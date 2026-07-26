@@ -2145,6 +2145,7 @@ const list_pages: Operation = {
       ...scope,
     });
     return pages.map(pg => ({
+      source_id: pg.source_id,
       slug: pg.slug,
       type: pg.type,
       title: pg.title,
