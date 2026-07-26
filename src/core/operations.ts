@@ -2799,6 +2799,7 @@ const resolve_take_proposal: Operation = {
           dry_run: true,
           action,
           id,
+          source_id: sourceId,
           resolution_note: notes,
         };
       }
@@ -2823,6 +2824,7 @@ const resolve_take_proposal: Operation = {
         dry_run: true,
         action,
         id,
+        source_id: sourceId,
         ...effective,
         page_slug: target.slug,
         holder: target.holder,
@@ -2843,7 +2845,7 @@ const resolve_take_proposal: Operation = {
                   acted_by = $3,
                   resolution_note = $4
             WHERE id = $1 AND source_id = $2 AND status = 'pending'
-          RETURNING id, status, acted_at, acted_by,
+          RETURNING id, source_id, status, acted_at, acted_by,
                     promoted_row_num, resolution_note`,
           [id, sourceId, actor, notes],
         );
@@ -2880,7 +2882,7 @@ const resolve_take_proposal: Operation = {
                 acted_by = $4,
                 resolution_note = $5
           WHERE id = $1 AND source_id = $2 AND status = 'pending'
-        RETURNING id, status, acted_at, acted_by,
+        RETURNING id, source_id, status, acted_at, acted_by,
                   promoted_row_num, resolution_note`,
         [id, sourceId, promoted.rowNum, actor, notes],
       );

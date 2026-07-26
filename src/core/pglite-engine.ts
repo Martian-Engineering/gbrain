@@ -3676,8 +3676,9 @@ export class PGLiteEngine implements BrainEngine {
 
   private static CHRONICLE_SELECT = `
     SELECT te.date::text AS date, te.summary, te.detail, te.source,
-           te.page_id, p.slug AS page_slug,
-           te.event_page_id, ep.slug AS event_slug,
+           te.page_id, p.source_id, p.slug AS page_slug,
+           te.event_page_id, ep.source_id AS event_source_id,
+           ep.slug AS event_slug,
            ep.effective_date::text AS effective_date,
            ep.frontmatter->'event'->>'kind' AS kind,
            COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,

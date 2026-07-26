@@ -3859,8 +3859,9 @@ export class PostgresEngine implements BrainEngine {
     const upper = opts?.week ? sql`(date_trunc('week', ${date}::date) + interval '6 days')::date` : sql`${date}::date`;
     const rows = await sql`
       SELECT te.date::text AS date, te.summary, te.detail, te.source,
-             te.page_id, p.slug AS page_slug,
-             te.event_page_id, ep.slug AS event_slug,
+             te.page_id, p.source_id, p.slug AS page_slug,
+             te.event_page_id, ep.source_id AS event_source_id,
+             ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
              COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
@@ -3882,8 +3883,9 @@ export class PostgresEngine implements BrainEngine {
     const kindCond = opts?.kind ? sql`AND ep.frontmatter->'event'->>'kind' = ${opts.kind}` : sql``;
     const rows = await sql`
       SELECT te.date::text AS date, te.summary, te.detail, te.source,
-             te.page_id, p.slug AS page_slug,
-             te.event_page_id, ep.slug AS event_slug,
+             te.page_id, p.source_id, p.slug AS page_slug,
+             te.event_page_id, ep.source_id AS event_source_id,
+             ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
              COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
@@ -3906,8 +3908,9 @@ export class PostgresEngine implements BrainEngine {
     const target = opts?.date ? sql`${opts.date}::date` : sql`current_date`;
     const rows = await sql`
       SELECT te.date::text AS date, te.summary, te.detail, te.source,
-             te.page_id, p.slug AS page_slug,
-             te.event_page_id, ep.slug AS event_slug,
+             te.page_id, p.source_id, p.slug AS page_slug,
+             te.event_page_id, ep.source_id AS event_source_id,
+             ep.slug AS event_slug,
              ep.effective_date::text AS effective_date,
              ep.frontmatter->'event'->>'kind' AS kind,
              COALESCE(to_jsonb(te)->>'owner', ep.frontmatter->'event'->>'owner') AS owner,
