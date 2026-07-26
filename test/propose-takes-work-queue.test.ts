@@ -1,5 +1,6 @@
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -7,7 +8,12 @@ import {
   test,
 } from 'bun:test';
 import type { OperationContext } from '../src/core/operations.ts';
-import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import {
+  __setChatTransportForTests,
+  configureGateway,
+  resetGateway,
+  type ChatResult,
+} from '../src/core/ai/gateway.ts';
 import { BudgetMeter } from '../src/core/cycle/budget-meter.ts';
 import {
   PROPOSE_TAKES_PROMPT_VERSION,
@@ -32,6 +38,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await engine.disconnect();
   resetGateway();
+});
+
+afterEach(() => {
+  __setChatTransportForTests(null);
 });
 
 beforeEach(async () => {
@@ -882,5 +892,62 @@ describe('extractor output validity', () => {
       valid: false,
       proposals: [],
     });
+    expect(__testing.parseExtractorOutputResult('{"claim_text":"not an array"}')).toEqual({
+      valid: false,
+      proposals: [],
+    });
+    expect(__testing.parseExtractorOutputResult('[42]')).toEqual({
+      valid: false,
+      proposals: [],
+    });
+  });
+});
+
+function extractorResponse(text: string): ChatResult {
+  return {
+    text,
+    blocks: [{ type: 'text', text }],
+    stopReason: 'end',
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+    },
+    model: 'anthropic:claude-haiku-4-5',
+    providerId: 'anthropic',
+  };
+}
+
+describe('default extractor settlement', () => {
+  test.each([
+    ['a top-level object', '{"claim_text":"not an array"}'],
+    ['a non-object array entry', '[42]'],
+  ])('keeps %s retryable', async (_shape, output) => {
+    __setChatTransportForTests(async () => extractorResponse(output));
+    await queuePage('writing/malformed-shape', 'Retry malformed output.');
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+    });
+
+    expect(result.details.warnings).toEqual([
+      'extractor failed on writing/malformed-shape: extractor returned malformed JSON',
+    ]);
+    expect(await count('take_proposal_scans')).toBe(0);
+    expect(await count('take_mining_work')).toBe(1);
+  });
+
+  test('settles a valid empty array', async () => {
+    __setChatTransportForTests(async () => extractorResponse('[]'));
+    await queuePage('writing/valid-empty', 'Settle valid empty output.');
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+    });
+
+    expect(result.details.warnings).toEqual([]);
+    expect(await count('take_proposal_scans')).toBe(1);
+    expect(await count('take_mining_work')).toBe(0);
   });
 });

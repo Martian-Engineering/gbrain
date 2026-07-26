@@ -7,7 +7,7 @@ import {
 } from '../src/core/cycle/propose-takes.ts';
 
 describe('parseExtractorOutput', () => {
-  test('parses arrays, fenced JSON, and a single object', () => {
+  test('parses arrays and fenced JSON but rejects a single object', () => {
     const array = parseExtractorOutput(
       '[{"claim_text":"Cities send messages","kind":"take","holder":"brain","weight":0.65}]',
     );
@@ -24,7 +24,7 @@ describe('parseExtractorOutput', () => {
       weight: 0.65,
     });
     expect(fenced).toHaveLength(1);
-    expect(object[0]?.kind).toBe('hunch');
+    expect(object).toEqual([]);
   });
 
   test('accepts leading prose and rejects malformed or empty output', () => {

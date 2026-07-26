@@ -239,9 +239,9 @@ interface ExtractorParseResult {
 
 /**
  * Parse extractor output into ProposedTake[]. Handles common LLM output
- * sins (markdown fence wrapping, leading/trailing prose, single-object
- * instead of array). Returns [] on any unrecoverable parse error rather
- * than throwing.
+ * sins such as markdown fence wrapping and leading prose. The successful
+ * response shape must be an array of proposal objects, including an empty
+ * array when the page yields no proposals.
  */
 function parseExtractorOutputResult(raw: string): ExtractorParseResult {
   if (!raw || raw.trim().length === 0) return { valid: false, proposals: [] };
@@ -260,10 +260,13 @@ function parseExtractorOutputResult(raw: string): ExtractorParseResult {
   } catch {
     return { valid: false, proposals: [] };
   }
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  if (!Array.isArray(parsed)) return { valid: false, proposals: [] };
+  if (parsed.some(raw => typeof raw !== 'object' || raw === null)) {
+    return { valid: false, proposals: [] };
+  }
+  const arr = parsed;
   const out: ProposedTake[] = [];
   for (const raw of arr) {
-    if (typeof raw !== 'object' || raw === null) continue;
     const r = raw as Record<string, unknown>;
     const claim_text = typeof r.claim_text === 'string' ? r.claim_text.trim() : '';
     if (!claim_text || claim_text.length > 500) continue;
