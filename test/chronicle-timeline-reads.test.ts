@@ -73,6 +73,8 @@ describe('Life Chronicle timeline reads', () => {
       'life/events/2026-06-18-001', // 15:30 second
     ]);
     expect(rows[0].page_slug).toBe('meetings/2026-06-18-sync'); // backlink = depth page
+    expect(rows[0].source_id).toBe('default');
+    expect(rows[0].event_source_id).toBe('default');
     expect(rows[1].kind).toBe('commitment');
   });
 
@@ -112,6 +114,8 @@ describe('Life Chronicle timeline reads', () => {
       const raw = rows.find(row => row.summary === 'Raw timeline row');
       const malformed = rows.find(row => row.event_page_id === malformedEvent);
       expect(raw?.event_page_id).toBeNull();
+      expect(raw?.source_id).toBe('default');
+      expect(raw?.event_source_id).toBeNull();
       expect(raw?.who).toBeNull();
       expect(malformed?.who).toBeNull();
     } finally {
@@ -158,6 +162,10 @@ describe('Life Chronicle timeline reads', () => {
     expect(def.some(r => r.event_slug === 'life/events/2026-06-18-099')).toBe(false);
     const other = await engine.getTimelineForDate('2026-06-18', { sourceId: 'other' });
     expect(other.map(r => r.event_slug)).toEqual(['life/events/2026-06-18-099']);
+    expect(other[0]).toMatchObject({
+      source_id: 'other',
+      event_source_id: 'other',
+    });
   });
 
   test('(event_page_id, date) dedup index rejects a duplicate projection', async () => {

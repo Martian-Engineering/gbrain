@@ -1317,8 +1317,10 @@ export interface ChronicleTimelineRow {
   detail: string;
   source: string;
   page_id: number;            // depth page id (the rich page the row belongs to)
+  source_id: string;          // depth page source (slugs are source-scoped)
   page_slug: string;          // depth page slug (backlink target)
   event_page_id: number | null;
+  event_source_id: string | null;
   event_slug: string | null;  // the type:event page, when this is an event projection
   effective_date: string | null; // event page effective_date — drives intra-day order
   kind: string | null;        // event.kind from the event page frontmatter
