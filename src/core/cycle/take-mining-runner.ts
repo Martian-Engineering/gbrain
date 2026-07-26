@@ -14,6 +14,13 @@ import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../operations.ts';
+import {
+  readTakeMiningDailyUsage,
+  resolveTakeMiningDailyPolicy,
+  TAKE_MINING_DAILY_BUDGET_RESOLVER,
+  TAKE_MINING_DAILY_BUDGET_SCOPE,
+  type TakeMiningDailyPolicy,
+} from '../take-mining-daily-policy.ts';
 import type { BasePhaseOpts } from './base-phase.ts';
 import type { BudgetCheckResult, SubmitEstimate } from './budget-meter.ts';
 import type {
@@ -31,12 +38,6 @@ import {
 const DEFAULT_CLAIM_LEASE_SECONDS = 10 * 60;
 const MIN_WORK_BATCH_SIZE = 25;
 const MAX_WORK_BATCH_SIZE = 250;
-const DEFAULT_DAILY_PAGE_CAP = 100;
-const DEFAULT_DAILY_PROPOSAL_CAP = 200;
-const DEFAULT_DAILY_SPEND_CAP_USD = 5;
-const DEFAULT_BUDGET_TIME_ZONE = 'America/Los_Angeles';
-const DAILY_BUDGET_SCOPE = 'brain';
-const DAILY_BUDGET_RESOLVER = 'take_mining';
 
 /** Renewable lock shared by automatic and operator-triggered take mining. */
 export const TAKE_MINING_LOCK_NAME = 'gbrain-take-mining';
@@ -217,24 +218,11 @@ export interface TakeMiningRunnerDependencies {
   isOwnershipLost(error: unknown): boolean;
 }
 
-interface DailyTakeMiningCaps {
-  pageCap: number;
-  proposalCap: number;
-  spendCapUsd: number;
-  timeZone: string;
-  localDate: string;
-}
-
-interface DailyTakeMiningUsage {
-  pageCalls: number;
-  proposals: number;
-}
-
 interface CandidateContext {
   engine: BrainEngine;
   opts: TakeMiningRunnerOptions;
   result: TakeMiningRunResult;
-  caps: DailyTakeMiningCaps;
+  caps: TakeMiningDailyPolicy;
   ledger: BudgetLedger;
   extractor: ProposeTakesExtractor;
   modelId: string;
@@ -321,84 +309,6 @@ function validateRunnerOptions(
   }
 }
 
-async function readNonNegativeConfig(
-  engine: BrainEngine,
-  key: string,
-  fallback: number,
-): Promise<number> {
-  const raw = await engine.getConfig(key);
-  if (raw === null || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
-}
-
-function currentDateInTimeZone(timeZone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
-
-async function resolveDailyCaps(engine: BrainEngine): Promise<DailyTakeMiningCaps> {
-  const [pageCap, proposalCap, spendCapUsd, configuredTimeZone] =
-    await Promise.all([
-      readNonNegativeConfig(
-        engine,
-        'take_mining.daily_page_cap',
-        DEFAULT_DAILY_PAGE_CAP,
-      ),
-      readNonNegativeConfig(
-        engine,
-        'take_mining.daily_proposal_cap',
-        DEFAULT_DAILY_PROPOSAL_CAP,
-      ),
-      readNonNegativeConfig(
-        engine,
-        'take_mining.daily_estimated_spend_usd',
-        DEFAULT_DAILY_SPEND_CAP_USD,
-      ),
-      engine.getConfig('budget.tz'),
-    ]);
-  const timeZone = configuredTimeZone || DEFAULT_BUDGET_TIME_ZONE;
-  return {
-    pageCap,
-    proposalCap,
-    spendCapUsd,
-    timeZone,
-    localDate: currentDateInTimeZone(timeZone),
-  };
-}
-
-async function readDailyUsage(
-  engine: BrainEngine,
-  caps: DailyTakeMiningCaps,
-): Promise<DailyTakeMiningUsage> {
-  const [pageRow, proposalRow] = await Promise.all([
-    engine.executeRaw<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
-         FROM budget_reservations
-        WHERE scope = $1
-          AND resolver_id = $2
-          AND local_date = $3::date
-          AND status IN ('held', 'committed')`,
-      [DAILY_BUDGET_SCOPE, DAILY_BUDGET_RESOLVER, caps.localDate],
-    ),
-    engine.executeRaw<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
-         FROM take_proposals
-        WHERE (proposed_at AT TIME ZONE $2) >= $1::date
-          AND (proposed_at AT TIME ZONE $2) < ($1::date + interval '1 day')`,
-      [caps.localDate, caps.timeZone],
-    ),
-  ]);
-  return {
-    pageCalls: pageRow[0]?.count ?? 0,
-    proposals: proposalRow[0]?.count ?? 0,
-  };
-}
-
 function markStopped(
   result: TakeMiningRunResult,
   reason: TakeMiningStopReason,
@@ -472,7 +382,7 @@ async function pacingStop(
   estimatedPageSpend: number,
 ): Promise<[TakeMiningStopReason, string] | null> {
   const { engine, caps, opts, result } = context;
-  const usage = await readDailyUsage(engine, caps);
+  const usage = await readTakeMiningDailyUsage(engine, caps);
   if (usage.pageCalls >= caps.pageCap) {
     return ['daily_page_cap', 'brain-wide daily page cap reached'];
   }
@@ -515,8 +425,8 @@ async function reserveAttempt(
   const { ledger, caps, opts, modelId, result } = context;
   const estimatedPageSpend = prepared.estimatedSpendUsd;
   const reserved = await ledger.reserve({
-    scope: DAILY_BUDGET_SCOPE,
-    resolverId: DAILY_BUDGET_RESOLVER,
+    scope: TAKE_MINING_DAILY_BUDGET_SCOPE,
+    resolverId: TAKE_MINING_DAILY_BUDGET_RESOLVER,
     estimateUsd: estimatedPageSpend,
     capUsd: caps.spendCapUsd,
     ttlSeconds: context.leaseSeconds,
@@ -657,7 +567,7 @@ async function proposalPersistenceStop(
       `proposal cap; no proposals from this page were persisted`,
     ];
   }
-  const usage = await readDailyUsage(engine, caps);
+  const usage = await readTakeMiningDailyUsage(engine, caps);
   if (usage.proposals + proposalCount > caps.proposalCap) {
     return [
       'daily_proposal_cap',
@@ -884,7 +794,7 @@ export function createTakeMiningRunner(deps: TakeMiningRunnerDependencies) {
         result.estimated_spend_usd += prepared?.estimatedSpendUsd ?? 0;
       }
     } else {
-      const caps = await resolveDailyCaps(engine);
+      const caps = await resolveTakeMiningDailyPolicy(engine);
       await processCandidates({
         engine,
         opts,

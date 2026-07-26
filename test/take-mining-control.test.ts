@@ -318,6 +318,42 @@ describe('take-mining enrollment control', () => {
     );
     expect(rows).toEqual([{ count: 2 }]);
   });
+
+  test('uses shared non-negative fallbacks for invalid daily cap config', async () => {
+    await engine.setConfig('take_mining.daily_page_cap', '-1');
+    await engine.setConfig('take_mining.daily_proposal_cap', '-2');
+    await engine.setConfig('take_mining.daily_estimated_spend_usd', '-3');
+
+    const status = await getTakeMiningStatus(ctx, { sourceId: 'default' });
+
+    expect(status.daily.configuredPageCap).toBe(100);
+    expect(status.daily.configuredProposalCap).toBe(200);
+    expect(status.daily.budgetCapUsd).toBe(5);
+  });
+
+  test('reports the current configured spend cap with preserved ledger usage', async () => {
+    const timeZone = 'America/Los_Angeles';
+    const localDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    await engine.setConfig('budget.tz', timeZone);
+    await engine.setConfig('take_mining.daily_estimated_spend_usd', '9');
+    await engine.executeRaw(
+      `INSERT INTO budget_ledger (
+         scope, resolver_id, local_date, reserved_usd, committed_usd, cap_usd
+       ) VALUES ('brain', 'take_mining', $1::date, 0.75, 1.25, 5)`,
+      [localDate],
+    );
+
+    const status = await getTakeMiningStatus(ctx, { sourceId: 'default' });
+
+    expect(status.daily.budgetCapUsd).toBe(9);
+    expect(status.daily.reservedUsd).toBe(0.75);
+    expect(status.daily.committedUsd).toBe(1.25);
+  });
 });
 
 async function insertPage(

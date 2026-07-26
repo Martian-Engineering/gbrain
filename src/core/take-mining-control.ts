@@ -8,13 +8,13 @@ import {
 } from './cycle/take-mining-request.ts';
 import { loadActivePackBestEffort } from './schema-pack/best-effort.ts';
 import { extractableTypesFromPack } from './schema-pack/extractable.ts';
+import {
+  readTakeMiningDailyUsage,
+  resolveTakeMiningDailyPolicy,
+} from './take-mining-daily-policy.ts';
 
 const DEFAULT_DISCOVERY_BATCH_SIZE = 250;
 const DEFAULT_MAX_DISCOVERY_ROWS = 25_000;
-const DEFAULT_DAILY_PAGE_CAP = 100;
-const DEFAULT_DAILY_PROPOSAL_CAP = 200;
-const DEFAULT_DAILY_SPEND_CAP_USD = 5;
-const DEFAULT_BUDGET_TIME_ZONE = 'America/Los_Angeles';
 const MAX_PAGE_CAP = 5_000;
 const MAX_EXACT_SLUGS = 1_000;
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -694,108 +694,16 @@ async function readBatchStatus(
 async function readDailyStatus(
   engine: BrainEngine,
 ): Promise<TakeMiningDailyStatus> {
-  const timeZone =
-    await engine.getConfig('budget.tz') ?? DEFAULT_BUDGET_TIME_ZONE;
-  const localDate = currentDateInTimeZone(timeZone);
-  const [ledger] = await engine.executeRaw<{
-    reserved_usd: string | number;
-    committed_usd: string | number;
-    cap_usd: string | number | null;
-  }>(
-    `SELECT reserved_usd, committed_usd, cap_usd
-       FROM budget_ledger
-      WHERE scope = 'brain'
-        AND resolver_id = 'take_mining'
-        AND local_date = $1::date`,
-    [localDate],
-  );
-  const [
-    pageCalls,
-    proposals,
-    configuredPageCap,
-    configuredProposalCap,
-    configuredBudgetCap,
-  ] =
-    await Promise.all([
-      readDailyPageCalls(engine, localDate),
-      readDailyProposals(engine, localDate, timeZone),
-      readNumberConfig(
-        engine,
-        'take_mining.daily_page_cap',
-        DEFAULT_DAILY_PAGE_CAP,
-      ),
-      readNumberConfig(
-        engine,
-        'take_mining.daily_proposal_cap',
-        DEFAULT_DAILY_PROPOSAL_CAP,
-      ),
-      readNumberConfig(
-        engine,
-        'take_mining.daily_estimated_spend_usd',
-        DEFAULT_DAILY_SPEND_CAP_USD,
-      ),
-    ]);
+  const policy = await resolveTakeMiningDailyPolicy(engine);
+  const usage = await readTakeMiningDailyUsage(engine, policy);
   return {
-    localDate,
-    reservedUsd: Number(ledger?.reserved_usd ?? 0),
-    committedUsd: Number(ledger?.committed_usd ?? 0),
-    budgetCapUsd: ledger?.cap_usd === null || ledger?.cap_usd === undefined
-      ? configuredBudgetCap
-      : Number(ledger.cap_usd),
-    configuredPageCap,
-    configuredProposalCap,
-    pageCalls,
-    proposals,
+    localDate: policy.localDate,
+    reservedUsd: usage.reservedUsd,
+    committedUsd: usage.committedUsd,
+    budgetCapUsd: policy.spendCapUsd,
+    configuredPageCap: policy.pageCap,
+    configuredProposalCap: policy.proposalCap,
+    pageCalls: usage.pageCalls,
+    proposals: usage.proposals,
   };
-}
-
-function currentDateInTimeZone(timeZone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
-
-async function readDailyPageCalls(
-  engine: BrainEngine,
-  localDate: string,
-): Promise<number> {
-  const [row] = await engine.executeRaw<{ count: number }>(
-    `SELECT COUNT(*)::int AS count
-       FROM budget_reservations
-      WHERE scope = 'brain'
-        AND resolver_id = 'take_mining'
-        AND local_date = $1::date
-        AND status IN ('held', 'committed')`,
-    [localDate],
-  );
-  return row?.count ?? 0;
-}
-
-async function readDailyProposals(
-  engine: BrainEngine,
-  localDate: string,
-  timeZone: string,
-): Promise<number> {
-  const [row] = await engine.executeRaw<{ count: number }>(
-    `SELECT COUNT(*)::int AS count
-       FROM take_proposals
-      WHERE (proposed_at AT TIME ZONE $2) >= $1::date
-        AND (proposed_at AT TIME ZONE $2) < ($1::date + interval '1 day')`,
-    [localDate, timeZone],
-  );
-  return row?.count ?? 0;
-}
-
-async function readNumberConfig(
-  engine: BrainEngine,
-  key: string,
-  fallback: number,
-): Promise<number> {
-  const raw = await engine.getConfig(key);
-  if (raw === null || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : fallback;
 }
