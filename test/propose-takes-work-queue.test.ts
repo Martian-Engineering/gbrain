@@ -63,19 +63,24 @@ async function queuePage(
   body: string,
   opts: QueuePageOpts = {},
 ): Promise<string> {
+  const admission = opts.admission ?? 'immediate';
   await engine.putPage(slug, {
     type: opts.type ?? 'note',
     title: slug,
     compiled_truth: body,
     frontmatter: opts.frontmatter ?? {},
+  }, {
+    writeContext: {
+      actor: 'test',
+      writeIntent: admission === 'immediate' ? 'user_edit' : 'maintenance',
+    },
   });
   const hash = buildTakeMiningInput(body).mining_input_hash;
   await engine.executeRaw(
-    `INSERT INTO take_mining_work (
-       source_id, page_slug, mining_input_hash, admission,
-       write_intent, actor, priority
-     ) VALUES ('default', $1, $2, $3, 'user_edit', 'test', $4)`,
-    [slug, hash, opts.admission ?? 'immediate', opts.priority ?? 0],
+    `UPDATE take_mining_work
+        SET priority = $2
+      WHERE source_id = 'default' AND page_slug = $1`,
+    [slug, opts.priority ?? 0],
   );
   return hash;
 }

@@ -15,6 +15,7 @@ import type {
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
   SourceRow,
+  PageWriteContext, PutPageOptions,
 } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
@@ -68,6 +69,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
+import { recordPageMutation } from './page-mutation.ts';
 
 type PGLiteDB = PGlite;
 
@@ -269,6 +271,7 @@ export class PGLiteEngine implements BrainEngine {
   readonly kind = 'pglite' as const;
   private _db: PGLiteDB | null = null;
   private _lock: LockHandle | null = null;
+  private _isTransactionScope = false;
   // #2034: captured at connect() so reconnect() can restore the same data dir
   // after a drop, matching PostgresEngine's _savedConfig contract.
   private _savedConfig: EngineConfig | null = null;
@@ -974,6 +977,7 @@ export class PGLiteEngine implements BrainEngine {
     return this.db.transaction(async (tx) => {
       const txEngine = Object.create(this) as PGLiteEngine;
       Object.defineProperty(txEngine, 'db', { get: () => tx });
+      Object.defineProperty(txEngine, '_isTransactionScope', { value: true });
       return fn(txEngine);
     });
   }
@@ -1029,11 +1033,25 @@ export class PGLiteEngine implements BrainEngine {
     return { slug: r.slug, id: Number(r.id) };
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: PutPageOptions): Promise<Page> {
+    if (!this._isTransactionScope) {
+      return this.transaction(tx => tx.putPage(slug, page, opts));
+    }
+
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    // PGLite serializes write transactions. Read the old semantic body before
+    // the upsert so its hash and the mutation receipt describe one revision.
+    const previousRows = await this.executeRaw<{ compiled_truth: string }>(
+      `SELECT compiled_truth
+         FROM pages
+        WHERE source_id = $1 AND slug = $2
+        FOR UPDATE`,
+      [sourceId, slug],
+    );
+    const previousCompiledTruth = previousRows[0]?.compiled_truth ?? null;
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
     // source callers land on the intended (source_id, slug) row. Omitting it
@@ -1084,7 +1102,15 @@ export class PGLiteEngine implements BrainEngine {
        RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
       [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
-    return rowToPage(rows[0] as Record<string, unknown>);
+    const stored = rowToPage(rows[0] as Record<string, unknown>);
+    await recordPageMutation(this, {
+      sourceId,
+      slug,
+      previousCompiledTruth,
+      newCompiledTruth: page.compiled_truth,
+      writeContext: opts?.writeContext,
+    });
+    return stored;
   }
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
@@ -1192,7 +1218,32 @@ export class PGLiteEngine implements BrainEngine {
     compiledTruth: string,
     timeline: string,
     contentHash: string,
+    opts?: { writeContext?: PageWriteContext },
   ): Promise<void> {
+    if (!this._isTransactionScope) {
+      return this.transaction(tx =>
+        tx.refreshPageBody(
+          slug,
+          sourceId,
+          compiledTruth,
+          timeline,
+          contentHash,
+          opts,
+        ));
+    }
+
+    const previousRows = await this.executeRaw<{ compiled_truth: string }>(
+      `SELECT compiled_truth
+         FROM pages
+        WHERE source_id = $1
+          AND slug = $2
+          AND deleted_at IS NULL
+        FOR UPDATE`,
+      [sourceId, slug],
+    );
+    const previousCompiledTruth = previousRows[0]?.compiled_truth;
+    if (previousCompiledTruth === undefined) return;
+
     // Parity with PostgresEngine.refreshPageBody: narrow UPDATE only.
     // The deleted_at filter prevents a redirect retry from reviving a
     // canonical that was already purged.
@@ -1207,6 +1258,13 @@ export class PGLiteEngine implements BrainEngine {
          AND deleted_at IS NULL`,
       [compiledTruth, timeline, contentHash, sourceId, slug],
     );
+    await recordPageMutation(this, {
+      sourceId,
+      slug,
+      previousCompiledTruth,
+      newCompiledTruth: compiledTruth,
+      writeContext: opts?.writeContext,
+    });
   }
 
   async updatePageContextualRetrievalState(
@@ -5200,33 +5258,55 @@ export class PGLiteEngine implements BrainEngine {
   async revertToVersion(
     slug: string,
     versionId: number,
-    opts?: { sourceId?: string },
+    opts?: PutPageOptions,
   ): Promise<void> {
-    // v0.31.8 (D12): when opts.sourceId is set, scope BOTH the page lookup
-    // and the version row reference. Without it, multi-source brains can
-    // revert the wrong same-slug page (the one Postgres returns first).
-    if (opts?.sourceId) {
-      await this.db.query(
-        `UPDATE pages SET
-          compiled_truth = pv.compiled_truth,
-          frontmatter = pv.frontmatter,
-          updated_at = now()
-        FROM page_versions pv
-        WHERE pages.slug = $1 AND pages.source_id = $3
-              AND pv.id = $2 AND pv.page_id = pages.id`,
-        [slug, versionId, opts.sourceId]
-      );
-      return;
+    if (!this._isTransactionScope) {
+      return this.transaction(tx => tx.revertToVersion(slug, versionId, opts));
     }
+
+    // Version ids are globally unique, so an omitted source still resolves
+    // exactly one page. Lock it and use the stored source for audit identity.
+    const params: unknown[] = [slug, versionId];
+    const sourceClause = opts?.sourceId ? 'AND p.source_id = $3' : '';
+    if (opts?.sourceId) params.push(opts.sourceId);
+    const previousRows = await this.executeRaw<{
+      source_id: string;
+      previous_compiled_truth: string;
+      restored_compiled_truth: string;
+    }>(
+      `SELECT p.source_id,
+              p.compiled_truth AS previous_compiled_truth,
+              pv.compiled_truth AS restored_compiled_truth
+         FROM pages p
+         JOIN page_versions pv ON pv.page_id = p.id
+        WHERE p.slug = $1
+          AND pv.id = $2
+          ${sourceClause}
+        FOR UPDATE OF p`,
+      params,
+    );
+    const previous = previousRows[0];
+    if (!previous) return;
+
     await this.db.query(
       `UPDATE pages SET
         compiled_truth = pv.compiled_truth,
         frontmatter = pv.frontmatter,
         updated_at = now()
       FROM page_versions pv
-      WHERE pages.slug = $1 AND pv.id = $2 AND pv.page_id = pages.id`,
-      [slug, versionId]
+      WHERE pages.slug = $1
+        AND pages.source_id = $3
+        AND pv.id = $2
+        AND pv.page_id = pages.id`,
+      [slug, versionId, previous.source_id]
     );
+    await recordPageMutation(this, {
+      sourceId: previous.source_id,
+      slug,
+      previousCompiledTruth: previous.previous_compiled_truth,
+      newCompiledTruth: previous.restored_compiled_truth,
+      writeContext: opts?.writeContext,
+    });
   }
 
   // Stats + health

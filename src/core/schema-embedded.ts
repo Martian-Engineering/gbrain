@@ -1351,6 +1351,28 @@ CREATE INDEX IF NOT EXISTS take_proposal_scans_expired_claim_idx
   ON take_proposal_scans (lease_expires_at)
   WHERE status = 'in_progress';
 
+-- page_mutations: append-only, per-write semantic audit. Deliberately has no
+-- page/source FK so deleting corpus state cannot erase mutation history.
+CREATE TABLE IF NOT EXISTS page_mutations (
+  id                         BIGSERIAL   PRIMARY KEY,
+  source_id                  TEXT        NOT NULL,
+  page_slug                  TEXT        NOT NULL,
+  actor                      TEXT        NOT NULL,
+  write_intent               TEXT        NOT NULL
+    CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
+  batch_id                   TEXT,
+  reason                     TEXT,
+  previous_mining_input_hash TEXT,
+  new_mining_input_hash      TEXT        NOT NULL,
+  semantic_changed           BOOLEAN     NOT NULL,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_mutations_page_idx
+  ON page_mutations (source_id, page_slug, id DESC);
+CREATE INDEX IF NOT EXISTS page_mutations_batch_idx
+  ON page_mutations (batch_id, id)
+  WHERE batch_id IS NOT NULL;
+
 -- take_mining_work: one explicitly admitted semantic revision per page.
 -- Fresh installs and migrations intentionally leave this queue empty.
 CREATE TABLE IF NOT EXISTS take_mining_work (
@@ -1365,15 +1387,19 @@ CREATE TABLE IF NOT EXISTS take_mining_work (
   batch_id           TEXT,
   reason             TEXT,
   priority           INTEGER     NOT NULL DEFAULT 0,
+  page_mutation_id   BIGINT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, page_slug),
   CONSTRAINT take_mining_work_page_fkey
-    FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug) ON DELETE CASCADE
+    FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug)
+      ON UPDATE CASCADE ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS take_mining_work_immediate_idx
   ON take_mining_work (source_id, priority DESC, created_at ASC)
   WHERE admission = 'immediate';
+CREATE INDEX IF NOT EXISTS take_mining_work_mutation_idx
+  ON take_mining_work (page_mutation_id);
 
 -- take_grade_cache: grade_takes verdict cache. Composite PK on
 -- (take_id, prompt_version, judge_model_id, evidence_signature) means
@@ -1502,6 +1528,7 @@ BEGIN
     ALTER TABLE calibration_profiles ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_proposal_scans ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE page_mutations ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_mining_work ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_grade_cache ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_nudge_log ENABLE ROW LEVEL SECURITY;

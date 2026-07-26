@@ -21,6 +21,21 @@ import type {
   AdjacencyRow,
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
+import type { WriteIntent } from './take-mining-admission.ts';
+
+/** Server-owned attribution for one page mutation. */
+export interface PageWriteContext {
+  actor: string;
+  writeIntent: WriteIntent;
+  batchId?: string;
+  reason?: string;
+}
+
+/** Options shared by page upserts. */
+export interface PutPageOptions {
+  sourceId?: string;
+  writeContext?: PageWriteContext;
+}
 
 /**
  * v0.27.1: file row for binary-asset metadata. Mirrors the `files` table
@@ -697,7 +712,7 @@ export interface BrainEngine {
    * DO UPDATE actually targets the intended row instead of fabricating a
    * duplicate at (default, slug). Multi-source brains MUST pass sourceId.
    */
-  putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page>;
+  putPage(slug: string, page: PageInput, opts?: PutPageOptions): Promise<Page>;
   /**
    * v0.41.13 (#1309) — identity-based dedup pre-check for the import pipeline.
    *
@@ -1894,7 +1909,11 @@ export interface BrainEngine {
    * and the page revert. Without it, multi-source brains can revert the
    * wrong row when the slug exists in 2+ sources.
    */
-  revertToVersion(slug: string, versionId: number, opts?: { sourceId?: string }): Promise<void>;
+  revertToVersion(
+    slug: string,
+    versionId: number,
+    opts?: PutPageOptions,
+  ): Promise<void>;
 
   // Stats + health
   getStats(): Promise<BrainStats>;
@@ -1994,6 +2013,7 @@ export interface BrainEngine {
     compiledTruth: string,
     timeline: string,
     contentHash: string,
+    opts?: { writeContext?: PageWriteContext },
   ): Promise<void>;
 
   /**

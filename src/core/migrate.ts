@@ -5853,6 +5853,49 @@ export const MIGRATIONS: Migration[] = [
         WHERE admission = 'immediate';
     `,
   },
+  {
+    version: 131,
+    name: 'page_mutations',
+    // Append-only audit receipts for page writes plus a monotonic revision
+    // pointer on the current take-mining queue. Intentionally no page/source
+    // FK on the receipt table: deleting corpus state must not erase its audit
+    // history. Existing v130 work rows remain valid with a NULL revision.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS page_mutations (
+        id                         BIGSERIAL   PRIMARY KEY,
+        source_id                  TEXT        NOT NULL,
+        page_slug                  TEXT        NOT NULL,
+        actor                      TEXT        NOT NULL,
+        write_intent               TEXT        NOT NULL
+          CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
+        batch_id                   TEXT,
+        reason                     TEXT,
+        previous_mining_input_hash TEXT,
+        new_mining_input_hash      TEXT        NOT NULL,
+        semantic_changed           BOOLEAN     NOT NULL,
+        created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS page_mutations_page_idx
+        ON page_mutations (source_id, page_slug, id DESC);
+      CREATE INDEX IF NOT EXISTS page_mutations_batch_idx
+        ON page_mutations (batch_id, id)
+        WHERE batch_id IS NOT NULL;
+
+      ALTER TABLE take_mining_work
+        ADD COLUMN IF NOT EXISTS page_mutation_id BIGINT;
+      ALTER TABLE take_mining_work
+        DROP CONSTRAINT IF EXISTS take_mining_work_page_fkey;
+      ALTER TABLE take_mining_work
+        ADD CONSTRAINT take_mining_work_page_fkey
+        FOREIGN KEY (source_id, page_slug)
+        REFERENCES pages(source_id, slug)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE;
+      CREATE INDEX IF NOT EXISTS take_mining_work_mutation_idx
+        ON take_mining_work (page_mutation_id);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

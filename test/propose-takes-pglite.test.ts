@@ -47,9 +47,12 @@ function ctx(): OperationContext {
 async function enqueue(slug: string, body: string): Promise<string> {
   const hash = buildTakeMiningInput(body).mining_input_hash;
   await engine.executeRaw(
-    `INSERT INTO take_mining_work (
-       source_id, page_slug, mining_input_hash, admission, write_intent, actor
-     ) VALUES ('default', $1, $2, 'immediate', 'user_edit', 'test')`,
+    `UPDATE take_mining_work
+        SET mining_input_hash = $2,
+            admission = 'immediate',
+            write_intent = 'user_edit',
+            actor = 'test'
+      WHERE source_id = 'default' AND page_slug = $1`,
     [slug, hash],
   );
   return hash;

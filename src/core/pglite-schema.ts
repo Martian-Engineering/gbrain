@@ -824,6 +824,26 @@ CREATE INDEX IF NOT EXISTS take_proposal_scans_expired_claim_idx
   ON take_proposal_scans (lease_expires_at)
   WHERE status = 'in_progress';
 
+CREATE TABLE IF NOT EXISTS page_mutations (
+  id                         BIGSERIAL   PRIMARY KEY,
+  source_id                  TEXT        NOT NULL,
+  page_slug                  TEXT        NOT NULL,
+  actor                      TEXT        NOT NULL,
+  write_intent               TEXT        NOT NULL
+    CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
+  batch_id                   TEXT,
+  reason                     TEXT,
+  previous_mining_input_hash TEXT,
+  new_mining_input_hash      TEXT        NOT NULL,
+  semantic_changed           BOOLEAN     NOT NULL,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS page_mutations_page_idx
+  ON page_mutations (source_id, page_slug, id DESC);
+CREATE INDEX IF NOT EXISTS page_mutations_batch_idx
+  ON page_mutations (batch_id, id)
+  WHERE batch_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS take_mining_work (
   source_id          TEXT        NOT NULL,
   page_slug          TEXT        NOT NULL,
@@ -836,15 +856,19 @@ CREATE TABLE IF NOT EXISTS take_mining_work (
   batch_id           TEXT,
   reason             TEXT,
   priority           INTEGER     NOT NULL DEFAULT 0,
+  page_mutation_id   BIGINT,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, page_slug),
   CONSTRAINT take_mining_work_page_fkey
-    FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug) ON DELETE CASCADE
+    FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug)
+      ON UPDATE CASCADE ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS take_mining_work_immediate_idx
   ON take_mining_work (source_id, priority DESC, created_at ASC)
   WHERE admission = 'immediate';
+CREATE INDEX IF NOT EXISTS take_mining_work_mutation_idx
+  ON take_mining_work (page_mutation_id);
 
 CREATE TABLE IF NOT EXISTS take_grade_cache (
   take_id            BIGINT       NOT NULL,

@@ -69,11 +69,13 @@ describe('take_mining_work PGLite behavior', () => {
   });
 
   test('starts empty even when pages already exist', async () => {
-    await engine.putPage('writing/preexisting', {
-      type: 'note',
-      title: 'Preexisting',
-      compiled_truth: 'This page predates explicit mining admission.',
-    });
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES (
+         'default', 'writing/preexisting', 'note', 'Preexisting',
+         'This page predates explicit mining admission.'
+       )`,
+    );
     const rows = await engine.executeRaw<{ count: number }>(
       'SELECT COUNT(*)::int AS count FROM take_mining_work',
     );
@@ -81,11 +83,13 @@ describe('take_mining_work PGLite behavior', () => {
   });
 
   test('enforces current-work identity and cascades page deletion', async () => {
-    await engine.putPage('writing/queued', {
-      type: 'note',
-      title: 'Queued',
-      compiled_truth: 'This page has explicitly admitted work.',
-    });
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+       VALUES (
+         'default', 'writing/queued', 'note', 'Queued',
+         'This page has explicitly admitted work.'
+       )`,
+    );
     await engine.executeRaw(`
       INSERT INTO take_mining_work (
         source_id, page_slug, mining_input_hash, admission,

@@ -12,6 +12,7 @@ import type {
   FactRow, FactKind, FactVisibility, FactInsertStatus,
   NewFact, FactListOpts, FactsHealth,
   SourceRow,
+  PageWriteContext, PutPageOptions,
 } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
@@ -70,6 +71,7 @@ import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defa
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './orphan-policy.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
+import { recordPageMutation } from './page-mutation.ts';
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -103,6 +105,7 @@ export function getPostgresSchema(
 export class PostgresEngine implements BrainEngine {
   readonly kind = 'postgres' as const;
   private _sql: ReturnType<typeof postgres> | null = null;
+  private _isTransactionScope = false;
   /** Saved config for reconnection. */
   private _savedConfig: (EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }) | null = null;
   /** Whether a reconnect is in progress (prevents concurrent reconnects). */
@@ -998,6 +1001,7 @@ export class PostgresEngine implements BrainEngine {
       const txEngine = Object.create(this) as PostgresEngine;
       Object.defineProperty(txEngine, 'sql', { get: () => tx });
       Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      Object.defineProperty(txEngine, '_isTransactionScope', { value: true });
       return fn(txEngine);
     }) as Promise<T>;
   }
@@ -1088,12 +1092,29 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async putPage(slug: string, page: PageInput, opts?: { sourceId?: string }): Promise<Page> {
+  async putPage(slug: string, page: PageInput, opts?: PutPageOptions): Promise<Page> {
+    if (!this._isTransactionScope) {
+      return this.transaction(tx => tx.putPage(slug, page, opts));
+    }
+
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
     const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    // Lock even the not-yet-existing key. The advisory lock closes the insert
+    // race that SELECT FOR UPDATE alone cannot serialize.
+    await sql`
+      SELECT pg_advisory_xact_lock(hashtext(${sourceId}), hashtext(${slug}))
+    `;
+    const previousRows = await sql<{ compiled_truth: string }[]>`
+      SELECT compiled_truth
+        FROM pages
+       WHERE source_id = ${sourceId}
+         AND slug = ${slug}
+       FOR UPDATE
+    `;
+    const previousCompiledTruth = previousRows[0]?.compiled_truth ?? null;
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
     // source callers actually land on the (source_id, slug) row they intend.
@@ -1146,7 +1167,15 @@ export class PostgresEngine implements BrainEngine {
         ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
       RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at
     `;
-    return rowToPage(rows[0]);
+    const stored = rowToPage(rows[0]);
+    await recordPageMutation(this, {
+      sourceId,
+      slug,
+      previousCompiledTruth,
+      newCompiledTruth: page.compiled_truth,
+      writeContext: opts?.writeContext,
+    });
+    return stored;
   }
 
   async deletePage(slug: string, opts?: { sourceId?: string }): Promise<void> {
@@ -1250,8 +1279,35 @@ export class PostgresEngine implements BrainEngine {
     compiledTruth: string,
     timeline: string,
     contentHash: string,
+    opts?: { writeContext?: PageWriteContext },
   ): Promise<void> {
+    if (!this._isTransactionScope) {
+      return this.transaction(tx =>
+        tx.refreshPageBody(
+          slug,
+          sourceId,
+          compiledTruth,
+          timeline,
+          contentHash,
+          opts,
+        ));
+    }
+
     const sql = this.sql;
+    await sql`
+      SELECT pg_advisory_xact_lock(hashtext(${sourceId}), hashtext(${slug}))
+    `;
+    const previousRows = await sql<{ compiled_truth: string }[]>`
+      SELECT compiled_truth
+        FROM pages
+       WHERE source_id = ${sourceId}
+         AND slug = ${slug}
+         AND deleted_at IS NULL
+       FOR UPDATE
+    `;
+    const previousCompiledTruth = previousRows[0]?.compiled_truth;
+    if (previousCompiledTruth === undefined) return;
+
     // Narrow UPDATE — leaves frontmatter, type, chunks, links, embeddings,
     // tags, takes untouched. Skips soft-deleted rows so a redirect retry
     // can't accidentally reanimate the body of a deleted canonical.
@@ -1265,6 +1321,13 @@ export class PostgresEngine implements BrainEngine {
         AND slug = ${slug}
         AND deleted_at IS NULL
     `;
+    await recordPageMutation(this, {
+      sourceId,
+      slug,
+      previousCompiledTruth,
+      newCompiledTruth: compiledTruth,
+      writeContext: opts?.writeContext,
+    });
   }
 
   async updatePageContextualRetrievalState(
@@ -5317,32 +5380,88 @@ export class PostgresEngine implements BrainEngine {
   async revertToVersion(
     slug: string,
     versionId: number,
-    opts?: { sourceId?: string },
+    opts?: PutPageOptions,
   ): Promise<void> {
-    const sql = this.sql;
-    // v0.31.8 (D12): two-branch. With opts.sourceId, scope BOTH the page lookup
-    // AND the version reference. Without it, multi-source brains can revert
-    // the wrong same-slug page.
-    if (opts?.sourceId) {
-      await sql`
-        UPDATE pages SET
-          compiled_truth = pv.compiled_truth,
-          frontmatter = pv.frontmatter,
-          updated_at = now()
-        FROM page_versions pv
-        WHERE pages.slug = ${slug} AND pages.source_id = ${opts.sourceId}
-              AND pv.id = ${versionId} AND pv.page_id = pages.id
-      `;
-      return;
+    if (!this._isTransactionScope) {
+      return this.transaction(tx => tx.revertToVersion(slug, versionId, opts));
     }
+
+    const sql = this.sql;
+    // Resolve the version first so an omitted source remains source-safe and
+    // the advisory lock can use the page's actual composite identity.
+    const candidateRows = opts?.sourceId
+      ? await sql<{
+          source_id: string;
+          previous_compiled_truth: string;
+          restored_compiled_truth: string;
+        }[]>`
+          SELECT p.source_id,
+                 p.compiled_truth AS previous_compiled_truth,
+                 pv.compiled_truth AS restored_compiled_truth
+            FROM pages p
+            JOIN page_versions pv ON pv.page_id = p.id
+           WHERE p.slug = ${slug}
+             AND p.source_id = ${opts.sourceId}
+             AND pv.id = ${versionId}
+        `
+      : await sql<{
+          source_id: string;
+          previous_compiled_truth: string;
+          restored_compiled_truth: string;
+        }[]>`
+          SELECT p.source_id,
+                 p.compiled_truth AS previous_compiled_truth,
+                 pv.compiled_truth AS restored_compiled_truth
+            FROM pages p
+            JOIN page_versions pv ON pv.page_id = p.id
+           WHERE p.slug = ${slug}
+             AND pv.id = ${versionId}
+        `;
+    const candidate = candidateRows[0];
+    if (!candidate) return;
+
+    await sql`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${candidate.source_id}),
+        hashtext(${slug})
+      )
+    `;
+    const previousRows = await sql<{
+      source_id: string;
+      previous_compiled_truth: string;
+      restored_compiled_truth: string;
+    }[]>`
+      SELECT p.source_id,
+             p.compiled_truth AS previous_compiled_truth,
+             pv.compiled_truth AS restored_compiled_truth
+        FROM pages p
+        JOIN page_versions pv ON pv.page_id = p.id
+       WHERE p.slug = ${slug}
+         AND p.source_id = ${candidate.source_id}
+         AND pv.id = ${versionId}
+       FOR UPDATE OF p
+    `;
+    const previous = previousRows[0];
+    if (!previous) return;
+
     await sql`
       UPDATE pages SET
         compiled_truth = pv.compiled_truth,
         frontmatter = pv.frontmatter,
         updated_at = now()
       FROM page_versions pv
-      WHERE pages.slug = ${slug} AND pv.id = ${versionId} AND pv.page_id = pages.id
+      WHERE pages.slug = ${slug}
+        AND pages.source_id = ${previous.source_id}
+        AND pv.id = ${versionId}
+        AND pv.page_id = pages.id
     `;
+    await recordPageMutation(this, {
+      sourceId: previous.source_id,
+      slug,
+      previousCompiledTruth: previous.previous_compiled_truth,
+      newCompiledTruth: previous.restored_compiled_truth,
+      writeContext: opts?.writeContext,
+    });
   }
 
   // Stats + health
