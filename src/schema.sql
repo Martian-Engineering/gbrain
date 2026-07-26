@@ -1347,6 +1347,30 @@ CREATE INDEX IF NOT EXISTS take_proposal_scans_expired_claim_idx
   ON take_proposal_scans (lease_expires_at)
   WHERE status = 'in_progress';
 
+-- take_mining_work: one explicitly admitted semantic revision per page.
+-- Fresh installs and migrations intentionally leave this queue empty.
+CREATE TABLE IF NOT EXISTS take_mining_work (
+  source_id          TEXT        NOT NULL,
+  page_slug          TEXT        NOT NULL,
+  mining_input_hash  TEXT        NOT NULL,
+  admission          TEXT        NOT NULL
+                               CHECK (admission IN ('immediate', 'deferred')),
+  write_intent       TEXT        NOT NULL
+                               CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
+  actor              TEXT        NOT NULL,
+  batch_id           TEXT,
+  reason             TEXT,
+  priority           INTEGER     NOT NULL DEFAULT 0,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, page_slug),
+  CONSTRAINT take_mining_work_page_fkey
+    FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS take_mining_work_immediate_idx
+  ON take_mining_work (source_id, priority DESC, created_at ASC)
+  WHERE admission = 'immediate';
+
 -- take_grade_cache: grade_takes verdict cache. Composite PK on
 -- (take_id, prompt_version, judge_model_id, evidence_signature) means
 -- prompt edits OR evidence changes cleanly invalidate prior verdicts.
@@ -1474,6 +1498,7 @@ BEGIN
     ALTER TABLE calibration_profiles ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_proposal_scans ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE take_mining_work ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_grade_cache ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_nudge_log ENABLE ROW LEVEL SECURITY;
     -- v0.26 OAuth 2.1 tables

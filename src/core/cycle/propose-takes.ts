@@ -1,15 +1,14 @@
 /**
  * v0.36.1.0 (T3) — propose_takes cycle phase.
  *
- * Scans markdown pages updated since last run, sends each page's prose to
- * a tuned LLM extractor, writes the extracted gradeable claims to the
- * `take_proposals` queue. User accepts/rejects via `gbrain takes propose`.
+ * Claims explicitly admitted semantic page revisions, sends canonical prose
+ * to a tuned LLM extractor, and writes gradeable claims to `take_proposals`.
+ * User accepts/rejects via `gbrain takes propose`.
  *
- * Idempotency contract (D17 schema spec):
- *   The page-level lookup on (source_id, page_slug, content_hash,
- *   prompt_version) prevents repeat LLM spend. The unique index adds
- *   claim_hash so distinct claims from one page survive while duplicate
- *   claims remain idempotent.
+ * Idempotency contract:
+ *   `take_proposal_scans` atomically claims each semantic-input/prompt tuple
+ *   and records successful zero-result scans. `take_proposals` keeps its
+ *   per-claim uniqueness, with content_hash storing mining_input_hash.
  *
  * F2 fence dedup:
  *   The phase reads the page's existing `<!-- gbrain:takes:begin -->` fence
@@ -43,10 +42,12 @@ import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { GBrainError } from '../types.ts';
-import type { Page, PageFilters } from '../types.ts';
 import type { OperationContext } from '../operations.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseStatus, CyclePhase } from '../cycle.ts';
+import { loadActivePackBestEffort } from '../schema-pack/best-effort.ts';
+import { extractableTypesFromPack } from '../schema-pack/extractable.ts';
+import { buildTakeMiningInput } from './take-mining-input.ts';
 
 /**
  * Bump when the extractor prompt or the JSON output shape changes. Old
@@ -133,9 +134,9 @@ export type ProposeTakesExtractor = (input: {
 }) => Promise<ProposedTake[]>;
 
 export interface ProposeTakesOpts extends BasePhaseOpts {
-  /** Brain repo root for fs-source page walking. Optional — defaults to engine pages. */
+  /** Retained cycle-call compatibility; queued work is database-backed. */
   repoPath?: string;
-  /** Limit pages processed in this cycle (for triage / quick smoke). Default: 100. */
+  /** Limit admitted work processed in this cycle. Default: 100. */
   pageLimit?: number;
   /** Inject the LLM call for tests; production uses gateway.chat. */
   extractor?: ProposeTakesExtractor;
@@ -145,6 +146,10 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   model?: string;
   /** Skip pages that already have a complete takes fence. Default: true. */
   skipPagesWithFence?: boolean;
+  /** Test seam for active-pack eligibility. Production resolves the active pack. */
+  _extractableTypes?: readonly string[];
+  /** Test seam for bounded lease behavior. */
+  _leaseSeconds?: number;
 }
 
 export interface ProposeTakesResult {
@@ -158,12 +163,11 @@ export interface ProposeTakesResult {
 }
 
 /**
- * Compute the content_hash key for the idempotency cache. SHA-256 of the
- * page body suffices — page slug + prompt_version are separate columns in
- * the composite unique index.
+ * Compatibility helper for callers that need the take-mining identity.
+ * Generated fences and repair-only link targets do not affect this hash.
  */
 export function contentHash(pageBody: string): string {
-  return createHash('sha256').update(pageBody).digest('hex');
+  return buildTakeMiningInput(pageBody).mining_input_hash;
 }
 
 /**
@@ -220,8 +224,8 @@ export function extractExistingTakesForDedup(pageBody: string): Array<{
 
 /**
  * Production extractor — calls gateway.chat with the EXTRACT_TAKES_PROMPT
- * and parses the JSON array output. Returns [] on parse failure (logged as
- * warning, not thrown — one bad page must not abort the phase).
+ * and parses the JSON array output. Malformed output throws so the caller
+ * releases the lease; a valid [] remains a durable successful scan.
  *
  * Stub-prompt note: the v0.36.1.0 ship-state prompt is a placeholder. Real
  * extractor lands when T19 corpus build produces the tuned prompt. Until
@@ -241,8 +245,15 @@ export async function defaultExtractor(
     maxTokens: 2048,
   });
 
-  // ChatResult.text is already the concatenated text content.
-  return parseExtractorOutput(result.text);
+  // A valid [] is a successful scan; malformed output is retryable.
+  const parsed = parseExtractorOutputResult(result.text);
+  if (!parsed.valid) throw new Error('extractor returned malformed JSON');
+  return parsed.proposals;
+}
+
+interface ExtractorParseResult {
+  valid: boolean;
+  proposals: ProposedTake[];
 }
 
 /**
@@ -251,8 +262,8 @@ export async function defaultExtractor(
  * instead of array). Returns [] on any unrecoverable parse error rather
  * than throwing.
  */
-export function parseExtractorOutput(raw: string): ProposedTake[] {
-  if (!raw || raw.trim().length === 0) return [];
+function parseExtractorOutputResult(raw: string): ExtractorParseResult {
+  if (!raw || raw.trim().length === 0) return { valid: false, proposals: [] };
   let text = raw.trim();
   // Strip markdown code fence wrapper.
   const fenced = text.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
@@ -260,13 +271,13 @@ export function parseExtractorOutput(raw: string): ProposedTake[] {
   // First-array-or-object substring extraction (defends against leading prose).
   const firstArr = text.indexOf('[');
   const firstObj = text.indexOf('{');
-  if (firstArr === -1 && firstObj === -1) return [];
+  if (firstArr === -1 && firstObj === -1) return { valid: false, proposals: [] };
   const start = firstArr !== -1 && (firstObj === -1 || firstArr < firstObj) ? firstArr : firstObj;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text.slice(start));
   } catch {
-    return [];
+    return { valid: false, proposals: [] };
   }
   const arr = Array.isArray(parsed) ? parsed : [parsed];
   const out: ProposedTake[] = [];
@@ -284,12 +295,155 @@ export function parseExtractorOutput(raw: string): ProposedTake[] {
     const domain = typeof r.domain === 'string' && r.domain.length > 0 ? r.domain : undefined;
     out.push({ claim_text, kind, holder, weight, domain });
   }
-  return out;
+  return { valid: true, proposals: out };
 }
 
+export function parseExtractorOutput(raw: string): ProposedTake[] {
+  return parseExtractorOutputResult(raw).proposals;
+}
+
+interface TakeMiningWorkRow {
+  source_id: string;
+  page_slug: string;
+  mining_input_hash: string;
+  compiled_truth: string;
+  priority: number;
+  created_at: Date;
+}
+
+const DEFAULT_CLAIM_LEASE_SECONDS = 10 * 60;
+
+function sourcePredicate(scope: ScopedReadOpts, params: unknown[]): string {
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    const placeholders = scope.sourceIds.map(sourceId => {
+      params.push(sourceId);
+      return `$${params.length}`;
+    });
+    return `w.source_id IN (${placeholders.join(', ')})`;
+  }
+  params.push(scope.sourceId ?? 'default');
+  return `w.source_id = $${params.length}`;
+}
+
+async function resolveExtractableTypes(
+  ctx: OperationContext,
+  opts: ProposeTakesOpts,
+): Promise<Set<string> | null> {
+  if (opts._extractableTypes) return new Set(opts._extractableTypes);
+  const pack = await loadActivePackBestEffort(ctx);
+  return pack ? extractableTypesFromPack(pack.manifest) : null;
+}
+
+async function loadEligibleWork(
+  engine: BrainEngine,
+  scope: ScopedReadOpts,
+  extractableTypes: ReadonlySet<string>,
+  promptVersion: string,
+): Promise<TakeMiningWorkRow[]> {
+  if (extractableTypes.size === 0) return [];
+  const params: unknown[] = [];
+  const scoped = sourcePredicate(scope, params);
+  const typePlaceholders = [...extractableTypes].map(type => {
+    params.push(type);
+    return `$${params.length}`;
+  });
+  params.push(promptVersion);
+  const promptParam = `$${params.length}`;
+
+  return engine.executeRaw<TakeMiningWorkRow>(
+    `SELECT w.source_id, w.page_slug, w.mining_input_hash,
+            p.compiled_truth, w.priority, w.created_at
+       FROM take_mining_work w
+       JOIN pages p
+         ON p.source_id = w.source_id
+        AND p.slug = w.page_slug
+      WHERE ${scoped}
+        AND w.admission = 'immediate'
+        AND p.deleted_at IS NULL
+        AND p.page_kind = 'markdown'
+        AND p.type IN (${typePlaceholders.join(', ')})
+        AND length(trim(p.compiled_truth)) > 0
+        AND COALESCE(p.frontmatter->>'dream_generated', '') <> 'true'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM take_proposal_scans s
+           WHERE s.source_id = w.source_id
+             AND s.page_slug = w.page_slug
+             AND s.mining_input_hash = w.mining_input_hash
+             AND s.prompt_version = ${promptParam}
+             AND (
+               s.status = 'succeeded'
+               OR (s.status = 'in_progress' AND s.lease_expires_at > now())
+             )
+        )
+      ORDER BY w.priority DESC, w.created_at ASC, w.page_slug ASC`,
+    params,
+  );
+}
+
+async function claimScan(
+  engine: BrainEngine,
+  work: TakeMiningWorkRow,
+  promptVersion: string,
+  attemptId: string,
+  proposalRunId: string,
+  modelId: string,
+  leaseSeconds: number,
+): Promise<boolean> {
+  const rows = await engine.executeRaw<{ attempt_id: string }>(
+    `INSERT INTO take_proposal_scans (
+       source_id, page_slug, mining_input_hash, prompt_version,
+       status, attempt_id, lease_expires_at, proposal_run_id, model_id
+     ) VALUES (
+       $1, $2, $3, $4, 'in_progress', $5,
+       now() + ($6 * interval '1 second'), $7, $8
+     )
+     ON CONFLICT (source_id, page_slug, mining_input_hash, prompt_version)
+     DO UPDATE SET
+       attempt_id = EXCLUDED.attempt_id,
+       lease_expires_at = EXCLUDED.lease_expires_at,
+       proposal_run_id = EXCLUDED.proposal_run_id,
+       model_id = EXCLUDED.model_id,
+       updated_at = now()
+     WHERE take_proposal_scans.status = 'in_progress'
+       AND take_proposal_scans.lease_expires_at <= now()
+     RETURNING attempt_id`,
+    [
+      work.source_id,
+      work.page_slug,
+      work.mining_input_hash,
+      promptVersion,
+      attemptId,
+      leaseSeconds,
+      proposalRunId,
+      modelId,
+    ],
+  );
+  return rows[0]?.attempt_id === attemptId;
+}
+
+async function releaseClaim(
+  engine: BrainEngine,
+  work: TakeMiningWorkRow,
+  promptVersion: string,
+  attemptId: string,
+): Promise<void> {
+  await engine.executeRaw(
+    `DELETE FROM take_proposal_scans
+      WHERE source_id = $1
+        AND page_slug = $2
+        AND mining_input_hash = $3
+        AND prompt_version = $4
+        AND status = 'in_progress'
+        AND attempt_id = $5`,
+    [work.source_id, work.page_slug, work.mining_input_hash, promptVersion, attemptId],
+  );
+}
+
+class ScanOwnershipLostError extends Error {}
+
 /**
- * BaseCyclePhase subclass. Walks pages, checks idempotency cache, calls
- * extractor, writes proposals.
+ * BaseCyclePhase subclass. Claims admitted semantic work and writes proposals.
  */
 class ProposeTakesPhase extends BaseCyclePhase {
   readonly name = 'propose_takes' as CyclePhase;
@@ -308,13 +462,14 @@ class ProposeTakesPhase extends BaseCyclePhase {
   protected async process(
     engine: BrainEngine,
     scope: ScopedReadOpts,
-    _ctx: OperationContext,
+    ctx: OperationContext,
     opts: ProposeTakesOpts,
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
     const extractor = opts.extractor ?? defaultExtractor;
     const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
     const pageLimit = opts.pageLimit ?? 100;
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
+    const leaseSeconds = opts._leaseSeconds ?? DEFAULT_CLAIM_LEASE_SECONDS;
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
     const result: ProposeTakesResult = {
@@ -327,52 +482,64 @@ class ProposeTakesPhase extends BaseCyclePhase {
       warnings: [],
     };
 
-    // Load pages eligible for proposal. Source-scoped per BaseCyclePhase.
-    const pageFilters: PageFilters = {
-      ...scope,
-      limit: pageLimit,
-      sort: 'updated_desc',
-    };
-    const pages: Page[] = await engine.listPages(pageFilters);
+    const extractableTypes = await resolveExtractableTypes(ctx, opts);
+    if (!extractableTypes) {
+      result.warnings.push(
+        'active schema pack could not be resolved; take mining skipped safely',
+      );
+      return {
+        summary: 'propose_takes: skipped because active schema pack is unavailable',
+        details: { ...result, prompt_version: promptVersion },
+        status: 'warn',
+      };
+    }
 
+    // SQL removes ineligible and successfully scanned work before this
+    // canonical-input filter. The limit therefore applies to actual work, not
+    // to recently touched or already cached pages.
+    const outstanding = await loadEligibleWork(
+      engine,
+      scope,
+      extractableTypes,
+      promptVersion,
+    );
+    const canonicalized = outstanding
+      .map(work => ({ work, input: buildTakeMiningInput(work.compiled_truth) }));
+    const staleCount = canonicalized.filter(({ work, input }) => (
+      input.mining_input_hash !== work.mining_input_hash
+    )).length;
+    const emptyCount = canonicalized.filter(({ input }) => input.prose.length === 0).length;
+    if (staleCount > 0) {
+      result.warnings.push(
+        `${staleCount} take-mining work item${staleCount === 1 ? '' : 's'} had stale semantic hashes and ${staleCount === 1 ? 'was' : 'were'} preserved`,
+      );
+    }
+    if (emptyCount > 0) {
+      result.warnings.push(
+        `${emptyCount} take-mining work item${emptyCount === 1 ? '' : 's'} had no canonical prose and ${emptyCount === 1 ? 'was' : 'were'} preserved`,
+      );
+    }
+    const candidates = canonicalized
+      .filter(({ work, input }) => (
+        input.prose.length > 0
+        && input.mining_input_hash === work.mining_input_hash
+        && !(skipPagesWithFence && hasCompleteFence(work.compiled_truth))
+      ))
+      .slice(0, pageLimit);
+    result.pages_scanned = candidates.length;
+    result.cache_misses = candidates.length;
     if (opts.reporter) {
-      opts.reporter.start('propose_takes.pages' as never, pages.length);
+      opts.reporter.start('propose_takes.pages' as never, candidates.length);
     }
 
     const modelId = opts.model ?? getChatModel();
 
-    for (const page of pages) {
-      result.pages_scanned += 1;
+    for (const { work, input } of candidates) {
       this.tick(opts);
 
-      // Skip pages that have NO prose body (e.g. metadata-only entity stubs).
-      const body = page.compiled_truth ?? '';
-      if (body.trim().length === 0) continue;
-      if (skipPagesWithFence && hasCompleteFence(body)) continue;
-
-      const ch = contentHash(body);
-      const existingTakes = extractExistingTakesForDedup(body);
-
-      // Idempotency check. If a row exists for (source_id, page_slug, content_hash,
-      // prompt_version), this page was already processed — skip and count as cache hit.
-      const sourceId = page.source_id ?? scope.sourceId ?? 'default';
-      const cached = await engine.executeRaw<{ id: number }>(
-        `SELECT id FROM take_proposals
-         WHERE source_id = $1 AND page_slug = $2 AND content_hash = $3 AND prompt_version = $4
-         LIMIT 1`,
-        [sourceId, page.slug, ch, promptVersion],
-      );
-      if (cached.length > 0) {
-        result.cache_hits += 1;
-        continue;
-      }
-      result.cache_misses += 1;
-
-      // Dry-run stops at the cheap candidate + idempotency reads. It must not
-      // spend model tokens or create proposal, receipt, or rollup rows.
+      // Dry-run performs only eligibility reads: no claim or downstream write.
       if (opts.dryRun) continue;
 
-      // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
       const budget = this.checkBudget({
         modelId,
         estimatedInputTokens: 1500,
@@ -381,57 +548,121 @@ class ProposeTakesPhase extends BaseCyclePhase {
       if (!budget.allowed) {
         result.budget_exhausted = true;
         result.warnings.push(
-          `budget exhausted at page ${result.pages_scanned}/${pages.length} (cumulative $${budget.cumulativeCostUsd.toFixed(4)} / cap $${budget.budgetUsd.toFixed(2)})`,
+          `budget exhausted before ${work.page_slug} (cumulative $${budget.cumulativeCostUsd.toFixed(4)} / cap $${budget.budgetUsd.toFixed(2)})`,
         );
         break;
       }
 
-      // Call the extractor. Errors on a single page log a warning but do not abort.
+      const attemptId = randomUUID();
+      const claimed = await claimScan(
+        engine,
+        work,
+        promptVersion,
+        attemptId,
+        proposalRunId,
+        modelId,
+        leaseSeconds,
+      );
+      if (!claimed) {
+        result.cache_hits += 1;
+        result.cache_misses -= 1;
+        continue;
+      }
+
+      const existingTakes = extractExistingTakesForDedup(work.compiled_truth);
       let proposals: ProposedTake[];
       try {
         proposals = await extractor({
-          pagePath: page.slug,
-          pageBody: body,
+          pagePath: work.page_slug,
+          pageBody: input.prose,
           existingTakes,
           modelHint: opts.model,
         });
       } catch (err) {
+        await releaseClaim(engine, work, promptVersion, attemptId);
         const msg = err instanceof Error ? err.message : String(err);
-        result.warnings.push(`extractor failed on ${page.slug}: ${msg}`);
+        result.warnings.push(`extractor failed on ${work.page_slug}: ${msg}`);
         continue;
       }
       result.proposals_extracted += proposals.length;
 
-      // Write proposals individually so each conflict result contributes to
-      // the honest inserted-row count.
-      for (const p of proposals) {
-        const inserted = await engine.executeRaw<{ id: number }>(
-          `INSERT INTO take_proposals
-             (source_id, page_slug, content_hash, prompt_version, proposal_run_id,
-              claim_text, kind, holder, weight, domain, dedup_against_fence_rows,
-              model_id, claim_hash)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-           ON CONFLICT (
-             source_id, page_slug, content_hash, prompt_version, claim_hash
-           ) DO NOTHING
-           RETURNING id`,
-          [
-            sourceId,
-            page.slug,
-            ch,
-            promptVersion,
-            proposalRunId,
-            p.claim_text,
-            p.kind,
-            p.holder,
-            p.weight,
-            p.domain ?? null,
-            JSON.stringify(existingTakes),
-            modelId,
-            claimHash(p.claim_text),
-          ],
-        );
-        result.proposals_inserted += inserted.length;
+      try {
+        const insertedCount = await engine.transaction(async tx => {
+          let insertedCount = 0;
+          for (const proposal of proposals) {
+            const inserted = await tx.executeRaw<{ id: number }>(
+              `INSERT INTO take_proposals
+                 (source_id, page_slug, content_hash, prompt_version, proposal_run_id,
+                  claim_text, kind, holder, weight, domain, dedup_against_fence_rows,
+                  model_id, claim_hash)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+               ON CONFLICT (
+                 source_id, page_slug, content_hash, prompt_version, claim_hash
+               ) DO NOTHING
+               RETURNING id`,
+              [
+                work.source_id,
+                work.page_slug,
+                work.mining_input_hash,
+                promptVersion,
+                proposalRunId,
+                proposal.claim_text,
+                proposal.kind,
+                proposal.holder,
+                proposal.weight,
+                proposal.domain ?? null,
+                JSON.stringify(existingTakes),
+                modelId,
+                claimHash(proposal.claim_text),
+              ],
+            );
+            insertedCount += inserted.length;
+          }
+
+          const completed = await tx.executeRaw<{ attempt_id: string }>(
+            `UPDATE take_proposal_scans
+                SET status = 'succeeded',
+                    lease_expires_at = NULL,
+                    proposal_count = $6,
+                    completed_at = now(),
+                    updated_at = now()
+              WHERE source_id = $1
+                AND page_slug = $2
+                AND mining_input_hash = $3
+                AND prompt_version = $4
+                AND status = 'in_progress'
+                AND attempt_id = $5
+              RETURNING attempt_id`,
+            [
+              work.source_id,
+              work.page_slug,
+              work.mining_input_hash,
+              promptVersion,
+              attemptId,
+              proposals.length,
+            ],
+          );
+          if (completed.length !== 1) throw new ScanOwnershipLostError();
+
+          // Hash predicate preserves a newer work revision admitted while the
+          // extractor was running.
+          await tx.executeRaw(
+            `DELETE FROM take_mining_work
+              WHERE source_id = $1
+                AND page_slug = $2
+                AND mining_input_hash = $3`,
+            [work.source_id, work.page_slug, work.mining_input_hash],
+          );
+          return insertedCount;
+        });
+        result.proposals_inserted += insertedCount;
+      } catch (err) {
+        if (err instanceof ScanOwnershipLostError) {
+          result.warnings.push(`scan ownership lost for ${work.page_slug}`);
+          continue;
+        }
+        await releaseClaim(engine, work, promptVersion, attemptId);
+        throw err;
       }
     }
 
@@ -500,6 +731,7 @@ export async function runPhaseProposeTakes(
 export const __testing = {
   ProposeTakesPhase,
   parseExtractorOutput,
+  parseExtractorOutputResult,
   contentHash,
   hasCompleteFence,
   extractExistingTakesForDedup,

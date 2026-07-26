@@ -717,6 +717,9 @@ export class PGLiteEngine implements BrainEngine {
           ON CONFLICT (id) DO NOTHING;
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS source_id TEXT
           NOT NULL DEFAULT 'default' REFERENCES sources(id) ON DELETE CASCADE;
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_slug_key;
+        ALTER TABLE pages ADD CONSTRAINT pages_source_slug_key
+          UNIQUE (source_id, slug);
       `);
     }
 

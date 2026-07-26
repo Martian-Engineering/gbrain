@@ -13,6 +13,7 @@ import {
   runPhaseProposeTakes,
   type ProposeTakesExtractor,
 } from '../src/core/cycle/propose-takes.ts';
+import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -41,6 +42,17 @@ function ctx(): OperationContext {
     remote: false,
     sourceId: 'default',
   };
+}
+
+async function enqueue(slug: string, body: string): Promise<string> {
+  const hash = buildTakeMiningInput(body).mining_input_hash;
+  await engine.executeRaw(
+    `INSERT INTO take_mining_work (
+       source_id, page_slug, mining_input_hash, admission, write_intent, actor
+     ) VALUES ('default', $1, $2, 'immediate', 'user_edit', 'test')`,
+    [slug, hash],
+  );
+  return hash;
 }
 
 describe('propose_takes persistence on PGLite', () => {
@@ -114,6 +126,10 @@ describe('propose_takes persistence on PGLite', () => {
       timeline: '',
       frontmatter: {},
     });
+    const miningHash = await enqueue(
+      'writing/proposal-source',
+      'Three extracted claims should produce two queue rows.',
+    );
     const extractor: ProposeTakesExtractor = async () => [
       {
         claim_text: 'The first claim survives.',
@@ -135,7 +151,10 @@ describe('propose_takes persistence on PGLite', () => {
       },
     ];
 
-    const result = await runPhaseProposeTakes(ctx(), { extractor });
+    const result = await runPhaseProposeTakes(ctx(), {
+      extractor,
+      _extractableTypes: ['note'],
+    });
 
     expect(result.details).toMatchObject({
       proposals_extracted: 3,
@@ -160,5 +179,9 @@ describe('propose_takes persistence on PGLite', () => {
     expect(rows[0]?.claim_hash).toBe(
       createHash('sha256').update(rows[0]!.claim_text.trim()).digest('hex'),
     );
+    const provenance = await engine.executeRaw<{ content_hash: string }>(
+      `SELECT DISTINCT content_hash FROM take_proposals`,
+    );
+    expect(provenance).toEqual([{ content_hash: miningHash }]);
   });
 });

@@ -1,0 +1,362 @@
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from 'bun:test';
+import type { OperationContext } from '../src/core/operations.ts';
+import {
+  PROPOSE_TAKES_PROMPT_VERSION,
+  __testing,
+  runPhaseProposeTakes,
+  type ProposeTakesExtractor,
+} from '../src/core/cycle/propose-takes.ts';
+import { buildTakeMiningInput } from '../src/core/cycle/take-mining-input.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+});
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+});
+
+function ctx(): OperationContext {
+  return {
+    engine,
+    config: { engine: 'pglite' },
+    logger: { info() {}, warn() {}, error() {} },
+    dryRun: false,
+    remote: false,
+    sourceId: 'default',
+  };
+}
+
+interface QueuePageOpts {
+  type?: string;
+  frontmatter?: Record<string, unknown>;
+  admission?: 'immediate' | 'deferred';
+  priority?: number;
+}
+
+async function queuePage(
+  slug: string,
+  body: string,
+  opts: QueuePageOpts = {},
+): Promise<string> {
+  await engine.putPage(slug, {
+    type: opts.type ?? 'note',
+    title: slug,
+    compiled_truth: body,
+    frontmatter: opts.frontmatter ?? {},
+  });
+  const hash = buildTakeMiningInput(body).mining_input_hash;
+  await engine.executeRaw(
+    `INSERT INTO take_mining_work (
+       source_id, page_slug, mining_input_hash, admission,
+       write_intent, actor, priority
+     ) VALUES ('default', $1, $2, $3, 'user_edit', 'test', $4)`,
+    [slug, hash, opts.admission ?? 'immediate', opts.priority ?? 0],
+  );
+  return hash;
+}
+
+async function count(table: string): Promise<number> {
+  const safeTables = new Set([
+    'take_mining_work',
+    'take_proposal_scans',
+    'take_proposals',
+  ]);
+  if (!safeTables.has(table)) throw new Error(`unsupported table: ${table}`);
+  const rows = await engine.executeRaw<{ count: number }>(
+    `SELECT COUNT(*)::int AS count FROM ${table}`,
+  );
+  return rows[0]?.count ?? 0;
+}
+
+const noProposals: ProposeTakesExtractor = async () => [];
+const NOTE_TYPES = ['note'] as const;
+
+describe('propose_takes explicit work queue', () => {
+  test('applies limit after queue admission, eligibility, and successful-scan filtering', async () => {
+    await queuePage('writing/deferred', 'Deferred prose.', {
+      admission: 'deferred',
+      priority: 100,
+    });
+    await queuePage('writing/non-extractable', 'Metadata prose.', {
+      type: 'metadata',
+      priority: 90,
+    });
+    const cachedHash = await queuePage('writing/cached', 'Already scanned.', {
+      priority: 80,
+    });
+    await engine.executeRaw(
+      `INSERT INTO take_proposal_scans (
+         source_id, page_slug, mining_input_hash, prompt_version,
+         status, attempt_id, proposal_run_id, model_id,
+         proposal_count, completed_at
+       ) VALUES (
+         'default', 'writing/cached', $1, $2,
+         'succeeded', 'cached-attempt', 'cached-run', 'test-model',
+         0, now()
+       )`,
+      [cachedHash, PROPOSE_TAKES_PROMPT_VERSION],
+    );
+    await queuePage('writing/eligible-first', 'First eligible prose.', { priority: 20 });
+    await queuePage('writing/eligible-second', 'Second eligible prose.', { priority: 10 });
+
+    const paths: string[] = [];
+    const result = await runPhaseProposeTakes(ctx(), {
+      pageLimit: 1,
+      _extractableTypes: NOTE_TYPES,
+      extractor: async input => {
+        paths.push(input.pagePath);
+        return [];
+      },
+    });
+
+    expect(paths).toEqual(['writing/eligible-first']);
+    expect(result.details.pages_scanned).toBe(1);
+    expect(await count('take_mining_work')).toBe(4);
+  });
+
+  test('excludes generated, deleted, non-extractable, and canonically empty pages', async () => {
+    await queuePage('writing/generated', 'Generated prose.', {
+      frontmatter: { dream_generated: true },
+    });
+    await queuePage('writing/deleted', 'Deleted prose.');
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now()
+        WHERE source_id = 'default' AND slug = 'writing/deleted'`,
+    );
+    await queuePage('writing/wrong-type', 'Wrong type prose.', { type: 'metadata' });
+    await queuePage(
+      'writing/managed-only',
+      '<!-- gbrain:backlinks:begin -->\nGenerated\n<!-- gbrain:backlinks:end -->',
+    );
+
+    let calls = 0;
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        calls++;
+        return [];
+      },
+    });
+
+    expect(calls).toBe(0);
+    expect(result.details.pages_scanned).toBe(0);
+    expect(await count('take_mining_work')).toBe(4);
+  });
+
+  test('passes canonical prose while preserving fence rows as dedup context', async () => {
+    const body = `Opening [Atlas](https://old.example/atlas).
+
+## Takes
+<!-- gbrain:takes:begin -->
+| # | claim | kind | who | weight |
+|---|-------|------|-----|--------|
+| 1 | Existing claim | take | brain | 0.5 |
+<!-- gbrain:takes:end -->`;
+    await queuePage('writing/canonical', body);
+
+    let receivedBody = '';
+    let receivedClaim = '';
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async input => {
+        receivedBody = input.pageBody;
+        receivedClaim = input.existingTakes[0]?.claim ?? '';
+        return [];
+      },
+    });
+
+    expect(receivedBody).toBe('Opening Atlas.');
+    expect(receivedClaim).toBe('Existing claim');
+  });
+
+  test('caches a successful empty result and removes matching work', async () => {
+    const hash = await queuePage('writing/no-takes', 'Pure fact with no take.');
+    let calls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      calls++;
+      return [];
+    };
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+
+    expect(calls).toBe(1);
+    expect(await count('take_mining_work')).toBe(0);
+    const scans = await engine.executeRaw<{
+      status: string;
+      proposal_count: number;
+      mining_input_hash: string;
+    }>(
+      `SELECT status, proposal_count, mining_input_hash
+         FROM take_proposal_scans`,
+    );
+    expect(scans).toEqual([{
+      status: 'succeeded',
+      proposal_count: 0,
+      mining_input_hash: hash,
+    }]);
+  });
+
+  test('extractor failure releases its claim and leaves work retryable', async () => {
+    await queuePage('writing/retry', 'Retry this prose.');
+
+    const failed = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        throw new Error('malformed output');
+      },
+    });
+    expect(failed.details.warnings).toEqual([
+      'extractor failed on writing/retry: malformed output',
+    ]);
+    expect(await count('take_proposal_scans')).toBe(0);
+    expect(await count('take_mining_work')).toBe(1);
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: noProposals,
+    });
+    expect(await count('take_mining_work')).toBe(0);
+    expect(await count('take_proposal_scans')).toBe(1);
+  });
+
+  test('only one concurrent worker claims a semantic input', async () => {
+    await queuePage('writing/concurrent', 'Only one extractor may run.');
+    let releaseExtractor!: () => void;
+    let notifyEntered!: () => void;
+    const entered = new Promise<void>(resolve => { notifyEntered = resolve; });
+    const released = new Promise<void>(resolve => { releaseExtractor = resolve; });
+    let calls = 0;
+    const extractor: ProposeTakesExtractor = async () => {
+      calls++;
+      notifyEntered();
+      await released;
+      return [];
+    };
+
+    const first = runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+    await entered;
+    const second = runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor,
+    });
+    releaseExtractor();
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(1);
+    expect(await count('take_proposal_scans')).toBe(1);
+  });
+
+  test('reclaims an expired in-progress lease', async () => {
+    const hash = await queuePage('writing/expired', 'Expired leases are retryable.');
+    await engine.executeRaw(
+      `INSERT INTO take_proposal_scans (
+         source_id, page_slug, mining_input_hash, prompt_version,
+         status, attempt_id, lease_expires_at, proposal_run_id, model_id
+       ) VALUES (
+         'default', 'writing/expired', $1, $2,
+         'in_progress', 'expired-attempt', now() - interval '1 second',
+         'expired-run', 'test-model'
+       )`,
+      [hash, PROPOSE_TAKES_PROMPT_VERSION],
+    );
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: noProposals,
+    });
+
+    const scans = await engine.executeRaw<{ status: string; attempt_id: string }>(
+      `SELECT status, attempt_id FROM take_proposal_scans`,
+    );
+    expect(scans[0]?.status).toBe('succeeded');
+    expect(scans[0]?.attempt_id).not.toBe('expired-attempt');
+  });
+
+  test('does not delete newer work admitted while extraction is running', async () => {
+    await queuePage('writing/stale', 'Original semantic prose.');
+    const newer = buildTakeMiningInput('Newer semantic prose.').mining_input_hash;
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        await engine.executeRaw(
+          `UPDATE take_mining_work
+              SET mining_input_hash = $1, updated_at = now()
+            WHERE source_id = 'default' AND page_slug = 'writing/stale'`,
+          [newer],
+        );
+        return [];
+      },
+    });
+
+    const work = await engine.executeRaw<{ mining_input_hash: string }>(
+      `SELECT mining_input_hash FROM take_mining_work`,
+    );
+    expect(work).toEqual([{ mining_input_hash: newer }]);
+  });
+
+  test('dry-run is read-only and reports eligible outstanding work', async () => {
+    await queuePage('writing/dry-run', 'Dry run prose.');
+    let calls = 0;
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      dryRun: true,
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => {
+        calls++;
+        return [];
+      },
+    });
+
+    expect(result.details).toMatchObject({
+      dry_run: true,
+      pages_scanned: 1,
+      cache_misses: 1,
+    });
+    expect(calls).toBe(0);
+    expect(await count('take_mining_work')).toBe(1);
+    expect(await count('take_proposal_scans')).toBe(0);
+    expect(await count('take_proposals')).toBe(0);
+  });
+});
+
+describe('extractor output validity', () => {
+  test('distinguishes a valid empty array from malformed output', () => {
+    expect(__testing.parseExtractorOutputResult('[]')).toEqual({
+      valid: true,
+      proposals: [],
+    });
+    expect(__testing.parseExtractorOutputResult('[not json')).toEqual({
+      valid: false,
+      proposals: [],
+    });
+  });
+});

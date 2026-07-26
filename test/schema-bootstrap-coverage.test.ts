@@ -189,6 +189,7 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
     // it pre-dates the migrations that introduced these objects. Drop columns
     // before the table-level constraints that depend on them.
     await db.exec(`
+      DROP TABLE IF EXISTS take_mining_work;
       ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;
@@ -313,6 +314,7 @@ test('after bootstrap, PGLITE_SCHEMA_SQL replays without crashing on missing for
     const db = (engine as any).db;
 
     await db.exec(`
+      DROP TABLE IF EXISTS take_mining_work;
       ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
       ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
       DROP INDEX IF EXISTS idx_pages_source_id;

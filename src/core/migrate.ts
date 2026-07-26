@@ -5822,6 +5822,37 @@ export const MIGRATIONS: Migration[] = [
         WHERE status = 'in_progress';
     `,
   },
+  {
+    version: 130,
+    name: 'take_mining_work',
+    // Explicit admission queue for semantic page revisions. Intentionally no
+    // backfill: upgrading a brain must not turn its historical corpus into
+    // immediate LLM work.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS take_mining_work (
+        source_id          TEXT        NOT NULL,
+        page_slug          TEXT        NOT NULL,
+        mining_input_hash  TEXT        NOT NULL,
+        admission          TEXT        NOT NULL
+                                     CHECK (admission IN ('immediate', 'deferred')),
+        write_intent       TEXT        NOT NULL
+                                     CHECK (write_intent IN ('user_edit', 'live_ingest', 'maintenance', 'backfill', 'derived')),
+        actor              TEXT        NOT NULL,
+        batch_id           TEXT,
+        reason             TEXT,
+        priority           INTEGER     NOT NULL DEFAULT 0,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (source_id, page_slug),
+        CONSTRAINT take_mining_work_page_fkey
+          FOREIGN KEY (source_id, page_slug) REFERENCES pages(source_id, slug) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS take_mining_work_immediate_idx
+        ON take_mining_work (source_id, priority DESC, created_at ASC)
+        WHERE admission = 'immediate';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
