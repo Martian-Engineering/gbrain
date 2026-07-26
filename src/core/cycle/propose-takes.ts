@@ -150,6 +150,8 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   _extractableTypes?: readonly string[];
   /** Test seam for bounded lease behavior. */
   _leaseSeconds?: number;
+  /** Test seam for bounded queue pagination. */
+  _workBatchSize?: number;
 }
 
 export interface ProposeTakesResult {
@@ -308,10 +310,19 @@ interface TakeMiningWorkRow {
   mining_input_hash: string;
   compiled_truth: string;
   priority: number;
-  created_at: Date;
+  created_at: string;
+}
+
+interface TakeMiningWorkCursor {
+  priority: number;
+  created_at: string;
+  source_id: string;
+  page_slug: string;
 }
 
 const DEFAULT_CLAIM_LEASE_SECONDS = 10 * 60;
+const MIN_WORK_BATCH_SIZE = 25;
+const MAX_WORK_BATCH_SIZE = 250;
 
 function sourcePredicate(scope: ScopedReadOpts, params: unknown[]): string {
   if (scope.sourceIds && scope.sourceIds.length > 0) {
@@ -334,11 +345,13 @@ async function resolveExtractableTypes(
   return pack ? extractableTypesFromPack(pack.manifest) : null;
 }
 
-async function loadEligibleWork(
+async function loadEligibleWorkBatch(
   engine: BrainEngine,
   scope: ScopedReadOpts,
   extractableTypes: ReadonlySet<string>,
   promptVersion: string,
+  cursor: TakeMiningWorkCursor | undefined,
+  batchSize: number,
 ): Promise<TakeMiningWorkRow[]> {
   if (extractableTypes.size === 0) return [];
   const params: unknown[] = [];
@@ -349,10 +362,42 @@ async function loadEligibleWork(
   });
   params.push(promptVersion);
   const promptParam = `$${params.length}`;
+  let cursorPredicate = '';
+  if (cursor) {
+    params.push(cursor.priority);
+    const priorityParam = `$${params.length}`;
+    params.push(cursor.created_at);
+    const createdAtParam = `$${params.length}`;
+    params.push(cursor.source_id);
+    const sourceIdParam = `$${params.length}`;
+    params.push(cursor.page_slug);
+    const pageSlugParam = `$${params.length}`;
+    cursorPredicate = `
+        AND (
+          w.priority < ${priorityParam}
+          OR (
+            w.priority = ${priorityParam}
+            AND w.created_at > ${createdAtParam}::timestamptz
+          )
+          OR (
+            w.priority = ${priorityParam}
+            AND w.created_at = ${createdAtParam}::timestamptz
+            AND w.source_id > ${sourceIdParam}
+          )
+          OR (
+            w.priority = ${priorityParam}
+            AND w.created_at = ${createdAtParam}::timestamptz
+            AND w.source_id = ${sourceIdParam}
+            AND w.page_slug > ${pageSlugParam}
+          )
+        )`;
+  }
+  params.push(batchSize);
+  const limitParam = `$${params.length}`;
 
   return engine.executeRaw<TakeMiningWorkRow>(
     `SELECT w.source_id, w.page_slug, w.mining_input_hash,
-            p.compiled_truth, w.priority, w.created_at
+            p.compiled_truth, w.priority, w.created_at::text AS created_at
        FROM take_mining_work w
        JOIN pages p
          ON p.source_id = w.source_id
@@ -376,9 +421,74 @@ async function loadEligibleWork(
                OR (s.status = 'in_progress' AND s.lease_expires_at > now())
              )
         )
-      ORDER BY w.priority DESC, w.created_at ASC, w.page_slug ASC`,
+        ${cursorPredicate}
+      ORDER BY w.priority DESC, w.created_at ASC, w.source_id ASC, w.page_slug ASC
+      LIMIT ${limitParam}`,
     params,
   );
+}
+
+async function loadCandidateWork(
+  engine: BrainEngine,
+  scope: ScopedReadOpts,
+  extractableTypes: ReadonlySet<string>,
+  promptVersion: string,
+  pageLimit: number,
+  batchSize: number,
+  skipPagesWithFence: boolean,
+): Promise<{
+  candidates: Array<{
+    work: TakeMiningWorkRow;
+    input: ReturnType<typeof buildTakeMiningInput>;
+  }>;
+  staleCount: number;
+  emptyCount: number;
+  batchesRead: number;
+}> {
+  const candidates: Array<{
+    work: TakeMiningWorkRow;
+    input: ReturnType<typeof buildTakeMiningInput>;
+  }> = [];
+  let staleCount = 0;
+  let emptyCount = 0;
+  let batchesRead = 0;
+  let cursor: TakeMiningWorkCursor | undefined;
+
+  while (candidates.length < pageLimit) {
+    const batch = await loadEligibleWorkBatch(
+      engine,
+      scope,
+      extractableTypes,
+      promptVersion,
+      cursor,
+      batchSize,
+    );
+    if (batch.length === 0) break;
+    batchesRead++;
+
+    for (const work of batch) {
+      const input = buildTakeMiningInput(work.compiled_truth);
+      if (input.prose.length === 0) {
+        emptyCount++;
+      } else if (input.mining_input_hash !== work.mining_input_hash) {
+        staleCount++;
+      } else if (!(skipPagesWithFence && hasCompleteFence(work.compiled_truth))) {
+        candidates.push({ work, input });
+        if (candidates.length === pageLimit) break;
+      }
+    }
+
+    const last = batch.at(-1);
+    if (!last || batch.length < batchSize) break;
+    cursor = {
+      priority: last.priority,
+      created_at: last.created_at,
+      source_id: last.source_id,
+      page_slug: last.page_slug,
+    };
+  }
+
+  return { candidates, staleCount, emptyCount, batchesRead };
 }
 
 async function claimScan(
@@ -467,9 +577,16 @@ class ProposeTakesPhase extends BaseCyclePhase {
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
     const extractor = opts.extractor ?? defaultExtractor;
     const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
-    const pageLimit = opts.pageLimit ?? 100;
+    const pageLimit = Math.max(0, Math.floor(opts.pageLimit ?? 100));
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
     const leaseSeconds = opts._leaseSeconds ?? DEFAULT_CLAIM_LEASE_SECONDS;
+    const workBatchSize = Math.max(
+      1,
+      Math.floor(opts._workBatchSize ?? Math.max(
+        MIN_WORK_BATCH_SIZE,
+        Math.min(pageLimit * 2, MAX_WORK_BATCH_SIZE),
+      )),
+    );
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
     const result: ProposeTakesResult = {
@@ -494,38 +611,29 @@ class ProposeTakesPhase extends BaseCyclePhase {
       };
     }
 
-    // SQL removes ineligible and successfully scanned work before this
-    // canonical-input filter. The limit therefore applies to actual work, not
-    // to recently touched or already cached pages.
-    const outstanding = await loadEligibleWork(
+    // SQL removes ineligible and successfully scanned work. Bounded keyset
+    // pagination continues past stale or canonically empty rows so they do not
+    // consume the operator-facing page limit.
+    const selection = await loadCandidateWork(
       engine,
       scope,
       extractableTypes,
       promptVersion,
+      pageLimit,
+      workBatchSize,
+      skipPagesWithFence,
     );
-    const canonicalized = outstanding
-      .map(work => ({ work, input: buildTakeMiningInput(work.compiled_truth) }));
-    const staleCount = canonicalized.filter(({ work, input }) => (
-      input.mining_input_hash !== work.mining_input_hash
-    )).length;
-    const emptyCount = canonicalized.filter(({ input }) => input.prose.length === 0).length;
-    if (staleCount > 0) {
+    if (selection.staleCount > 0) {
       result.warnings.push(
-        `${staleCount} take-mining work item${staleCount === 1 ? '' : 's'} had stale semantic hashes and ${staleCount === 1 ? 'was' : 'were'} preserved`,
+        `${selection.staleCount} take-mining work item${selection.staleCount === 1 ? '' : 's'} had stale semantic hashes and ${selection.staleCount === 1 ? 'was' : 'were'} preserved`,
       );
     }
-    if (emptyCount > 0) {
+    if (selection.emptyCount > 0) {
       result.warnings.push(
-        `${emptyCount} take-mining work item${emptyCount === 1 ? '' : 's'} had no canonical prose and ${emptyCount === 1 ? 'was' : 'were'} preserved`,
+        `${selection.emptyCount} take-mining work item${selection.emptyCount === 1 ? '' : 's'} had no canonical prose and ${selection.emptyCount === 1 ? 'was' : 'were'} preserved`,
       );
     }
-    const candidates = canonicalized
-      .filter(({ work, input }) => (
-        input.prose.length > 0
-        && input.mining_input_hash === work.mining_input_hash
-        && !(skipPagesWithFence && hasCompleteFence(work.compiled_truth))
-      ))
-      .slice(0, pageLimit);
+    const candidates = selection.candidates;
     result.pages_scanned = candidates.length;
     result.cache_misses = candidates.length;
     if (opts.reporter) {
@@ -674,7 +782,12 @@ class ProposeTakesPhase extends BaseCyclePhase {
           `(dry-run) would scan ${result.pages_scanned} pages: ` +
           `${result.cache_hits} cache hit${result.cache_hits === 1 ? '' : 's'}, ` +
           `${result.cache_misses} cache miss${result.cache_misses === 1 ? '' : 'es'}`,
-        details: { ...result, dry_run: true, prompt_version: promptVersion },
+        details: {
+          ...result,
+          dry_run: true,
+          prompt_version: promptVersion,
+          work_batches_read: selection.batchesRead,
+        },
         status: 'ok',
       };
     }
@@ -710,7 +823,12 @@ class ProposeTakesPhase extends BaseCyclePhase {
 
     return {
       summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_extracted} extracted, ${result.proposals_inserted} new proposals (run ${proposalRunId})`,
-      details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion },
+      details: {
+        ...result,
+        proposal_run_id: proposalRunId,
+        prompt_version: promptVersion,
+        work_batches_read: selection.batchesRead,
+      },
       status: result.budget_exhausted ? 'warn' : 'ok',
     };
   }

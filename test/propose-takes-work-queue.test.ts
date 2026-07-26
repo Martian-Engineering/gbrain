@@ -7,6 +7,8 @@ import {
   test,
 } from 'bun:test';
 import type { OperationContext } from '../src/core/operations.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { BudgetMeter } from '../src/core/cycle/budget-meter.ts';
 import {
   PROPOSE_TAKES_PROMPT_VERSION,
   __testing,
@@ -27,10 +29,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  configureGateway({
+    chat_model: 'anthropic:claude-haiku-4-5',
+    env: { ANTHROPIC_API_KEY: 'test-key' },
+  });
 });
 
 function ctx(): OperationContext {
@@ -90,6 +97,39 @@ const noProposals: ProposeTakesExtractor = async () => [];
 const NOTE_TYPES = ['note'] as const;
 
 describe('propose_takes explicit work queue', () => {
+  test('paginates past stale work without letting it consume the page limit', async () => {
+    for (const slug of ['stale-a', 'stale-b', 'stale-c']) {
+      await queuePage(`writing/${slug}`, `${slug} prose.`, { priority: 100 });
+      await engine.executeRaw(
+        `UPDATE take_mining_work
+            SET mining_input_hash = 'stale-hash'
+          WHERE source_id = 'default' AND page_slug = $1`,
+        [`writing/${slug}`],
+      );
+    }
+    await queuePage('writing/eligible-after-stale', 'Eligible prose.', {
+      priority: 10,
+    });
+
+    const paths: string[] = [];
+    const result = await runPhaseProposeTakes(ctx(), {
+      pageLimit: 1,
+      _workBatchSize: 2,
+      _extractableTypes: NOTE_TYPES,
+      extractor: async input => {
+        paths.push(input.pagePath);
+        return [];
+      },
+    });
+
+    expect(paths).toEqual(['writing/eligible-after-stale']);
+    expect(result.details.pages_scanned).toBe(1);
+    expect(result.details.work_batches_read).toBe(2);
+    expect(result.details.warnings).toContain(
+      '3 take-mining work items had stale semantic hashes and were preserved',
+    );
+  });
+
   test('applies limit after queue admission, eligibility, and successful-scan filtering', async () => {
     await queuePage('writing/deferred', 'Deferred prose.', {
       admission: 'deferred',
@@ -345,6 +385,122 @@ describe('propose_takes explicit work queue', () => {
     expect(await count('take_mining_work')).toBe(1);
     expect(await count('take_proposal_scans')).toBe(0);
     expect(await count('take_proposals')).toBe(0);
+  });
+
+  test('uses one proposal_run_id across proposals from every page in a run', async () => {
+    await queuePage('writing/run-a', 'Run A prose.');
+    await queuePage('writing/run-b', 'Run B prose.');
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async input => [{
+        claim_text: `Claim from ${input.pagePath}`,
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      }],
+    });
+
+    const proposals = await engine.executeRaw<{
+      page_slug: string;
+      proposal_run_id: string;
+    }>(
+      `SELECT page_slug, proposal_run_id
+         FROM take_proposals
+        ORDER BY page_slug`,
+    );
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0]?.proposal_run_id).toBe(proposals[1]?.proposal_run_id);
+    expect(proposals[0]?.proposal_run_id).toMatch(/^propose-/);
+  });
+
+  test('records the configured default model when no phase override is passed', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-5',
+      env: { OPENAI_API_KEY: 'test-key' },
+    });
+    await queuePage('writing/configured-model', 'Configured model prose.');
+
+    await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      extractor: async () => [{
+        claim_text: 'Configured model claim',
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      }],
+    });
+
+    const proposals = await engine.executeRaw<{ model_id: string }>(
+      `SELECT model_id FROM take_proposals`,
+    );
+    expect(proposals).toEqual([{ model_id: 'openai:gpt-5' }]);
+  });
+
+  test('preserves nested provider model ids through budget checks and records', async () => {
+    const modelId = 'openrouter:anthropic/claude-sonnet-4-6';
+    configureGateway({
+      chat_model: modelId,
+      env: { OPENROUTER_API_KEY: 'test-key' },
+    });
+    await queuePage('writing/nested-model', 'Nested provider model prose.');
+    const meter = new BudgetMeter({
+      budgetUsd: 0.000001,
+      phase: 'propose_takes',
+      auditPath: '/dev/null',
+    });
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      _extractableTypes: NOTE_TYPES,
+      meter,
+      extractor: async () => [{
+        claim_text: 'Nested provider model claim',
+        kind: 'take',
+        holder: 'brain',
+        weight: 0.5,
+      }],
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.details.budget_exhausted).toBe(false);
+    expect(meter.unpricedSubmits).toBe(1);
+    const proposals = await engine.executeRaw<{ model_id: string }>(
+      `SELECT model_id FROM take_proposals`,
+    );
+    const scans = await engine.executeRaw<{ model_id: string }>(
+      `SELECT model_id FROM take_proposal_scans`,
+    );
+    expect(proposals).toEqual([{ model_id: modelId }]);
+    expect(scans).toEqual([{ model_id: modelId }]);
+  });
+
+  test('stops before claiming work when the configured budget is exhausted', async () => {
+    await queuePage('writing/over-budget', 'This work exceeds the budget.');
+    let extractorCalls = 0;
+    const meter = new BudgetMeter({
+      budgetUsd: 0.000001,
+      phase: 'propose_takes',
+      auditPath: '/dev/null',
+    });
+
+    const result = await runPhaseProposeTakes(ctx(), {
+      model: 'anthropic:claude-opus-4-7',
+      _extractableTypes: NOTE_TYPES,
+      meter,
+      extractor: async () => {
+        extractorCalls++;
+        return [];
+      },
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.details.budget_exhausted).toBe(true);
+    expect(result.details.warnings).toEqual([
+      expect.stringContaining('budget exhausted before writing/over-budget'),
+    ]);
+    expect(extractorCalls).toBe(0);
+    expect(await count('take_proposal_scans')).toBe(0);
+    expect(await count('take_mining_work')).toBe(1);
   });
 });
 
