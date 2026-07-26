@@ -210,6 +210,31 @@ describe('take-mining enrollment control', () => {
     await insertPage(engine, 'notes/deferred', 'Deferred', '2023-01-02');
     await insertWork(engine, 'notes/immediate', 'hash-i', 'immediate', 'live', 'user_edit');
     await insertWork(engine, 'notes/deferred', 'hash-d', 'deferred', 'history', null);
+    const timeZone = 'America/Los_Angeles';
+    const localDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    await engine.setConfig('budget.tz', timeZone);
+    await engine.executeRaw(
+      `INSERT INTO take_proposals (
+         source_id, page_slug, content_hash, prompt_version, proposal_run_id,
+         claim_text, claim_hash, kind, holder, weight, model_id, proposed_at
+       ) VALUES
+         (
+           'default', 'notes/today', 'today-hash', 'prompt-v1', 'today-run',
+           'today', 'today-claim', 'take', 'brain', 0.5, 'test-model',
+           (($1::date + interval '30 minutes') AT TIME ZONE $2)
+         ),
+         (
+           'default', 'notes/yesterday', 'yesterday-hash', 'prompt-v1', 'yesterday-run',
+           'yesterday', 'yesterday-claim', 'take', 'brain', 0.5, 'test-model',
+           (($1::date - interval '1 day' + interval '23 hours 30 minutes') AT TIME ZONE $2)
+         )`,
+      [localDate, timeZone],
+    );
 
     const status = await getTakeMiningStatus(ctx, {
       sourceId: 'default',
@@ -222,6 +247,7 @@ describe('take-mining enrollment control', () => {
     expect(status.daily.configuredPageCap).toBe(100);
     expect(status.daily.configuredProposalCap).toBe(200);
     expect(status.daily.budgetCapUsd).toBe(5);
+    expect(status.daily.proposals).toBe(1);
     const rows = await engine.executeRaw<{ count: number }>(
       'SELECT COUNT(*)::int AS count FROM take_mining_work',
     );

@@ -667,7 +667,7 @@ async function readDailyStatus(
   ] =
     await Promise.all([
       readDailyPageCalls(engine, localDate),
-      readDailyProposals(engine, localDate),
+      readDailyProposals(engine, localDate, timeZone),
       readNumberConfig(
         engine,
         'take_mining.daily_page_cap',
@@ -726,13 +726,14 @@ async function readDailyPageCalls(
 async function readDailyProposals(
   engine: BrainEngine,
   localDate: string,
+  timeZone: string,
 ): Promise<number> {
   const [row] = await engine.executeRaw<{ count: number }>(
     `SELECT COUNT(*)::int AS count
        FROM take_proposals
-      WHERE proposed_at >= $1::date
-        AND proposed_at < ($1::date + interval '1 day')`,
-    [localDate],
+      WHERE (proposed_at AT TIME ZONE $2) >= $1::date
+        AND (proposed_at AT TIME ZONE $2) < ($1::date + interval '1 day')`,
+    [localDate, timeZone],
   );
   return row?.count ?? 0;
 }
