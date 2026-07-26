@@ -12,6 +12,7 @@ import { BudgetMeter } from '../src/core/cycle/budget-meter.ts';
 import {
   PROPOSE_TAKES_PROMPT_VERSION,
   __testing,
+  runTakeMiningWork,
   runPhaseProposeTakes,
   type ProposeTakesExtractor,
 } from '../src/core/cycle/propose-takes.ts';
@@ -309,12 +310,18 @@ describe('propose_takes explicit work queue', () => {
       return [];
     };
 
-    const first = runPhaseProposeTakes(ctx(), {
+    const first = runTakeMiningWork(ctx(), {
+      admission: 'immediate',
+      promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: 100,
       _extractableTypes: NOTE_TYPES,
       _beforeClaim: beforeClaim,
       extractor,
     });
-    const second = runPhaseProposeTakes(ctx(), {
+    const second = runTakeMiningWork(ctx(), {
+      admission: 'immediate',
+      promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: 100,
       _extractableTypes: NOTE_TYPES,
       _beforeClaim: beforeClaim,
       extractor,
@@ -325,19 +332,19 @@ describe('propose_takes explicit work queue', () => {
 
     expect(calls).toBe(1);
     expect(results.reduce(
-      (sum, result) => sum + Number(result.details.eligible_pages),
+      (sum, result) => sum + result.eligible_pages,
       0,
     )).toBe(2);
     expect(results.reduce(
-      (sum, result) => sum + Number(result.details.pages_scanned),
+      (sum, result) => sum + result.pages_scanned,
       0,
     )).toBe(1);
     expect(results.reduce(
-      (sum, result) => sum + Number(result.details.cache_misses),
+      (sum, result) => sum + result.cache_misses,
       0,
     )).toBe(1);
     expect(results.reduce(
-      (sum, result) => sum + Number(result.details.cache_hits),
+      (sum, result) => sum + result.cache_hits,
       0,
     )).toBe(1);
     expect(await count('take_proposal_scans')).toBe(1);
@@ -402,7 +409,10 @@ describe('propose_takes explicit work queue', () => {
       }];
     };
 
-    const oldWorker = runPhaseProposeTakes(ctx(), {
+    const oldWorker = runTakeMiningWork(ctx(), {
+      admission: 'immediate',
+      promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: 100,
       _extractableTypes: NOTE_TYPES,
       extractor,
     });
@@ -415,7 +425,10 @@ describe('propose_takes explicit work queue', () => {
           AND status = 'in_progress'`,
     );
 
-    const reclaimingWorker = runPhaseProposeTakes(ctx(), {
+    const reclaimingWorker = runTakeMiningWork(ctx(), {
+      admission: 'immediate',
+      promptVersion: PROPOSE_TAKES_PROMPT_VERSION,
+      pageCap: 100,
       _extractableTypes: NOTE_TYPES,
       extractor,
     });
@@ -436,13 +449,13 @@ describe('propose_takes explicit work queue', () => {
 
     releaseFirst();
     const oldResult = await oldWorker;
-    expect(oldResult.details).toMatchObject({
+    expect(oldResult).toMatchObject({
       eligible_pages: 1,
       pages_scanned: 1,
       cache_misses: 1,
       proposals_inserted: 0,
     });
-    expect(oldResult.details.warnings).toContain(
+    expect(oldResult.warnings).toContain(
       'scan ownership lost for writing/reclaimed-race',
     );
     expect(await count('take_proposals')).toBe(0);
@@ -455,7 +468,7 @@ describe('propose_takes explicit work queue', () => {
 
     releaseSecond();
     const reclaimedResult = await reclaimingWorker;
-    expect(reclaimedResult.details.proposals_inserted).toBe(1);
+    expect(reclaimedResult.proposals_inserted).toBe(1);
     expect(await engine.executeRaw<{ claim_text: string }>(
       `SELECT claim_text FROM take_proposals`,
     )).toEqual([{ claim_text: 'Reclaimed worker claim' }]);

@@ -42,6 +42,7 @@ describe('registerBuiltinHandlers', () => {
     expect(names).toContain('extract');
     expect(names).toContain('backlinks');
     expect(names).toContain('autopilot-cycle');
+    expect(names).toContain('take-mining-drain');
   });
 
   test('total handler count includes all 7 names', () => {

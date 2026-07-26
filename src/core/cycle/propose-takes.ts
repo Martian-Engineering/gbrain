@@ -48,10 +48,12 @@ import { extractableTypesFromPack } from '../schema-pack/extractable.ts';
 import { buildTakeMiningInput } from './take-mining-input.ts';
 import {
   createTakeMiningRunner,
+  TAKE_MINING_LOCK_NAME,
   takeMiningWorkBatchSize,
   type TakeMiningRunnerOptions,
   type TakeMiningRunnerWork,
 } from './take-mining-runner.ts';
+import { withTakeMiningLock } from './take-mining-lock.ts';
 
 export {
   TakeMiningRunnerError,
@@ -156,6 +158,8 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   promptVersion?: string;
   /** Override model id (tests + config). */
   model?: string;
+  /** Cooperative cycle cancellation and renewable-lock loss signal. */
+  signal?: AbortSignal;
   /** Skip pages that already have a complete takes fence. Default: true. */
   skipPagesWithFence?: boolean;
   /** Test seam for active-pack eligibility. Production resolves the active pack. */
@@ -811,27 +815,42 @@ class ProposeTakesPhase extends BaseCyclePhase {
   }
 
   protected async process(
-    _engine: BrainEngine,
+    engine: BrainEngine,
     _scope: ScopedReadOpts,
     ctx: OperationContext,
     opts: ProposeTakesOpts,
   ): Promise<{ summary: string; details: Record<string, unknown>; status?: PhaseStatus }> {
-    const result = await runTakeMiningWork(ctx, {
-      admission: 'immediate',
-      promptVersion: opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION,
-      pageCap: Math.max(0, Math.floor(opts.pageLimit ?? 100)),
-      model: opts.model,
-      extractor: opts.extractor,
-      dryRun: opts.dryRun,
-      skipPagesWithFence: opts.skipPagesWithFence,
-      reporter: opts.reporter,
-      _extractableTypes: opts._extractableTypes,
-      _leaseSeconds: opts._leaseSeconds,
-      _workBatchSize: opts._workBatchSize,
-      _beforeClaim: opts._beforeClaim,
-      _estimatedPageSpendUsd: opts._estimatedPageSpendUsd,
-      _checkRunBudget: estimate => this.checkBudget(estimate),
-    });
+    const locked = await withTakeMiningLock(engine, opts.signal, signal =>
+      runTakeMiningWork(ctx, {
+        admission: 'immediate',
+        promptVersion: opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION,
+        pageCap: Math.max(0, Math.floor(opts.pageLimit ?? 100)),
+        model: opts.model,
+        extractor: opts.extractor,
+        dryRun: opts.dryRun,
+        skipPagesWithFence: opts.skipPagesWithFence,
+        reporter: opts.reporter,
+        signal,
+        _extractableTypes: opts._extractableTypes,
+        _leaseSeconds: opts._leaseSeconds,
+        _workBatchSize: opts._workBatchSize,
+        _beforeClaim: opts._beforeClaim,
+        _estimatedPageSpendUsd: opts._estimatedPageSpendUsd,
+        _checkRunBudget: estimate => this.checkBudget(estimate),
+      }),
+    );
+    if (!locked.acquired) {
+      return {
+        summary: 'propose_takes deferred: take mining is already in progress',
+        details: {
+          deferred: true,
+          reason: 'take_mining_in_progress',
+          lock_name: TAKE_MINING_LOCK_NAME,
+        },
+        status: 'warn',
+      };
+    }
+    const result = locked.value;
 
     const summary = result.dry_run
       ? `(dry-run) would scan ${result.eligible_pages} eligible page${result.eligible_pages === 1 ? '' : 's'}`

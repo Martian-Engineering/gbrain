@@ -37,6 +37,21 @@ const DAILY_BUDGET_RESOLVER = 'take_mining';
 /** Renewable lock shared by automatic and operator-triggered take mining. */
 export const TAKE_MINING_LOCK_NAME = 'gbrain-take-mining';
 
+/** Current model and fixed per-page estimate used by preview and execution. */
+export function takeMiningExpectedPageSpend(modelId = getChatModel()): {
+  modelId: string;
+  estimatedSpendUsd: number | null;
+} {
+  return {
+    modelId,
+    estimatedSpendUsd: estimateMaxCostUsd(
+      modelId,
+      ESTIMATED_INPUT_TOKENS,
+      MAX_OUTPUT_TOKENS,
+    ),
+  };
+}
+
 /** A clean boundary that stopped a bounded take-mining run. */
 export type TakeMiningStopReason =
   | 'schema_pack_unavailable'

@@ -9,6 +9,7 @@ import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import type { PageType } from './types.ts';
+import type { TakeMiningStatus } from './take-mining-control.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
@@ -4227,6 +4228,315 @@ const file_url: Operation = {
   },
 };
 
+const TAKE_MINING_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function takeMiningId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !TAKE_MINING_ID_PATTERN.test(value)) {
+    throw new OperationError(
+      'invalid_params',
+      `${field} must be 1-128 letters, digits, dots, underscores, colons, or hyphens`,
+    );
+  }
+  return value;
+}
+
+function takeMiningInteger(
+  value: unknown,
+  field: string,
+  maximum: number,
+): number {
+  if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+    throw new OperationError('invalid_params', `${field} must be an integer from 1 to ${maximum}`);
+  }
+  return value as number;
+}
+
+function takeMiningSpendCap(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new OperationError(
+      'invalid_params',
+      'max_estimated_spend_usd must be finite and greater than zero',
+    );
+  }
+  return value;
+}
+
+function takeMiningIdempotencyKey(
+  sourceId: string,
+  batchId: string,
+  requestId: string,
+): string {
+  return `take-mining-drain:${sourceId.length}:${sourceId}:${batchId.length}:${batchId}:${requestId.length}:${requestId}`;
+}
+
+function mapTakeMiningControlError(error: unknown): never {
+  if (
+    error instanceof Error
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'invalid_input'
+  ) {
+    throw new OperationError('invalid_params', error.message);
+  }
+  throw error;
+}
+
+function takeMiningExpectedWork(
+  pageCallsMax: number,
+  pricing: { modelId: string; estimatedSpendUsd: number | null },
+) {
+  return {
+    page_calls_max: pageCallsMax,
+    estimated_spend_usd_max:
+      pricing.estimatedSpendUsd === null
+        ? null
+        : pricing.estimatedSpendUsd * pageCallsMax,
+    model_id: pricing.modelId,
+    ...(pricing.estimatedSpendUsd === null
+      ? { warning: `Pricing is unavailable for ${pricing.modelId}; execution fails closed.` }
+      : {}),
+  };
+}
+
+async function takeMiningJobs(
+  ctx: OperationContext,
+  sourceId: string,
+  batchId?: string,
+) {
+  const params: unknown[] = [sourceId];
+  let batchClause = '';
+  if (batchId !== undefined) {
+    params.push(batchId);
+    batchClause = `AND data->>'batch_id' = $${params.length}`;
+  }
+  return ctx.engine.executeRaw<{ id: number; status: string; batch_id: string }>(
+    `SELECT id, status, data->>'batch_id' AS batch_id
+       FROM minion_jobs
+      WHERE name = 'take-mining-drain'
+        AND status IN ('waiting', 'active', 'delayed', 'waiting-children')
+        AND data->>'source_id' = $1
+        ${batchClause}
+      ORDER BY id`,
+    params,
+  );
+}
+
+function mapTakeMiningStatus(
+  status: TakeMiningStatus,
+  jobs: Awaited<ReturnType<typeof takeMiningJobs>>,
+) {
+  return {
+    prompt_version: status.promptVersion,
+    source_id: status.sourceId,
+    work: {
+      immediate: status.queue.immediate,
+      deferred: status.queue.deferred,
+      ...(status.batch ? {
+        batch_id: status.batch.batchId,
+        batch_outstanding: status.batch.queuedPages,
+        oldest_at: status.batch.oldestAt,
+        newest_at: status.batch.newestAt,
+      } : {}),
+    },
+    jobs,
+    daily: {
+      date: status.daily.localDate,
+      page_calls: status.daily.pageCalls,
+      proposals: status.daily.proposals,
+      estimated_spend_usd: status.daily.committedUsd,
+      reserved_spend_usd: status.daily.reservedUsd,
+      caps: {
+        pages: status.daily.configuredPageCap,
+        proposals: status.daily.configuredProposalCap,
+        estimated_spend_usd: status.daily.budgetCapUsd,
+      },
+    },
+  };
+}
+
+const enqueue_take_mining_work: Operation = {
+  name: 'enqueue_take_mining_work',
+  description: 'Preview or enqueue a bounded, source-scoped historical take-mining batch.',
+  params: {
+    source_id: { type: 'string', required: true },
+    batch_id: { type: 'string', required: true },
+    reason: {
+      type: 'string',
+      required: true,
+      enum: ['historical_backfill', 'prompt_upgrade', 'operator_remine'],
+    },
+    page_cap: { type: 'number', required: true },
+    dry_run: { type: 'boolean', required: true },
+    slug_prefix: { type: 'string' },
+    slugs: { type: 'array', items: { type: 'string' } },
+    effective_from: { type: 'string' },
+    effective_to: { type: 'string' },
+    after_slug: { type: 'string' },
+  },
+  scope: 'admin',
+  mutating: true,
+  localOnly: false,
+  handler: async (ctx, p) => {
+    const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
+    const sourceCtx = { ...ctx, sourceId };
+    const batchId = takeMiningId(p.batch_id, 'batch_id');
+    const pageCap = takeMiningInteger(p.page_cap, 'page_cap', 5_000);
+    const reason = p.reason as 'historical_backfill' | 'prompt_upgrade' | 'operator_remine';
+    if (!['historical_backfill', 'prompt_upgrade', 'operator_remine'].includes(reason)) {
+      throw new OperationError('invalid_params', 'reason is not a supported enrollment purpose');
+    }
+    const input = {
+      sourceId,
+      batchId,
+      reason,
+      pageCap,
+      slugPrefix: typeof p.slug_prefix === 'string' ? p.slug_prefix : undefined,
+      slugs: Array.isArray(p.slugs) ? p.slugs as string[] : undefined,
+      effectiveFrom: typeof p.effective_from === 'string' ? p.effective_from : undefined,
+      effectiveTo: typeof p.effective_to === 'string' ? p.effective_to : undefined,
+      afterSlug: typeof p.after_slug === 'string' ? p.after_slug : undefined,
+    };
+    try {
+      const control = await import('./take-mining-control.ts');
+      const runner = await import('./cycle/take-mining-runner.ts');
+      const result = p.dry_run === true || ctx.dryRun
+        ? await control.previewTakeMiningEnrollment(sourceCtx, input)
+        : await control.enqueueTakeMiningWork(sourceCtx, input);
+      const pricing = runner.takeMiningExpectedPageSpend();
+      return {
+        dry_run: result.dryRun,
+        source_id: result.sourceId,
+        batch_id: result.batchId,
+        reason: result.reason,
+        prompt_version: result.promptVersion,
+        eligible_count: result.eligiblePages,
+        would_enqueue: result.eligiblePages,
+        enqueued: 'enqueuedPages' in result ? result.enqueuedPages : 0,
+        already_scanned: result.alreadyScannedPages,
+        existing_immediate: result.existingImmediatePages,
+        existing_other_batch: result.existingOtherBatchPages,
+        sample: result.items.map(item => ({
+          slug: item.slug,
+          type: item.type,
+          effective_date: item.effectiveDate,
+          effective_date_source: item.effectiveDateSource,
+          mining_input_hash: item.miningInputHash,
+        })),
+        next_after_slug: result.nextAfterSlug,
+        expected_work: takeMiningExpectedWork(result.eligiblePages, pricing),
+      };
+    } catch (error) {
+      mapTakeMiningControlError(error);
+    }
+  },
+};
+
+const run_take_mining_batch: Operation = {
+  name: 'run_take_mining_batch',
+  description: 'Submit one bounded protected worker run for an exact deferred batch.',
+  params: {
+    source_id: { type: 'string', required: true },
+    batch_id: { type: 'string', required: true },
+    request_id: { type: 'string', required: true },
+    page_cap: { type: 'number', required: true },
+    proposal_cap: { type: 'number', required: true },
+    max_estimated_spend_usd: { type: 'number', required: true },
+    dry_run: { type: 'boolean' },
+  },
+  scope: 'admin',
+  mutating: true,
+  localOnly: false,
+  handler: async (ctx, p) => {
+    const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
+    const sourceCtx = { ...ctx, sourceId };
+    const batchId = takeMiningId(p.batch_id, 'batch_id');
+    const requestId = takeMiningId(p.request_id, 'request_id');
+    const pageCap = takeMiningInteger(p.page_cap, 'page_cap', 100);
+    const proposalCap = takeMiningInteger(p.proposal_cap, 'proposal_cap', 500);
+    const spendCap = takeMiningSpendCap(p.max_estimated_spend_usd);
+    const { PROPOSE_TAKES_PROMPT_VERSION } = await import('./cycle/propose-takes.ts');
+    if (p.dry_run === true || ctx.dryRun) {
+      const control = await import('./take-mining-control.ts');
+      const status = await control.getTakeMiningStatus(sourceCtx, { sourceId, batchId });
+      return {
+        dry_run: true,
+        source_id: sourceId,
+        batch_id: batchId,
+        request_id: requestId,
+        prompt_version: PROPOSE_TAKES_PROMPT_VERSION,
+        outstanding: status.batch?.queuedPages ?? 0,
+        effective_caps: {
+          pages: pageCap,
+          proposals: proposalCap,
+          estimated_spend_usd: spendCap,
+        },
+      };
+    }
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const job = await new MinionQueue(ctx.engine).add(
+      'take-mining-drain',
+      {
+        source_id: sourceId,
+        batch_id: batchId,
+        request_id: requestId,
+        page_cap: pageCap,
+        proposal_cap: proposalCap,
+        max_estimated_spend_usd: spendCap,
+        prompt_version: PROPOSE_TAKES_PROMPT_VERSION,
+        ...(ctx.auth?.clientId ? { client_id: ctx.auth.clientId } : {}),
+      },
+      {
+        priority: 10,
+        max_attempts: 1,
+        timeout_ms: 30 * 60 * 1000,
+        idempotency_key: takeMiningIdempotencyKey(sourceId, batchId, requestId),
+      },
+      { allowProtectedSubmit: true },
+    );
+    const persisted = job.data;
+    return {
+      submitted: true,
+      job_id: job.id,
+      source_id: sourceId,
+      batch_id: batchId,
+      request_id: requestId,
+      prompt_version: PROPOSE_TAKES_PROMPT_VERSION,
+      effective_caps: {
+        pages: persisted.page_cap,
+        proposals: persisted.proposal_cap,
+        estimated_spend_usd: persisted.max_estimated_spend_usd,
+      },
+    };
+  },
+};
+
+const get_take_mining_status: Operation = {
+  name: 'get_take_mining_status',
+  description: 'Report source-scoped take-mining work, active jobs, and daily safety-cap usage.',
+  params: {
+    source_id: { type: 'string', required: true },
+    batch_id: { type: 'string' },
+  },
+  scope: 'admin',
+  localOnly: false,
+  handler: async (ctx, p) => {
+    const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
+    const sourceCtx = { ...ctx, sourceId };
+    const batchId = p.batch_id === undefined
+      ? undefined
+      : takeMiningId(p.batch_id, 'batch_id');
+    const { getTakeMiningStatus } = await import('./take-mining-control.ts');
+    try {
+      const [status, jobs] = await Promise.all([
+        getTakeMiningStatus(sourceCtx, { sourceId, batchId }),
+        takeMiningJobs(ctx, sourceId, batchId),
+      ]);
+      return mapTakeMiningStatus(status, jobs);
+    } catch (error) {
+      mapTakeMiningControlError(error);
+    }
+  },
+};
+
 // --- Jobs (Minions) ---
 
 const submit_job: Operation = {
@@ -4245,6 +4555,12 @@ const submit_job: Operation = {
   scope: 'admin',
   handler: async (ctx, p) => {
     const name = typeof p.name === 'string' ? p.name.trim() : '';
+    if (name === 'take-mining-drain') {
+      throw new OperationError(
+        'permission_denied',
+        "'take-mining-drain' must be submitted through run_take_mining_batch",
+      );
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'submit_job', name };
 
     // Submit-side MCP guard: reject protected job names from untrusted callers
@@ -7004,6 +7320,7 @@ export const operations: Operation[] = [
   // Files
   file_list, file_upload, file_url,
   // Jobs (Minions)
+  enqueue_take_mining_work, run_take_mining_batch, get_take_mining_status,
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary

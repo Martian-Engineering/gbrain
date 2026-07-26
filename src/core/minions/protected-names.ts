@@ -67,6 +67,9 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // auto-drain branch, an explicit `gbrain jobs submit extract-atoms-drain
   // --allow-protected`) can insert it.
   'extract-atoms-drain',
+  // Explicit historical take mining is a paid, admin-validated workflow.
+  // Only its dedicated operation may submit this protected handler remotely.
+  'take-mining-drain',
 ]);
 
 /** Check a job name against the protected set. Normalizes whitespace first. */

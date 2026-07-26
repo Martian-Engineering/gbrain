@@ -44,6 +44,7 @@ const GATEWAY_REFRESH_JOB_NAMES = new Set([
   'consolidate',
   'extract_facts',
   'extract-atoms-drain',
+  'take-mining-drain',
   'embed-backfill',
   'extract-takes-from-pages',
   'embed-catch-up',
@@ -2084,6 +2085,12 @@ export async function registerBuiltinHandlers(
       }
       throw e;
     }
+  });
+
+  registerBuiltinJob(worker, engine, 'take-mining-drain', async job => {
+    const { makeTakeMiningDrainHandler } =
+      await import('../core/minions/handlers/take-mining-drain.ts');
+    return await makeTakeMiningDrainHandler(engine)(job);
   });
 
   // v0.40 Federated Sync v2 — embed-backfill: per-source decoupled embed.

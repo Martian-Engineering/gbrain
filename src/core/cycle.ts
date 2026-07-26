@@ -2093,6 +2093,7 @@ export async function runCycle(
           const { result, duration_ms } = await timePhase(() => runPhaseProposeTakes(calibrationCtx, {
             repoPath: brainDir ?? undefined,
             dryRun,
+            signal: opts.signal,
           }) as Promise<PhaseResult>);
           result.duration_ms = duration_ms;
           phaseResults.push(result);

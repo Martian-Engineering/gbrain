@@ -1008,6 +1008,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'models.',           // models.* (tier, aliases, per-task)
   'dream.',            // dream.synthesize.*, dream.patterns.*
   'cycle.',            // cycle.<phase>.*
+  'take_mining.',      // deliberate historical take-mining caps
   'embedding_columns.', // per-column overrides
   'provider_base_urls.', // per-provider base URL overrides
   'provider_chat_options.', // per-provider / per-model chat providerOptions
