@@ -48,10 +48,20 @@ export async function loadActivePackBestEffort(
   ctx: OperationContext,
 ): Promise<ResolvedPack | null> {
   try {
+    const [dbConfig, perSourceConfig] = await Promise.all([
+      ctx.engine.getConfig('schema_pack'),
+      ctx.sourceId
+        ? ctx.engine.getConfig(`schema_pack.source.${ctx.sourceId}`)
+        : Promise.resolve(null),
+    ]);
     return await loadActivePack({
       cfg: loadConfig(),
       remote: ctx.remote ?? true,
       sourceId: ctx.sourceId,
+      dbConfig: dbConfig ?? undefined,
+      perSourceDb: ctx.sourceId && perSourceConfig
+        ? new Map([[ctx.sourceId, perSourceConfig]])
+        : undefined,
     });
   } catch {
     return null;

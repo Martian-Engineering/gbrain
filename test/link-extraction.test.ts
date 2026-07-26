@@ -8,6 +8,9 @@ import {
   makeResolver,
   parseTimelineEntries,
   isAutoLinkEnabled,
+  LINK_EXTRACTOR_VERSION_TS,
+  BASE_LINK_DIRECTORIES,
+  linkDirectoriesFromPack,
   FRONTMATTER_LINK_MAP,
   type SlugResolver,
 } from '../src/core/link-extraction.ts';
@@ -53,6 +56,45 @@ describe('inferLinkType — image type', () => {
 // ─── extractEntityRefs ─────────────────────────────────────────
 
 describe('extractEntityRefs', () => {
+  test('keeps the legacy directory set as the unconditional base', () => {
+    expect(BASE_LINK_DIRECTORIES).toEqual([
+      'people', 'companies', 'meetings', 'concepts', 'deal', 'civic',
+      'project', 'projects', 'source', 'media', 'yc', 'tech', 'finance',
+      'personal', 'openclaw', 'entities',
+    ]);
+  });
+
+  test('adds top-level directories declared by schema-pack types and filing rules', () => {
+    const directories = linkDirectoriesFromPack({
+      page_types: [
+        { path_prefixes: ['partners/', 'life/events/'] },
+      ],
+      filing_rules: [
+        { directory: 'clients/' },
+      ],
+    });
+
+    expect(directories).toContain('partners');
+    expect(directories).toContain('life');
+    expect(directories).toContain('clients');
+    expect(directories).toContain('people');
+
+    const refs = extractEntityRefs(
+      'See [[partners/example/sources/note|Raw note]].',
+      { directories },
+    );
+    expect(refs).toEqual([{
+      name: 'Raw note',
+      slug: 'partners/example/sources/note',
+      dir: 'partners',
+    }]);
+  });
+
+  test('bumps the extractor version after the pack-directory change', () => {
+    expect(Date.parse(LINK_EXTRACTOR_VERSION_TS))
+      .toBeGreaterThan(Date.parse('2026-05-31T00:00:00Z'));
+  });
+
   test('extracts filesystem-relative refs ([Name](../people/slug.md))', () => {
     const refs = extractEntityRefs('Met with [Alice Chen](../people/alice-chen.md) at the office.');
     expect(refs.length).toBe(1);

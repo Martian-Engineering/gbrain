@@ -38,9 +38,10 @@ import {
   extractPageLinks, parseTimelineEntries, inferLinkType, makeResolver,
   extractFrontmatterLinks, isGlobalBasenameEnabled, LINK_EXTRACTOR_VERSION_TS,
   WIKILINK_BASENAME_LINK_TYPE,
-  buildBasenameIndex, queryBasenameIndex, stripCodeBlocks,
+  buildBasenameIndex, linkDirectoriesFromPack, queryBasenameIndex, stripCodeBlocks,
   type UnresolvedFrontmatterRef, type LinkCandidate,
 } from '../core/link-extraction.ts';
+import { loadActivePackBestEffort } from '../core/schema-pack/best-effort.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { pathToSlug, pruneDir, isSyncable } from '../core/sync.ts';
@@ -70,6 +71,30 @@ import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.
 // count but safe at any future schema width and keeps per-batch error blast radius
 // small (a malformed row aborts at most 100, not thousands).
 const BATCH_SIZE = 100;
+
+/**
+ * Resolve schema-pack link directories once per source. Unscoped DB walks may
+ * cross sources with different `schema_pack.source.<id>` selections.
+ */
+function createLinkDirectoryResolver(
+  engine: BrainEngine,
+  sourceIdFilter?: string,
+): (sourceId: string) => Promise<ReadonlyArray<string>> {
+  const cache = new Map<string, Promise<ReadonlyArray<string>>>();
+  return (sourceId: string) => {
+    const effectiveSourceId = sourceIdFilter ?? sourceId;
+    let directories = cache.get(effectiveSourceId);
+    if (!directories) {
+      directories = loadActivePackBestEffort({
+        engine,
+        remote: false,
+        sourceId: effectiveSourceId,
+      } as never).then(pack => linkDirectoriesFromPack(pack?.manifest));
+      cache.set(effectiveSourceId, directories);
+    }
+    return directories;
+  };
+}
 
 // v0.42.7 (#1696): keyset batch size for `extract --stale`. SMALL by design —
 // listStalePagesForExtraction returns page CONTENT (compiled_truth + timeline),
@@ -1378,6 +1403,7 @@ async function extractLinksFromDB(
   // extracted so bare wikilinks don't resolve across unrelated sources.
   const resolver = makeResolver(engine, { mode: 'batch', sourceId: sourceIdFilter });
   const unresolved: UnresolvedFrontmatterRef[] = [];
+  const directoriesForSource = createLinkDirectoryResolver(engine, sourceIdFilter);
   // Issue #972: opt-in global-basename wikilink resolution. Read once
   // per extract run; threaded into each extractPageLinks call.
   const globalBasename = await isGlobalBasenameEnabled(engine);
@@ -1454,6 +1480,7 @@ async function extractLinksFromDB(
     }
 
     const fullContent = page.compiled_truth + '\n' + page.timeline;
+    const linkDirectories = await directoriesForSource(source_id);
     // --include-frontmatter default OFF in v0.13 (codex tension 5, back-compat).
     // Migration orchestrator explicitly enables it for the one-time backfill;
     // user-invoked `gbrain extract links` stays outgoing-only.
@@ -1461,7 +1488,7 @@ async function extractLinksFromDB(
     // basename lookup; off by default for back-compat.
     const extracted = await extractPageLinks(
       slug, fullContent, page.frontmatter, page.type, resolver,
-      { skipFrontmatter: !includeFrontmatter, globalBasename },
+      { skipFrontmatter: !includeFrontmatter, globalBasename, directories: linkDirectories },
     );
     unresolved.push(...extracted.unresolved);
 
@@ -1663,6 +1690,7 @@ export async function extractStaleFromDB(
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number }> {
   const { dryRun, jsonMode, includeFrontmatter, sourceIdFilter, catchUp } = opts;
   const versionTs = LINK_EXTRACTOR_VERSION_TS;
+  const directoriesForSource = createLinkDirectoryResolver(engine, sourceIdFilter);
 
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
   const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
@@ -1717,8 +1745,10 @@ export async function extractStaleFromDB(
 
     for (const page of rows) {
       const fullContent = page.compiled_truth + '\n' + page.timeline;
+      const linkDirectories = await directoriesForSource(page.source_id);
       const extracted = await extractPageLinks(
         page.slug, fullContent, page.frontmatter, page.type, activeResolver,
+        { directories: linkDirectories },
       );
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(c, page.slug, page.source_id, allSlugs, slugToSources);

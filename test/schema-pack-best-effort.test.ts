@@ -33,7 +33,9 @@ afterEach(() => {
 
 function fakeCtx(remote = false): OperationContext {
   return {
-    engine: null as never,
+    engine: {
+      getConfig: async () => null,
+    } as never,
     config: {},
     logger: { info: () => {}, warn: () => {}, error: () => {} } as never,
     dryRun: false,

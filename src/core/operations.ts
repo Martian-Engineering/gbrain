@@ -16,7 +16,7 @@ import { expandQuery } from './search/expansion.ts';
 import { dedupResults } from './search/dedup.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from './eval-capture.ts';
 import type { HybridSearchMeta } from './types.ts';
-import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
+import { extractPageLinks, isAutoLinkEnabled, isAutoTimelineEnabled, isGlobalBasenameEnabled, linkDirectoriesFromPack, parseTimelineEntries, makeResolver, type UnresolvedFrontmatterRef } from './link-extraction.ts';
 import { validateAllLinks, validateLinks } from './link-validation.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
@@ -955,16 +955,18 @@ const put_page: Operation = {
     // parseMarkdown via importFromContent so type inference honors user-defined
     // page_types. Best-effort: pack load failure falls back to legacy inferType
     // (parity gate preserved). Federated-read closure correction is T19's scope.
-    let activePack: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
+    let activePack: {
+      page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }>;
+      filing_rules: ReadonlyArray<{ directory: string }>;
+    } | undefined;
     try {
-      const { loadActivePack } = await import('./schema-pack/load-active.ts');
-      const { loadConfig } = await import('./config.ts');
-      const resolved = await loadActivePack({
-        cfg: loadConfig(),
-        remote: ctx.remote === false ? false : true,
-        sourceId: ctx.sourceId,
-      });
-      activePack = { page_types: resolved.manifest.page_types };
+      const { loadActivePackBestEffort } = await import('./schema-pack/best-effort.ts');
+      const resolved = await loadActivePackBestEffort(ctx);
+      if (!resolved) throw new Error('active schema pack unavailable');
+      activePack = {
+        page_types: resolved.manifest.page_types,
+        filing_rules: resolved.manifest.filing_rules,
+      };
     } catch {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
@@ -1117,7 +1119,10 @@ const put_page: Operation = {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, ctx.sourceId ? { sourceId: ctx.sourceId } : undefined);
+          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, {
+            ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+            directories: linkDirectoriesFromPack(activePack),
+          });
         }
       } catch (e) {
         autoLinks = { error: e instanceof Error ? e.message : String(e) };
@@ -1279,7 +1284,7 @@ async function runAutoLink(
   engine: BrainEngine,
   slug: string,
   parsed: { type: PageType; compiled_truth: string; timeline: string; frontmatter: Record<string, unknown> },
-  opts?: { sourceId?: string },
+  opts?: { sourceId?: string; directories?: ReadonlyArray<string> },
 ): Promise<{ created: number; removed: number; errors: number; unresolved: UnresolvedFrontmatterRef[] }> {
   const fullContent = parsed.compiled_truth + '\n' + parsed.timeline;
   // v0.31.8 (codex OV-2): thread sourceId through every read + write inside
@@ -1304,7 +1309,7 @@ async function runAutoLink(
   const globalBasename = await isGlobalBasenameEnabled(engine);
   const { candidates, unresolved } = await extractPageLinks(
     slug, fullContent, parsed.frontmatter, parsed.type, resolver,
-    { globalBasename },
+    { globalBasename, directories: opts?.directories },
   );
 
   // Resolve which targets exist (skip refs to non-existent pages to avoid FK
