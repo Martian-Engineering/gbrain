@@ -471,11 +471,26 @@ async function pacingStop(
   if (usage.pageCalls >= caps.pageCap) {
     return ['daily_page_cap', 'brain-wide daily page cap reached'];
   }
-  if (usage.proposals >= caps.proposalCap) {
-    return ['daily_proposal_cap', 'brain-wide daily proposal cap reached'];
+  const dailyProposalCapacity = Math.max(0, caps.proposalCap - usage.proposals);
+  if (dailyProposalCapacity < TAKE_MINING_MAX_PROPOSALS_PER_PAGE) {
+    return [
+      'daily_proposal_cap',
+      `brain-wide daily proposal capacity remaining (${dailyProposalCapacity}) ` +
+      `cannot fit a complete page result of up to ${TAKE_MINING_MAX_PROPOSALS_PER_PAGE}`,
+    ];
   }
-  if (opts.proposalCap !== undefined && result.proposals_inserted >= opts.proposalCap) {
-    return ['proposal_cap', 'per-run proposal cap reached'];
+  if (opts.proposalCap !== undefined) {
+    const runProposalCapacity = Math.max(
+      0,
+      opts.proposalCap - result.proposals_inserted,
+    );
+    if (runProposalCapacity < TAKE_MINING_MAX_PROPOSALS_PER_PAGE) {
+      return [
+        'proposal_cap',
+        `per-run proposal capacity remaining (${runProposalCapacity}) ` +
+        `cannot fit a complete page result of up to ${TAKE_MINING_MAX_PROPOSALS_PER_PAGE}`,
+      ];
+    }
   }
   if (
     opts.maxEstimatedSpendUsd !== undefined

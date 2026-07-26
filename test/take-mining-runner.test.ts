@@ -213,23 +213,26 @@ describe('shared take-mining runner', () => {
     await resetPgliteState(engine);
     await queueWork('notes/proposal-a', 'Proposal A.', 'deferred', 'proposal-cap');
     await queueWork('notes/proposal-b', 'Proposal B.', 'deferred', 'proposal-cap');
+    let proposalCalls = 0;
     const proposalResult = await runTakeMiningWork(ctx(), deferredOpts(
       'proposal-cap',
-      async input => [{
-        claim_text: `Claim from ${input.pagePath}`,
-        kind: 'take',
-        holder: 'brain',
-        weight: 0.5,
-      }],
+      async () => {
+        proposalCalls++;
+        return [];
+      },
       { proposalCap: 1 },
     ));
     expect(proposalResult).toMatchObject({
-      pages_scanned: 1,
-      proposals_inserted: 1,
+      pages_scanned: 0,
+      proposals_inserted: 0,
       stopped: true,
       stop_reason: 'proposal_cap',
-      remaining_work: 1,
+      remaining_work: 2,
     });
+    expect(proposalCalls).toBe(0);
+    expect(proposalResult.warnings).toContain(
+      'per-run proposal capacity remaining (1) cannot fit a complete page result of up to 10',
+    );
 
     await resetPgliteState(engine);
     const spendBody = 'Spend A.';
@@ -283,23 +286,26 @@ describe('shared take-mining runner', () => {
     await engine.setConfig('take_mining.daily_proposal_cap', '1');
     await queueWork('notes/overshoot-a', 'Overshoot A.', 'deferred', 'daily');
     await queueWork('notes/overshoot-b', 'Overshoot B.', 'deferred', 'daily');
+    let dailyCalls = 0;
     const overshootResult = await runTakeMiningWork(
       ctx(),
-      deferredOpts('daily', async input => [1, 2].map(index => ({
-        claim_text: `Claim ${index} from ${input.pagePath}`,
-        kind: 'take',
-        holder: 'brain',
-        weight: 0.5,
-      }))),
+      deferredOpts('daily', async () => {
+        dailyCalls++;
+        return [];
+      }),
     );
     expect(overshootResult).toMatchObject({
-      pages_scanned: 1,
-      proposals_extracted: 2,
+      pages_scanned: 0,
+      proposals_extracted: 0,
       proposals_inserted: 0,
       stopped: true,
       stop_reason: 'daily_proposal_cap',
       remaining_work: 2,
     });
+    expect(dailyCalls).toBe(0);
+    expect(overshootResult.warnings).toContain(
+      'brain-wide daily proposal capacity remaining (1) cannot fit a complete page result of up to 10',
+    );
     expect(await tableCount('take_proposal_scans')).toBe(0);
     expect(await tableCount('take_proposals')).toBe(0);
 
@@ -420,68 +426,176 @@ describe('shared take-mining runner', () => {
     }]);
   });
 
-  test('persists no partial page when the per-run proposal cap would be exceeded', async () => {
-    const body = 'Two complete proposals.';
-    await queueWork('notes/run-overshoot', body, 'deferred', 'run-overshoot');
+  test('preflights per-run capacity before claim, reservation, or extraction', async () => {
+    await queueWork(
+      'notes/run-preflight',
+      'A page that could yield ten proposals.',
+      'deferred',
+      'run-preflight',
+    );
+    let calls = 0;
 
     const result = await runTakeMiningWork(ctx(), deferredOpts(
-      'run-overshoot',
-      async () => [1, 2].map(index => ({
-        claim_text: `Claim ${index}`,
-        kind: 'take',
-        holder: 'brain',
-        weight: 0.5,
-      })),
-      { proposalCap: 1 },
+      'run-preflight',
+      async () => {
+        calls++;
+        return [];
+      },
+      { proposalCap: TAKE_MINING_MAX_PROPOSALS_PER_PAGE - 1 },
     ));
 
     expect(result).toMatchObject({
-      pages_scanned: 1,
-      proposals_extracted: 2,
+      pages_scanned: 0,
+      proposals_extracted: 0,
       proposals_inserted: 0,
       stopped: true,
       stop_reason: 'proposal_cap',
       remaining_work: 1,
+      estimated_spend_usd: 0,
     });
+    expect(calls).toBe(0);
     expect(await tableCount('take_proposals')).toBe(0);
     expect(await tableCount('take_proposal_scans')).toBe(0);
     expect(await tableCount('take_mining_work')).toBe(1);
-    expect(result.estimated_spend_usd).toBeCloseTo(expectedPageSpend(body));
+    expect(await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM budget_reservations`,
+    )).toEqual([]);
+  });
+
+  test('stops before a second page when an earlier result leaves less than ten capacity', async () => {
+    await queueWork('notes/near-a', 'First bounded page.', 'deferred', 'near-cap');
+    await queueWork('notes/near-b', 'Second bounded page.', 'deferred', 'near-cap');
+    const paths: string[] = [];
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'near-cap',
+      async input => {
+        paths.push(input.pagePath);
+        return [1, 2].map(index => ({
+          claim_text: `Claim ${index} from ${input.pagePath}`,
+          kind: 'take',
+          holder: 'brain',
+          weight: 0.5,
+        }));
+      },
+      { proposalCap: TAKE_MINING_MAX_PROPOSALS_PER_PAGE + 1 },
+    ));
+
+    expect(paths).toEqual(['notes/near-a']);
+    expect(result).toMatchObject({
+      pages_scanned: 1,
+      proposals_extracted: 2,
+      proposals_inserted: 2,
+      stopped: true,
+      stop_reason: 'proposal_cap',
+      remaining_work: 1,
+    });
+    expect(await tableCount('take_proposal_scans')).toBe(1);
     expect(await engine.executeRaw<{ status: string }>(
       `SELECT status FROM budget_reservations`,
     )).toEqual([{ status: 'committed' }]);
   });
 
-  test('accepts a complete page exactly at the proposal bound', async () => {
-    await queueWork('notes/exact-bound', 'Exactly two proposals.', 'deferred', 'exact');
+  test('accepts a complete page when exactly ten run proposals remain', async () => {
+    await queueWork('notes/exact-bound', 'Exactly ten proposals.', 'deferred', 'exact');
 
     const result = await runTakeMiningWork(ctx(), deferredOpts(
       'exact',
-      async () => [1, 2].map(index => ({
+      async () => Array.from({ length: TAKE_MINING_MAX_PROPOSALS_PER_PAGE }, (_, index) => ({
         claim_text: `Exact claim ${index}`,
         kind: 'take',
         holder: 'brain',
         weight: 0.5,
       })),
-      { proposalCap: 2 },
+      { proposalCap: TAKE_MINING_MAX_PROPOSALS_PER_PAGE },
     ));
 
     expect(result).toMatchObject({
-      proposals_extracted: 2,
-      proposals_inserted: 2,
+      proposals_extracted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+      proposals_inserted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
       remaining_work: 0,
     });
-    expect(await tableCount('take_proposals')).toBe(2);
+    expect(await tableCount('take_proposals')).toBe(TAKE_MINING_MAX_PROPOSALS_PER_PAGE);
     expect(await tableCount('take_proposal_scans')).toBe(1);
   });
 
-  test('accepts a complete page exactly at the daily proposal bound', async () => {
-    await engine.setConfig('take_mining.daily_proposal_cap', '2');
-    await queueWork('notes/daily-exact', 'Exactly two daily proposals.', 'deferred', 'daily-exact');
+  test('preflights daily capacity before claim, reservation, or extraction', async () => {
+    await engine.setConfig(
+      'take_mining.daily_proposal_cap',
+      String(TAKE_MINING_MAX_PROPOSALS_PER_PAGE - 1),
+    );
+    await queueWork('notes/daily-preflight', 'Daily bounded page.', 'deferred', 'daily-preflight');
+    let calls = 0;
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'daily-preflight',
+      async () => {
+        calls++;
+        return [];
+      },
+    ));
+
+    expect(result).toMatchObject({
+      pages_scanned: 0,
+      proposals_extracted: 0,
+      proposals_inserted: 0,
+      stopped: true,
+      stop_reason: 'daily_proposal_cap',
+      remaining_work: 1,
+      estimated_spend_usd: 0,
+    });
+    expect(calls).toBe(0);
+    expect(await tableCount('take_proposal_scans')).toBe(0);
+    expect(await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM budget_reservations`,
+    )).toEqual([]);
+  });
+
+  test('stops before a second page when daily usage leaves less than ten capacity', async () => {
+    await engine.setConfig(
+      'take_mining.daily_proposal_cap',
+      String(TAKE_MINING_MAX_PROPOSALS_PER_PAGE + 1),
+    );
+    await queueWork('notes/daily-near-a', 'First daily page.', 'deferred', 'daily-near');
+    await queueWork('notes/daily-near-b', 'Second daily page.', 'deferred', 'daily-near');
+    const paths: string[] = [];
+
+    const result = await runTakeMiningWork(ctx(), deferredOpts(
+      'daily-near',
+      async input => {
+        paths.push(input.pagePath);
+        return [1, 2].map(index => ({
+          claim_text: `Daily claim ${index} from ${input.pagePath}`,
+          kind: 'take',
+          holder: 'brain',
+          weight: 0.5,
+        }));
+      },
+    ));
+
+    expect(paths).toEqual(['notes/daily-near-a']);
+    expect(result).toMatchObject({
+      pages_scanned: 1,
+      proposals_inserted: 2,
+      stopped: true,
+      stop_reason: 'daily_proposal_cap',
+      remaining_work: 1,
+    });
+    expect(result.warnings).toContain(
+      'brain-wide daily proposal capacity remaining (9) cannot fit a complete page result of up to 10',
+    );
+  });
+
+  test('accepts a complete page when exactly ten daily proposals remain', async () => {
+    await engine.setConfig(
+      'take_mining.daily_proposal_cap',
+      String(TAKE_MINING_MAX_PROPOSALS_PER_PAGE),
+    );
+    await queueWork('notes/daily-exact', 'Exactly ten daily proposals.', 'deferred', 'daily-exact');
 
     const result = await runTakeMiningWork(ctx(), deferredOpts(
       'daily-exact',
-      async () => [1, 2].map(index => ({
+      async () => Array.from({ length: TAKE_MINING_MAX_PROPOSALS_PER_PAGE }, (_, index) => ({
         claim_text: `Daily exact claim ${index}`,
         kind: 'take',
         holder: 'brain',
@@ -490,11 +604,11 @@ describe('shared take-mining runner', () => {
     ));
 
     expect(result).toMatchObject({
-      proposals_extracted: 2,
-      proposals_inserted: 2,
+      proposals_extracted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
+      proposals_inserted: TAKE_MINING_MAX_PROPOSALS_PER_PAGE,
       remaining_work: 0,
     });
-    expect(await tableCount('take_proposals')).toBe(2);
+    expect(await tableCount('take_proposals')).toBe(TAKE_MINING_MAX_PROPOSALS_PER_PAGE);
     expect(await tableCount('take_proposal_scans')).toBe(1);
   });
 
