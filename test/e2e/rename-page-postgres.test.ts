@@ -52,7 +52,7 @@ describe.skipIf(skip)('rename_page Postgres parity', () => {
     const result = await operationsByName.rename_page.handler(ctx(), {
       old_slug: 'people/parity-old',
       new_slug: 'people/parity-new',
-      content: '---\ntitle: Parity New\n---\n\nParity New is an engineer.\n',
+      content: '---\ntitle: Parity New\naliases:\n  - Parity Person\n---\n\nParity New is an engineer.\n',
     });
 
     expect(result).toMatchObject({
@@ -64,6 +64,14 @@ describe.skipIf(skip)('rename_page Postgres parity', () => {
       .toMatchObject({ title: 'Parity New' });
     expect(await engine.resolveSlugWithAlias('people/parity-old', 'default'))
       .toBe('people/parity-new');
+    expect(await engine.resolveAliases(['parity person'], {
+      sourceId: 'default',
+    })).toEqual(new Map([
+      ['parity person', [{
+        slug: 'people/parity-new',
+        source_id: 'default',
+      }]],
+    ]));
   });
 
   test('rolls back a destination created before alias failure', async () => {
