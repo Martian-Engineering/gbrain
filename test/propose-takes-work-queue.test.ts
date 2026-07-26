@@ -425,14 +425,12 @@ describe('propose_takes explicit work queue', () => {
       type: 'note',
       title: 'Reclaimed race',
       compiled_truth: newerBody,
+    }, {
+      writeContext: {
+        actor: 'test',
+        writeIntent: 'user_edit',
+      },
     });
-    await engine.executeRaw(
-      `UPDATE take_mining_work
-          SET mining_input_hash = $1, updated_at = now()
-        WHERE source_id = 'default'
-          AND page_slug = 'writing/reclaimed-race'`,
-      [newerHash],
-    );
 
     releaseFirst();
     const oldResult = await oldWorker;
@@ -447,7 +445,10 @@ describe('propose_takes explicit work queue', () => {
     );
     expect(await count('take_proposals')).toBe(0);
     expect(await engine.executeRaw<{ mining_input_hash: string }>(
-      `SELECT mining_input_hash FROM take_mining_work`,
+      `SELECT mining_input_hash
+         FROM take_mining_work
+        WHERE source_id = 'default'
+          AND page_slug = 'writing/reclaimed-race'`,
     )).toEqual([{ mining_input_hash: newerHash }]);
 
     releaseSecond();
@@ -457,7 +458,10 @@ describe('propose_takes explicit work queue', () => {
       `SELECT claim_text FROM take_proposals`,
     )).toEqual([{ claim_text: 'Reclaimed worker claim' }]);
     expect(await engine.executeRaw<{ mining_input_hash: string }>(
-      `SELECT mining_input_hash FROM take_mining_work`,
+      `SELECT mining_input_hash
+         FROM take_mining_work
+        WHERE source_id = 'default'
+          AND page_slug = 'writing/reclaimed-race'`,
     )).toEqual([{ mining_input_hash: newerHash }]);
   });
 
