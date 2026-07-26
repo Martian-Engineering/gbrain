@@ -39,8 +39,9 @@ describe('v0.38 D13 — agent scope isolation (regression guard)', () => {
 
   it('admin implies its siblings (the v0.31 contract still holds)', () => {
     // Don't regress the existing admin hierarchy in the process of
-    // isolating agent. admin still implies sources_admin, users_admin,
-    // write, read.
+    // isolating agent. admin still implies source_admin, sources_admin,
+    // users_admin, write, read.
+    expect(hasScope(['admin'], 'source_admin')).toBe(true);
     expect(hasScope(['admin'], 'sources_admin')).toBe(true);
     expect(hasScope(['admin'], 'users_admin')).toBe(true);
     expect(hasScope(['admin'], 'write')).toBe(true);
@@ -54,6 +55,7 @@ describe('v0.38 D13 — agent scope isolation (regression guard)', () => {
     expect(hasScope(['agent'], 'read')).toBe(false);
     expect(hasScope(['agent'], 'write')).toBe(false);
     expect(hasScope(['agent'], 'admin')).toBe(false);
+    expect(hasScope(['agent'], 'source_admin')).toBe(false);
     expect(hasScope(['agent'], 'sources_admin')).toBe(false);
     expect(hasScope(['agent'], 'users_admin')).toBe(false);
   });
@@ -77,7 +79,8 @@ describe('v0.38 D13 — agent scope isolation (regression guard)', () => {
     expect(hasScope(['read', 'write'], 'agent')).toBe(false);
   });
 
-  it('sources_admin and users_admin do NOT imply agent', () => {
+  it('narrow admin scopes do NOT imply agent', () => {
+    expect(hasScope(['source_admin'], 'agent')).toBe(false);
     expect(hasScope(['sources_admin'], 'agent')).toBe(false);
     expect(hasScope(['users_admin'], 'agent')).toBe(false);
   });

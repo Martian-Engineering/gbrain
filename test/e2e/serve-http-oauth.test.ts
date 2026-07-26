@@ -231,16 +231,24 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
 
   // T2 (eng-review): scopes_supported advertises the full ALLOWED_SCOPES_LIST
   // so MCP clients (Claude Desktop, ChatGPT, Perplexity) can discover the
-  // v0.28 sources_admin and users_admin scopes via standard discovery.
+  // Narrow administration scopes are discoverable through standard metadata.
   // Pre-v0.28 the list was hardcoded to ['read','write','admin'] in
   // serve-http.ts:195 and this assertion would have failed.
-  test('OAuth metadata advertises all 5 v0.28 scopes (sources_admin + users_admin)', async () => {
+  test('OAuth metadata advertises narrow administration scopes', async () => {
     const res = await fetch(`${BASE}/.well-known/oauth-authorization-server`);
     const meta = await res.json() as any;
     expect(meta.scopes_supported).toContain('sources_admin');
     expect(meta.scopes_supported).toContain('users_admin');
+    expect(meta.scopes_supported).toContain('source_admin');
     expect(meta.scopes_supported).toEqual(
-      expect.arrayContaining(['admin', 'read', 'sources_admin', 'users_admin', 'write']),
+      expect.arrayContaining([
+        'admin',
+        'read',
+        'source_admin',
+        'sources_admin',
+        'users_admin',
+        'write',
+      ]),
     );
   });
 

@@ -32,6 +32,7 @@ function mk(opts: Partial<SchemaPackManifest>): SchemaPackManifest {
     borrow_from: [],
     page_types: baseTypes,
     link_types: opts.link_types ?? [],
+    link_directories: opts.link_directories ?? [],
     frontmatter_links: opts.frontmatter_links ?? [],
     takes_kinds: ['fact', 'take', 'bet', 'hunch'],
     enrichable_types: opts.enrichable_types ?? [],

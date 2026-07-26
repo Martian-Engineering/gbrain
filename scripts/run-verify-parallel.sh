@@ -126,6 +126,7 @@ for c in "${CHECKS[@]}"; do
   (
     if [ -n "$TIMEOUT_BIN" ]; then
       "$TIMEOUT_BIN" "${TIMEOUT}s" bun run "$c" > "$LOG_FILE" 2>&1
+      check_rc=$?
     else
       bun run "$c" > "$LOG_FILE" 2>&1 &
       pid=$!
@@ -133,11 +134,11 @@ for c in "${CHECKS[@]}"; do
         sleep 5 && kill -KILL "$pid" 2>/dev/null ) &
       cap_pid=$!
       wait "$pid" 2>/dev/null
+      check_rc=$?
       kill "$cap_pid" 2>/dev/null
-      wait "$cap_pid" 2>/dev/null
+      wait "$cap_pid" 2>/dev/null || true
     fi
-    rc=$?
-    echo "$rc" > "$EXIT_FILE"
+    echo "$check_rc" > "$EXIT_FILE"
   ) &
   PIDS+=($!)
 done

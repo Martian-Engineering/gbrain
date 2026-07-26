@@ -87,9 +87,41 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc  # v2
+      - name: Run Gitleaks CLI
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Gitleaks v8.30.1, pinned to its immutable multi-platform manifest.
+          GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/repo" \
+            --workdir /repo \
+            "$GITLEAKS_IMAGE" dir . --redact --no-banner
+          case "$GITHUB_EVENT_NAME" in
+            pull_request)
+              LOG_OPTS="$PR_BASE_SHA..$PR_HEAD_SHA"
+              ;;
+            push)
+              if [ -n "${PUSH_BEFORE_SHA:-}" ] &&
+                 [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+                LOG_OPTS="$PUSH_BEFORE_SHA..$GITHUB_SHA"
+              else
+                LOG_OPTS="$GITHUB_SHA"
+              fi
+              ;;
+            *)
+              LOG_OPTS="$GITHUB_SHA"
+              ;;
+          esac
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/repo" \
+            --workdir /repo \
+            "$GITLEAKS_IMAGE" git . --redact --no-banner \
+            --log-opts="$LOG_OPTS"
 
   verify:
     # Pre-test gates: privacy/jsonb/source-id/etc + typecheck + admin-build.

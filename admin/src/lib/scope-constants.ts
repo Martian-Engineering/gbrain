@@ -10,15 +10,23 @@
  * or `bun run verify` will reject the change.
  */
 
-export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent';
+export type Scope =
+  | 'read'
+  | 'write'
+  | 'admin'
+  | 'source_admin'
+  | 'sources_admin'
+  | 'users_admin'
+  | 'agent';
 
 // MIRROR OF src/core/scope.ts ALLOWED_SCOPES_LIST — keep alphabetically sorted.
-// v0.38: 'agent' added for the submit_agent remote-MCP op (sibling to admin,
-// NOT implied — existing admin clients must re-register to opt in).
+// `agent` is opt-in and not implied by admin. `source_admin` is the narrow
+// source-local filesystem capability used by remote rename and merge.
 export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = [
   'admin',
   'agent',
   'read',
+  'source_admin',
   'sources_admin',
   'users_admin',
   'write',

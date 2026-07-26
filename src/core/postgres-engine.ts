@@ -5587,17 +5587,19 @@ export class PostgresEngine implements BrainEngine {
     return out;
   }
 
+  /** Replace one page's projected aliases in the current connection scope. */
   async setPageAliases(slug: string, sourceId: string, aliasNorms: string[]): Promise<void> {
     const sql = this.sql;
     const uniq = Array.from(new Set(aliasNorms.filter(a => a.length > 0)));
-    await sql.begin(async tx => {
-      await tx`DELETE FROM page_aliases WHERE source_id = ${sourceId} AND slug = ${slug}`;
-      if (uniq.length === 0) return;
-      await tx`
-        INSERT INTO page_aliases (source_id, alias_norm, slug)
-        SELECT ${sourceId}, a, ${slug} FROM unnest(${uniq}::text[]) AS a
-        ON CONFLICT (source_id, alias_norm, slug) DO NOTHING`;
-    });
+    // One statement is atomic on both a pool and postgres.js transaction handle.
+    await sql`
+      WITH removed AS (
+        DELETE FROM page_aliases
+        WHERE source_id = ${sourceId} AND slug = ${slug}
+      )
+      INSERT INTO page_aliases (source_id, alias_norm, slug)
+      SELECT ${sourceId}, a, ${slug} FROM unnest(${uniq}::text[]) AS a
+      ON CONFLICT (source_id, alias_norm, slug) DO NOTHING`;
   }
 
   // Config
