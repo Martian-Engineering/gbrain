@@ -70,13 +70,13 @@ describe('gbrain alias CLI', () => {
     });
   });
 
-  test('tools-json exposes authenticated MCP operations and no rename_page', async () => {
+  test('tools-json exposes authenticated alias and rename operations', async () => {
     const result = await runCli(['--tools-json']);
     expect(result.exitCode).toBe(0);
     const names = (JSON.parse(result.stdout) as Array<{ name: string }>).map((tool) => tool.name);
     expect(names).toContain('add_slug_alias');
     expect(names).toContain('list_slug_aliases');
     expect(names).toContain('remove_slug_alias');
-    expect(names).not.toContain('rename_page');
+    expect(names).toContain('rename_page');
   });
 });
