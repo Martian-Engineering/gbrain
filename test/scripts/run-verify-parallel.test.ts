@@ -15,7 +15,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,6 +49,12 @@ describe("run-verify-parallel.sh — CLI contract", () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("unknown arg");
     expect(r.stderr).toContain("usage:");
+  });
+
+  it("preserves the check status when stopping the fallback watchdog", () => {
+    const script = readFileSync(SCRIPT, "utf8");
+    expect(script).toContain('check_rc=$?');
+    expect(script).toContain('echo "$check_rc" > "$EXIT_FILE"');
   });
 });
 
