@@ -158,6 +158,37 @@ describe('extractTimelineFromMeetings event widening', () => {
     expect(links.some(link => link.to_slug === 'life/events/2026-07-25-launch')).toBe(true);
   });
 
+  test('materialized backlink labels cannot contain nested wikilinks', async () => {
+    await engine.putPage('people/alice-example', {
+      type: 'person',
+      title: 'Alice Example',
+      compiled_truth: '# Alice Example',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('life/events/2026-07-25-launch', {
+      type: 'event',
+      title: '2026 07 25 [[projects/sweetspot|Sweetspot Launch]]',
+      compiled_truth: 'Alice Example attended the launch.',
+      timeline: '',
+      frontmatter: {},
+      effective_date: new Date('2026-07-25T18:00:00.000Z'),
+      effective_date_source: 'event_date',
+    });
+
+    const gazetteer = await buildGazetteer(engine, { activePack });
+    await withEnv({ GBRAIN_HOME: tempHome }, () =>
+      extractTimelineFromMeetings(engine, { gazetteer }));
+
+    const alice = await engine.getPage('people/alice-example', { sourceId: 'default' });
+    expect(alice?.timeline).toContain(
+      '[[life/events/2026-07-25-launch|2026 07 25 projects/sweetspot Sweetspot Launch]]',
+    );
+    expect(alice?.timeline).not.toContain(
+      '[[life/events/2026-07-25-launch|2026 07 25 [[',
+    );
+  });
+
   test('meeting propagation stays active when materialized backlinks are not mandated', async () => {
     await engine.putPage('people/bob-example', {
       type: 'person',

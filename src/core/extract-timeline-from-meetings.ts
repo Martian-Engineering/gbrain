@@ -152,7 +152,7 @@ function timelinePolicyPredicate(
 }
 
 function backlinkLine(event: EventRow): string {
-  const title = event.title.replace(/[|\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  const title = event.title.replace(/[\[\]|]/g, ' ').replace(/\s+/g, ' ').trim();
   const date = event.effective_date instanceof Date
     ? event.effective_date.toISOString().slice(0, 10)
     : event.effective_date!.slice(0, 10);
