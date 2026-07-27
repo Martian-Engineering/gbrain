@@ -42,7 +42,12 @@ export type MutationOp =
   | 'set_extractable'
   | 'set_expert_routing';
 
-export type MutationActor = 'cli' | `mcp:${string}` | 'autopilot' | 'test';
+export type MutationActor =
+  | 'cli'
+  | `mcp:${string}`
+  | `principal:${string}`
+  | 'autopilot'
+  | 'test';
 
 export type MutationOutcome = 'success' | 'failure';
 
@@ -59,7 +64,7 @@ export interface MutationAuditRecord {
   type_redacted: boolean;
   /** First path segment only, e.g. 'people'. Null when op didn't touch a prefix. */
   prefix_first_seg: string | null;
-  /** 'cli' | 'mcp:<clientId8>' | 'autopilot' | 'test'. */
+  /** Trusted local, authenticated remote, autopilot, or test actor. */
   actor: MutationActor;
   /** Outcome of the mutation attempt. */
   outcome: MutationOutcome;
@@ -216,8 +221,13 @@ export function summarizeMutations(records: MutationAuditRecord[]): MutationSumm
     else summary.by_outcome.failure++;
     summary.by_pack[r.pack] = (summary.by_pack[r.pack] ?? 0) + 1;
     if (r.reason) summary.by_reason[r.reason] = (summary.by_reason[r.reason] ?? 0) + 1;
-    // Bucket actor classes: cli | mcp | autopilot | test
-    const actorBucket = r.actor.startsWith('mcp:') ? 'mcp' : r.actor;
+    // Bucket remote actor classes without exposing per-client or per-person
+    // cardinality in the aggregate summary.
+    const actorBucket = r.actor.startsWith('mcp:')
+      ? 'mcp'
+      : r.actor.startsWith('principal:')
+        ? 'principal'
+        : r.actor;
     summary.by_actor[actorBucket] = (summary.by_actor[actorBucket] ?? 0) + 1;
   }
   return summary;

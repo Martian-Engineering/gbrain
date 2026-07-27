@@ -144,6 +144,35 @@ describe('take-mining enrollment control', () => {
     ]);
   });
 
+  test('attributes remote enrollment to the authenticated principal', async () => {
+    await insertPage(engine, 'notes/principal', 'Principal-authored body', '2023-01-02');
+    await enqueueTakeMiningWork({
+      ...ctx,
+      remote: true,
+      auth: {
+        token: 'fixture-auth-value',
+        clientId: 'mining-editor',
+        scopes: ['write'],
+        sourceId: 'default',
+        boundPrincipal: 'people/alice-example',
+      },
+    }, {
+      sourceId: 'default',
+      batchId: 'principal-batch',
+      reason: 'operator_remine',
+      pageCap: 10,
+    }, dependencies);
+
+    const rows = await engine.executeRaw<{ actor: string }>(
+      `SELECT actor
+         FROM take_mining_work
+        WHERE page_slug = 'notes/principal'`,
+    );
+    expect(rows).toEqual([{
+      actor: 'principal:people/alice-example',
+    }]);
+  });
+
   test('preserves immediate and other-batch work while refreshing its own enrollment', async () => {
     await insertPage(engine, 'notes/immediate', 'Immediate body', '2023-01-02');
     await insertPage(engine, 'notes/other', 'Other body', '2023-01-03');

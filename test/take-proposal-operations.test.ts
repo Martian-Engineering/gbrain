@@ -405,6 +405,7 @@ describe('resolve_take_proposal', () => {
         scopes: ['write'],
         sourceId: 'default',
         allowedSources: ['default'],
+        boundPrincipal: 'people/alice-example',
       },
     });
 
@@ -418,7 +419,7 @@ describe('resolve_take_proposal', () => {
       id,
       source_id: 'default',
       status: 'rejected',
-      acted_by: 'review-client',
+      acted_by: 'principal:people/alice-example',
       resolution_note: 'Contradicted by the source material.',
     });
     expect(result.acted_at).toBeTruthy();

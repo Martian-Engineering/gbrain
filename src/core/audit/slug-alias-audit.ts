@@ -1,6 +1,9 @@
 import { createAuditWriter } from './audit-writer.ts';
 
-export type SlugAliasAuditActor = 'cli' | `mcp:${string}`;
+export type SlugAliasAuditActor =
+  | 'cli'
+  | `mcp:${string}`
+  | `principal:${string}`;
 export type SlugAliasAuditOutcome =
   | 'added'
   | 'replaced'

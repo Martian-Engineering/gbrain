@@ -229,6 +229,7 @@ describe('server-owned put_page write intent', () => {
         clientId: 'historical-loader',
         scopes: ['admin'],
         sourceId: 'default',
+        boundPrincipal: 'people/alice-example',
       },
     } as OperationContext, {
       source_id: 'default',
@@ -241,7 +242,7 @@ describe('server-owned put_page write intent', () => {
 
     expect(result).toMatchObject({ slug: 'history/admin-import' });
     expect(await latestReceipt('history/admin-import')).toEqual({
-      actor: 'mcp:historical-loader',
+      actor: 'principal:people/alice-example',
       write_intent: 'backfill',
       batch_id: 'archive-2026-07',
     });

@@ -44,6 +44,11 @@ import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
 import { assertAllowedScopes, hasScope } from './scope.ts';
 import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
+import { operationIdentityForContext } from './operation-identity.ts';
+export {
+  operationIdentityForContext,
+  type OperationIdentity,
+} from './operation-identity.ts';
 import {
   addSlugAlias,
   removeSyncedSourceFile,
@@ -53,6 +58,7 @@ import {
 } from './slug-alias.ts';
 import { PageRenameError, renamePage } from './page-rename.ts';
 import { invalidateQueryCache } from './schema-pack/query-cache-invalidator.ts';
+import type { MutationActor } from './schema-pack/mutate-audit.ts';
 import { logSlugAliasAudit, type SlugAliasAuditActor } from './audit/slug-alias-audit.ts';
 import {
   addTake,
@@ -473,33 +479,6 @@ export interface OperationContext {
    * satisfied even on single-source brains.
    */
   sourceId: string;
-}
-
-export interface OperationIdentity {
-  /** Stable actor string stored in human-facing mutation audit fields. */
-  actor: string;
-  /** Authenticated person page, when the OAuth client is person-bound. */
-  principal?: string;
-  /** Technical OAuth or legacy-token client identifier, when authenticated. */
-  clientId?: string;
-}
-
-/** Resolve trusted request context into human-facing and technical identity. */
-export function operationIdentityForContext(
-  ctx: OperationContext,
-  localActor = 'cli',
-): OperationIdentity {
-  const clientId = ctx.auth?.clientId;
-  const principal = ctx.auth?.boundPrincipal;
-  if (principal) {
-    return {
-      actor: `principal:${principal}`,
-      principal,
-      ...(clientId ? { clientId } : {}),
-    };
-  }
-  if (clientId) return { actor: `mcp:${clientId}`, clientId };
-  return { actor: ctx.remote !== false ? 'mcp:stdio' : localActor };
 }
 
 /** Resolve trusted runtime identity into page-write attribution. */
@@ -1363,11 +1342,10 @@ const put_historical_page: Operation = {
   handler: async (ctx, p) => {
     const sourceId = resolveWriteSourceId(ctx, p.source_id as string);
     const batchId = takeMiningId(p.batch_id, 'batch_id');
-    const actor = ctx.remote === false
-      ? 'cli:put_historical_page'
-      : ctx.auth?.clientId
-        ? `mcp:${ctx.auth.clientId}`
-        : 'mcp:stdio';
+    const actor = operationIdentityForContext(
+      ctx,
+      'cli:put_historical_page',
+    ).actor;
 
     return put_page.handler({
       ...ctx,
@@ -1708,8 +1686,7 @@ const rename_page: Operation = {
 };
 
 function aliasAuditActor(ctx: OperationContext): SlugAliasAuditActor {
-  if (ctx.remote === false) return 'cli';
-  return `mcp:${(ctx.auth?.clientId ?? 'unknown').slice(0, 8)}`;
+  return operationIdentityForContext(ctx).actor as SlugAliasAuditActor;
 }
 
 function requestedAliasSource(p: Record<string, unknown>): string | undefined {
@@ -2820,7 +2797,7 @@ const resolve_take_proposal: Operation = {
     }
     const sourceId = resolveWriteSourceId(ctx);
     const notes = typeof p.notes === 'string' ? p.notes : null;
-    const actor = ctx.auth?.clientId ?? 'local';
+    const actor = operationIdentityForContext(ctx, 'local').actor;
     const dryRun = ctx.dryRun || p.dry_run === true;
 
     // Preview still reads and validates the source-scoped pending row so it
@@ -6535,8 +6512,8 @@ async function getRemoteMaxBytes(engine: BrainEngine): Promise<number> {
 // Read ops (scope: read; NOT localOnly) — any read-scope OAuth client.
 // Write ops (scope: admin; NOT localOnly per D2) — admin-scope client
 // (your OpenClaw and similar remote agents) can author schema packs
-// remotely. Audit log captures actor=mcp:<clientId8> on every mutation
-// (see src/core/schema-pack/mutate-audit.ts privacy posture per D20).
+// remotely. Audit attribution comes from the authenticated operation identity
+// (see src/core/schema-pack/mutate-audit.ts).
 //
 // Per-call schema_pack opt STAYS rejected for remote callers — that
 // trust boundary is enforced by op-trust-gate.ts and is separate from
@@ -6754,7 +6731,7 @@ const schema_apply_mutations: Operation = {
       return { error: 'invalid_request', message: 'mutations must be a non-empty array' };
     }
     const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const actor = ctx.auth?.clientId ? `mcp:${ctx.auth.clientId.slice(0, 8)}` : 'cli';
+    const actor = operationIdentityForContext(ctx).actor;
     const sourceId = ctx.sourceId;  // codex C5: write-side scoping
     // Compose every mutation inside ONE withPackLock so the batch is
     // truly atomic. The withMutation skeleton handles audit / cache
@@ -6768,7 +6745,7 @@ const schema_apply_mutations: Operation = {
       SchemaPackMutationError,
     } = await import('./schema-pack/mutate.ts');
     const baseMutateOpts = {
-      actor: actor as 'cli' | `mcp:${string}`,
+      actor: actor as MutationActor,
       batchId,
       engine: ctx.engine,
       ...(sourceId ? { sourceId } : {}),

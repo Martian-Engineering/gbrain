@@ -1,5 +1,6 @@
 import type { BrainEngine } from './engine.ts';
 import type { OperationContext } from './operations.ts';
+import { operationIdentityForContext } from './operation-identity.ts';
 import { buildTakeMiningInput } from './cycle/take-mining-input.ts';
 import {
   extractExistingTakesForDedup,
@@ -665,10 +666,7 @@ function publicPreview(discovery: DiscoveryResult): TakeMiningEnrollmentPreview 
 }
 
 function enrollmentActor(ctx: OperationContext): string {
-  if (!ctx.remote) return 'cli:take-mining';
-  return ctx.auth
-    ? `mcp:${ctx.auth.clientId || ctx.auth.clientName || 'authenticated'}`
-    : 'mcp:stdio';
+  return operationIdentityForContext(ctx, 'cli:take-mining').actor;
 }
 
 async function readQueueStatus(

@@ -177,16 +177,22 @@ describe('summarizeMutations — cross-surface parity primitive', () => {
       { ts: '2026-01-01T00:00:00Z', op: 'add_type', pack: 'a', type_or_hash: null, type_redacted: true, prefix_first_seg: null, actor: 'cli', outcome: 'success', reason: null, prev_sha8: null, new_sha8: null, batch_id: null },
       { ts: '2026-01-01T00:00:01Z', op: 'add_type', pack: 'a', type_or_hash: null, type_redacted: true, prefix_first_seg: null, actor: 'mcp:abc12345', outcome: 'failure', reason: 'PACK_READONLY', prev_sha8: null, new_sha8: null, batch_id: 'batch-1' },
       { ts: '2026-01-01T00:00:02Z', op: 'remove_type', pack: 'b', type_or_hash: null, type_redacted: true, prefix_first_seg: null, actor: 'autopilot', outcome: 'success', reason: null, prev_sha8: null, new_sha8: null, batch_id: null },
+      { ts: '2026-01-01T00:00:03Z', op: 'add_alias', pack: 'a', type_or_hash: null, type_redacted: true, prefix_first_seg: null, actor: 'principal:people/alice-example', outcome: 'success', reason: null, prev_sha8: null, new_sha8: null, batch_id: null },
     ];
     const s = summarizeMutations(recs);
-    expect(s.total).toBe(3);
+    expect(s.total).toBe(4);
     expect(s.by_op.add_type).toBe(2);
     expect(s.by_op.remove_type).toBe(1);
-    expect(s.by_outcome).toEqual({ success: 2, failure: 1 });
-    expect(s.by_pack).toEqual({ a: 2, b: 1 });
+    expect(s.by_op.add_alias).toBe(1);
+    expect(s.by_outcome).toEqual({ success: 3, failure: 1 });
+    expect(s.by_pack).toEqual({ a: 3, b: 1 });
     expect(s.by_reason).toEqual({ PACK_READONLY: 1 });
-    // Actor bucketing collapses mcp:* to 'mcp'
-    expect(s.by_actor).toEqual({ cli: 1, mcp: 1, autopilot: 1 });
+    expect(s.by_actor).toEqual({
+      cli: 1,
+      mcp: 1,
+      autopilot: 1,
+      principal: 1,
+    });
   });
 
   it('returns empty summary for empty input', () => {

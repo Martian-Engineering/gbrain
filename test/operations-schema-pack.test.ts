@@ -47,7 +47,12 @@ afterEach(() => {
   }
 });
 
-function ctxOf(opts: { remote?: boolean; clientId?: string; sourceId?: string } = {}): OperationContext {
+function ctxOf(opts: {
+  remote?: boolean;
+  clientId?: string;
+  sourceId?: string;
+  boundPrincipal?: string;
+} = {}): OperationContext {
   return {
     engine,
     config: {},
@@ -55,7 +60,11 @@ function ctxOf(opts: { remote?: boolean; clientId?: string; sourceId?: string } 
     dryRun: false,
     remote: opts.remote ?? true,
     sourceId: opts.sourceId,
-    auth: opts.clientId ? { clientId: opts.clientId, scopes: ['admin'] } : undefined,
+    auth: opts.clientId ? {
+      clientId: opts.clientId,
+      scopes: ['admin'],
+      boundPrincipal: opts.boundPrincipal,
+    } : undefined,
   } as unknown as OperationContext;
 }
 
@@ -318,11 +327,14 @@ describe('schema_apply_mutations', () => {
     });
   });
 
-  it('captures MCP client_id in audit log actor field (D2 + D20)', async () => {
+  it('captures the authenticated principal in the audit actor field', async () => {
     await withEnv({ GBRAIN_HOME: tmpDir, GBRAIN_AUDIT_DIR: auditDir }, async () => {
       seedPack('mine');
       await operationsByName.schema_apply_mutations!.handler(
-        ctxOf({ clientId: 'remoteAgentClient12345678' }),
+        ctxOf({
+          clientId: 'remoteAgentClient12345678',
+          boundPrincipal: 'people/alice-example',
+        }),
         {
           pack: 'mine',
           mutations: [{ op: 'add_type', name: 'researcher', primitive: 'entity', prefix: 'r/' }],
@@ -335,8 +347,9 @@ describe('schema_apply_mutations', () => {
       const auditPath = join(auditDir, auditFiles[0]!);
       const lines = readFileSync(auditPath, 'utf-8').trim().split('\n');
       const records = lines.map((l) => JSON.parse(l));
-      // Actor is mcp:<first 8 chars of clientId> = mcp:remoteAg (8 chars).
-      expect(records.some((r) => r.actor === 'mcp:remoteAg')).toBe(true);
+      expect(records.some(
+        (record) => record.actor === 'principal:people/alice-example',
+      )).toBe(true);
     });
   });
 });

@@ -796,6 +796,32 @@ describe('operation auth, cache, audit, and synced-file warning', () => {
     }
   });
 
+  test('attributes remote alias changes to the authenticated principal', async () => {
+    await seedPage('notes/canonical');
+
+    await withAuditDir(async () => {
+      await operationsByName.add_slug_alias.handler(ctx(
+        'default',
+        true,
+        {
+          token: 'fixture-auth-value',
+          clientId: 'alias-editor',
+          scopes: ['write'],
+          sourceId: 'default',
+          boundPrincipal: 'people/alice-example',
+        },
+      ), {
+        alias_slug: 'notes/old',
+        canonical_slug: 'notes/canonical',
+      });
+
+      expect(readRecentSlugAliasAudit().at(-1)).toMatchObject({
+        op: 'add_slug_alias',
+        actor: 'principal:people/alice-example',
+      });
+    });
+  });
+
   test('trusted local caller still removes a confined source file when explicitly requested', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'gbrain-slug-alias-remove-source-'));
     try {
