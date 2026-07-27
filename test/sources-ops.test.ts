@@ -65,12 +65,14 @@ esac
 # with multiple verbs so we just walk the array).
 has_clone=0
 has_remote_get_url=0
+has_work_tree_probe=0
 for ((i=1; i<=$#; i++)); do
   arg="\${!i}"
   next_idx=$((i+1))
   next="\${!next_idx:-}"
   if [ "$arg" = "clone" ]; then has_clone=1; fi
   if [ "$arg" = "remote" ] && [ "$next" = "get-url" ]; then has_remote_get_url=1; fi
+  if [ "$arg" = "rev-parse" ] && [ "$next" = "--is-inside-work-tree" ]; then has_work_tree_probe=1; fi
 done
 if [ "$has_clone" = "1" ]; then
   dest="\${@: -1}"
@@ -80,6 +82,10 @@ if [ "$has_clone" = "1" ]; then
 fi
 if [ "$has_remote_get_url" = "1" ]; then
   echo "https://github.com/example/repo"
+  exit 0
+fi
+if [ "$has_work_tree_probe" = "1" ]; then
+  echo "true"
   exit 0
 fi
 exit 0

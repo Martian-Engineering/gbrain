@@ -285,6 +285,20 @@ export function validateRepoState(
   if (!stat.isDirectory()) return 'not-a-dir';
   if (!existsSync(join(repoPath, '.git'))) return 'no-git';
 
+  try {
+    const out = execFileSync('git', ['-C', repoPath, 'rev-parse', '--is-inside-work-tree'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10_000,
+      env: { ...process.env, ...GIT_ENV },
+    });
+    if (out.toString().trim() !== 'true') return 'corrupted';
+  } catch {
+    return 'corrupted';
+  }
+
+  // Path-only sources are valid working repositories without an origin.
+  if (expectedRemoteUrl === undefined) return 'healthy';
+
   let remoteUrl: string;
   try {
     const out = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
@@ -297,7 +311,7 @@ export function validateRepoState(
     return 'corrupted';
   }
 
-  if (expectedRemoteUrl !== undefined && remoteUrl !== expectedRemoteUrl) {
+  if (remoteUrl !== expectedRemoteUrl) {
     return 'url-drift';
   }
   return 'healthy';

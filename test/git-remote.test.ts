@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { execFileSync } from 'child_process';
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -36,6 +37,11 @@ function writeFakeGit(): void {
 mode=$(cat "${FAKE_GIT_MODE}" 2>/dev/null || echo ok)
 case "$mode" in
   fail) exit 1 ;;
+esac
+case " $* " in
+  *" rev-parse --is-inside-work-tree "*) echo "true"; exit 0 ;;
+esac
+case "$mode" in
   url-drift) echo "https://github.com/different/url" ;;
   url-match) echo "https://github.com/expected/url" ;;
   *) ;;
@@ -414,5 +420,35 @@ describe('validateRepoState', () => {
     await withEnv({ PATH: fakePath() }, async () => {
       expect(validateRepoState(p)).toBe('healthy');
     });
+  });
+
+  test("returns 'healthy' for a committed path-only repository without origin", () => {
+    const p = join(fixtureDir, 'path-only-repo');
+    mkdirSync(p, { recursive: true });
+    execFileSync('git', ['init', '-q', p]);
+    writeFileSync(join(p, 'RESOLVER.md'), '# Local source\n');
+    execFileSync('git', ['-C', p, 'add', 'RESOLVER.md']);
+    execFileSync('git', [
+      '-C', p,
+      '-c', 'user.name=GBrain Test',
+      '-c', 'user.email=gbrain@example.test',
+      'commit', '-q', '-m', 'Initialize local source',
+    ]);
+
+    expect(validateRepoState(p)).toBe('healthy');
+  });
+
+  test('does not execute a repository-configured fsmonitor while probing', () => {
+    const p = join(fixtureDir, 'fsmonitor-repo');
+    const sentinel = join(fixtureDir, 'fsmonitor-ran');
+    const monitor = join(fixtureDir, 'fsmonitor.sh');
+    mkdirSync(p, { recursive: true });
+    execFileSync('git', ['init', '-q', p]);
+    writeFileSync(monitor, `#!/bin/sh\ntouch "${sentinel}"\n`);
+    chmodSync(monitor, 0o755);
+    execFileSync('git', ['-C', p, 'config', 'core.fsmonitor', monitor]);
+
+    expect(validateRepoState(p)).toBe('healthy');
+    expect(existsSync(sentinel)).toBe(false);
   });
 });
