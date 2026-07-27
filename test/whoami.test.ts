@@ -64,13 +64,16 @@ describe('whoami op contract', () => {
       expiresAt: 1234567890,
       sourceId: 'viewer-source',
       allowedSources: ['viewer-source', 'shared-source'],
+      boundPrincipal: 'people/alice-example',
     };
     const result = (await whoami.handler(
       ctxWith({
         remote: true,
         auth,
         engine: {
-          executeRaw: async () => [{ bound_principal: 'people/alice-example' }],
+          executeRaw: async () => {
+            throw new Error('whoami must not re-query authenticated identity');
+          },
         } as any,
       }),
       {},
@@ -85,7 +88,7 @@ describe('whoami op contract', () => {
     expect(result.bound_principal).toBe('people/alice-example');
   });
 
-  test('oauth transport tolerates a pre-v128 schema', async () => {
+  test('oauth transport returns null when verified auth has no principal', async () => {
     const auth: AuthInfo = {
       token: 'gbrain_at_xxx',
       clientId: 'gbrain_cl_pre_v128',
@@ -93,40 +96,19 @@ describe('whoami op contract', () => {
       scopes: ['read'],
       sourceId: 'default',
     };
-    const missingColumn = Object.assign(
-      new Error('column "bound_principal" does not exist'),
-      { code: '42703' },
-    );
     const result = (await whoami.handler(
       ctxWith({
         remote: true,
         auth,
         engine: {
-          executeRaw: async () => { throw missingColumn; },
+          executeRaw: async () => {
+            throw new Error('whoami must not query for an absent principal');
+          },
         } as any,
       }),
       {},
     )) as any;
     expect(result.source_id).toBe('default');
-    expect(result.federated_read).toEqual([]);
-    expect(result.bound_principal).toBeNull();
-  });
-
-  test('oauth transport returns null principal when the client row is missing', async () => {
-    const auth: AuthInfo = {
-      token: 'gbrain_at_xxx',
-      clientId: 'gbrain_cl_missing_row',
-      scopes: ['read'],
-    };
-    const result = (await whoami.handler(
-      ctxWith({
-        remote: true,
-        auth,
-        engine: { executeRaw: async () => [] } as any,
-      }),
-      {},
-    )) as any;
-    expect(result.source_id).toBeUndefined();
     expect(result.federated_read).toEqual([]);
     expect(result.bound_principal).toBeNull();
   });

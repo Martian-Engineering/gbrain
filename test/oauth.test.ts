@@ -320,6 +320,7 @@ describe('admin client provisioning operations', () => {
     expect(auth.clientId).toBe(result.client_id);
     expect(auth.sourceId).toBe('provision-source');
     expect(auth.allowedSources).toEqual(['provision-source', 'provision-shared']);
+    expect(auth.boundPrincipal).toBe('people/alice-example');
   });
 
   test('provision_client folds the write source into the read grant', async () => {
@@ -1447,6 +1448,34 @@ describe('v0.28 ALLOWED_SCOPES allowlist', () => {
 // ---------------------------------------------------------------------------
 
 describe('F5 verifyAccessToken / client_credentials column probes', () => {
+  test('token verification tolerates a schema without bound_principal', async () => {
+    const missingColumn = Object.assign(
+      new Error('column "bound_principal" does not exist'),
+      { code: '42703' },
+    );
+    const fakeSql = async (strings: TemplateStringsArray): Promise<Record<string, unknown>[]> => {
+      const query = strings.join('$');
+      if (query.includes('c.bound_principal')) throw missingColumn;
+      if (query.includes('FROM oauth_tokens')) {
+        return [{
+          client_id: 'gbrain_cl_pre_v128',
+          client_name: 'pre-v128',
+          scopes: ['read'],
+          expires_at: Math.floor(Date.now() / 1000) + 60,
+          source_id: 'default',
+          federated_read: ['default'],
+        }];
+      }
+      return [];
+    };
+    const prePrincipalProvider = new GBrainOAuthProvider({ sql: fakeSql as any });
+
+    const auth = await prePrincipalProvider.verifyAccessToken('token') as CoreAuthInfo;
+
+    expect(auth.clientId).toBe('gbrain_cl_pre_v128');
+    expect(auth.boundPrincipal).toBeUndefined();
+  });
+
   test('non-schema SQL failures are not swallowed by client credentials soft-delete probe', async () => {
     // Synthesize a non-schema error (SQLSTATE 57P01 = admin_shutdown) and
     // make sure the catch block re-throws instead of silently treating

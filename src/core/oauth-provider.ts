@@ -602,15 +602,37 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   // Token Verification
   // -------------------------------------------------------------------------
 
+  // Preserve the existing source-scope fallback for brains that have not yet
+  // applied the source federation migrations.
+  private async selectOAuthTokenWithLegacyProjection(
+    tokenHash: string,
+  ): Promise<Record<string, unknown>[]> {
+    try {
+      return await this.sql`
+        SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
+               c.source_id
+        FROM oauth_tokens t
+        LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+        WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
+      `;
+    } catch (err) {
+      if (!isUndefinedColumnError(err, 'source_id')) throw err;
+      return this.sql`
+        SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name
+        FROM oauth_tokens t
+        LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+        WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
+      `;
+    }
+  }
+
   async verifyAccessToken(token: string): Promise<SdkAuthInfo> {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
 
-    // Try OAuth tokens first. JOIN oauth_clients in the same query so
-    // verifyAccessToken returns client_name AND source_id in AuthInfo —
-    // eliminates the separate per-request lookup at serve-http.ts that
-    // was the N+1 hot path (see PR #586 review D14=B; v0.34.1 #861 D2
-    // adds the source_id thread on the same JOIN).
+    // Join OAuth tokens to their client so token verification hydrates the
+    // complete authenticated identity in one query and request handlers never
+    // need to re-query mutable OAuth client state.
     //
     // v0.34.1 (#861): the JOIN guards on a c.source_id column that
     // migration v60 adds. Pre-v60 brains throw a "column does not exist"
@@ -621,39 +643,31 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     try {
       oauthRows = await this.sql`
         SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
-               c.source_id, c.federated_read
+               c.source_id, c.federated_read, c.bound_principal
         FROM oauth_tokens t
         LEFT JOIN oauth_clients c ON c.client_id = t.client_id
         WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
       `;
     } catch (err) {
-      // v0.34.1: pre-v60 brain → source_id column missing. Pre-v61 brain →
-      // federated_read column missing. Both classes degrade to legacy
-      // projection so auth keeps working until the operator runs
-      // apply-migrations. Probe both column names so partial-upgrade brains
-      // (v60 applied but v61 didn't yet) also fall through cleanly.
-      if (isUndefinedColumnError(err, 'source_id') || isUndefinedColumnError(err, 'federated_read')) {
-        // Try the v60-only projection first (source_id but no federated_read).
+      if (isUndefinedColumnError(err, 'bound_principal')) {
+        // A migrated source-scoping schema without the principal column keeps
+        // authenticating; its verified identity simply has no principal.
         try {
           oauthRows = await this.sql`
-            SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name, c.source_id
+            SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
+                   c.source_id, c.federated_read
             FROM oauth_tokens t
             LEFT JOIN oauth_clients c ON c.client_id = t.client_id
             WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
           `;
         } catch (err2) {
-          if (isUndefinedColumnError(err2, 'source_id')) {
-            // Truly pre-v60: no source_id either. Pre-v0.34 projection.
-            oauthRows = await this.sql`
-              SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name
-              FROM oauth_tokens t
-              LEFT JOIN oauth_clients c ON c.client_id = t.client_id
-              WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
-            `;
-          } else {
-            throw err2;
-          }
+          if (!isUndefinedColumnError(err2, 'source_id') &&
+              !isUndefinedColumnError(err2, 'federated_read')) throw err2;
+          oauthRows = await this.selectOAuthTokenWithLegacyProjection(tokenHash);
         }
+      } else if (isUndefinedColumnError(err, 'source_id') ||
+                 isUndefinedColumnError(err, 'federated_read')) {
+        oauthRows = await this.selectOAuthTokenWithLegacyProjection(tokenHash);
       } else {
         throw err;
       }
@@ -692,6 +706,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // operations.ts prefers this array over scalar sourceId when set
         // and non-empty.
         allowedSources,
+        boundPrincipal: (row.bound_principal as string | null) ?? undefined,
       } as CoreAuthInfo as SdkAuthInfo;
     }
 

@@ -116,6 +116,24 @@ describe('server-owned put_page write intent', () => {
     });
   });
 
+  test('attributes a principal-bound remote write to the principal', async () => {
+    await putThroughOperation('writing/remote-principal', {
+      remote: true,
+      auth: {
+        token: 'fixture-auth-value',
+        clientId: 'gbrain_cl_test_client',
+        scopes: ['write'],
+        boundPrincipal: 'people/alice-example',
+      },
+    });
+
+    expect(await latestReceipt('writing/remote-principal')).toEqual({
+      actor: 'principal:people/alice-example',
+      write_intent: 'live_ingest',
+      batch_id: null,
+    });
+  });
+
   test('classifies unauthenticated remote transport as stdio ingestion', async () => {
     await putThroughOperation('writing/remote-stdio', { remote: true });
 

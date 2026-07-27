@@ -345,6 +345,12 @@ export interface AuthInfo {
    * case (back-compat).
    */
   allowedSources?: string[];
+  /**
+   * Person page to which human-facing mutations are attributed.
+   * Populated only from the authenticated OAuth client record; operation
+   * parameters cannot override it.
+   */
+  boundPrincipal?: string;
 }
 
 export interface OperationContext {
@@ -469,6 +475,33 @@ export interface OperationContext {
   sourceId: string;
 }
 
+export interface OperationIdentity {
+  /** Stable actor string stored in human-facing mutation audit fields. */
+  actor: string;
+  /** Authenticated person page, when the OAuth client is person-bound. */
+  principal?: string;
+  /** Technical OAuth or legacy-token client identifier, when authenticated. */
+  clientId?: string;
+}
+
+/** Resolve trusted request context into human-facing and technical identity. */
+export function operationIdentityForContext(
+  ctx: OperationContext,
+  localActor = 'cli',
+): OperationIdentity {
+  const clientId = ctx.auth?.clientId;
+  const principal = ctx.auth?.boundPrincipal;
+  if (principal) {
+    return {
+      actor: `principal:${principal}`,
+      principal,
+      ...(clientId ? { clientId } : {}),
+    };
+  }
+  if (clientId) return { actor: `mcp:${clientId}`, clientId };
+  return { actor: ctx.remote !== false ? 'mcp:stdio' : localActor };
+}
+
 /** Resolve trusted runtime identity into page-write attribution. */
 export function pageWriteContextForOperation(
   ctx: OperationContext,
@@ -490,7 +523,7 @@ export function pageWriteContextForOperation(
 
   if (ctx.remote !== false) {
     return {
-      actor: ctx.auth?.clientId ? `mcp:${ctx.auth.clientId}` : 'mcp:stdio',
+      actor: operationIdentityForContext(ctx).actor,
       writeIntent: 'live_ingest',
     };
   }
@@ -5724,19 +5757,6 @@ const whoami: Operation = {
     // at oauth-provider.ts:417-430). Detect by inspecting the prefix.
     const isOauth = ctx.auth.clientId.startsWith('gbrain_cl_');
     if (isOauth) {
-      const { sqlQueryForEngine } = await import('./sql-query.ts');
-      const sql = sqlQueryForEngine(ctx.engine);
-      let boundPrincipal: string | null = null;
-      try {
-        const rows = await sql`
-          SELECT bound_principal
-            FROM oauth_clients
-           WHERE client_id = ${ctx.auth.clientId}
-        `;
-        boundPrincipal = (rows[0]?.bound_principal as string | null | undefined) ?? null;
-      } catch (err) {
-        if (!isUndefinedColumnError(err, 'bound_principal')) throw err;
-      }
       return {
         transport: 'oauth',
         client_id: ctx.auth.clientId,
@@ -5745,7 +5765,7 @@ const whoami: Operation = {
         expires_at: ctx.auth.expiresAt ?? null,
         source_id: ctx.auth.sourceId,
         federated_read: ctx.auth.allowedSources ?? [],
-        bound_principal: boundPrincipal,
+        bound_principal: ctx.auth.boundPrincipal ?? null,
       };
     }
     return {
