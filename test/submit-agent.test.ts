@@ -370,7 +370,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       await expect(callSubmitAgent(ctx, {
         prompt: 'go',
         reasoning_effort: 'extreme',
-      })).rejects.toThrow(/reasoning_effort.*none.*max/i);
+      })).rejects.toThrow(/reasoning_effort.*none.*xhigh/i);
     });
 
     it('rejects reasoning effort for a non-OpenAI model', async () => {

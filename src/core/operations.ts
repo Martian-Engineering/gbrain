@@ -4833,7 +4833,7 @@ const submit_agent: Operation = {
     if (p.reasoning_effort !== undefined && !isReasoningEffort(p.reasoning_effort)) {
       throw new OperationError(
         'invalid_params',
-        'submit_agent: reasoning_effort must be one of none, low, medium, high, xhigh, max.',
+        'submit_agent: reasoning_effort must be one of none, low, medium, high, xhigh.',
       );
     }
     if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {

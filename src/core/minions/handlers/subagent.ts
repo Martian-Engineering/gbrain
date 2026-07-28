@@ -236,7 +236,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       });
     if (data.reasoning_effort !== undefined && !isReasoningEffort(data.reasoning_effort)) {
       throw new Error(
-        'subagent job rejected: data.reasoning_effort must be one of none, low, medium, high, xhigh, max.',
+        'subagent job rejected: data.reasoning_effort must be one of none, low, medium, high, xhigh.',
       );
     }
     if (
