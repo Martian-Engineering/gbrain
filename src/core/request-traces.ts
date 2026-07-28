@@ -46,6 +46,7 @@ export interface RequestTracePage {
 export interface ListRequestTracesInput {
   clientId: string;
   outcome?: 'all' | 'success' | 'failed';
+  pageOnly?: boolean;
   limit?: number;
   before?: string;
   after?: string;
@@ -133,6 +134,9 @@ export async function listRequestTraces(
     where.push(`status = 'success'`);
   } else if (outcome === 'failed') {
     where.push(`status <> 'success'`);
+  }
+  if (input.pageOnly) {
+    where.push(`params->'display_fields' @> '[{"kind":"page"}]'::jsonb`);
   }
 
   if (boundary) {
@@ -279,6 +283,9 @@ function validateListInput(input: ListRequestTracesInput): void {
   }
   if (input.outcome && !['all', 'success', 'failed'].includes(input.outcome)) {
     throw new RequestTraceValidationError('outcome must be all, success, or failed');
+  }
+  if (input.pageOnly !== undefined && typeof input.pageOnly !== 'boolean') {
+    throw new RequestTraceValidationError('page_only must be a boolean');
   }
 }
 
