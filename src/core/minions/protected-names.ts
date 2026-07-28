@@ -70,6 +70,9 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // Explicit historical take mining is a paid, admin-validated workflow.
   // Only its dedicated operation may submit this protected handler remotely.
   'take-mining-drain',
+  // Nightly maintenance can launch paid, source-bound write agents. Only the
+  // local operator scheduler may create the root job.
+  'nightly-maintenance',
 ]);
 
 /** Check a job name against the protected set. Normalizes whitespace first. */

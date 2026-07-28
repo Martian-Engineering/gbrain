@@ -103,6 +103,31 @@ describe('minions/budget-meter (v0.38 Slice 2 — D3 reserve-then-settle)', () =
         }),
       ).rejects.toThrow(BudgetExceededError);
     });
+
+    it('serializes concurrent reservations against one hard cap', async () => {
+      await seedClient('alice', 1.00);
+
+      const outcomes = await Promise.allSettled([
+        reserve(engine, {
+          clientId: 'alice', estimatedCents: 80, capCents: 100,
+          model: 'm', provider: 'p',
+        }),
+        reserve(engine, {
+          clientId: 'alice', estimatedCents: 80, capCents: 100,
+          model: 'm', provider: 'p',
+        }),
+      ]);
+
+      expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
+      const pending = await engine.executeRaw<{ total: string }>(
+        `SELECT COALESCE(SUM(estimated_cents), 0)::text AS total
+           FROM mcp_spend_reservations
+          WHERE client_id = $1 AND status = 'pending'`,
+        ['alice'],
+      );
+      expect(Number(pending[0]?.total)).toBe(80);
+    });
   });
 
   describe('settle()', () => {
@@ -145,6 +170,23 @@ describe('minions/budget-meter (v0.38 Slice 2 — D3 reserve-then-settle)', () =
         ['alice'],
       );
       expect(Number(logCount[0]?.n)).toBe(1);
+    });
+
+    it('refuses actual spend above the reserved worst case', async () => {
+      await seedClient('alice', 5.00);
+      const r = await reserve(engine, {
+        clientId: 'alice', estimatedCents: 100, capCents: 500,
+        model: 'm', provider: 'p',
+      });
+
+      await expect(settle(engine, r.reservationId, 101)).rejects.toThrow(
+        'actual spend 101 exceeds reserved 100',
+      );
+      const rows = await engine.executeRaw<Record<string, unknown>>(
+        `SELECT status FROM mcp_spend_reservations WHERE reservation_id = $1`,
+        [r.reservationId],
+      );
+      expect(rows[0]?.status).toBe('pending');
     });
   });
 
