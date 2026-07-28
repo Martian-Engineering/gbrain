@@ -3,6 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   makeNightlyMaintenanceHandler,
   nightlyContradictionQueries,
+  wholeCentReservation,
   type NightlyMaintenanceDependencies,
 } from '../src/core/minions/handlers/nightly-maintenance.ts';
 import type { BacklinksResult } from '../src/commands/backlinks.ts';
@@ -176,6 +177,12 @@ function dependencies(
 }
 
 describe('nightly maintenance root handler', () => {
+  test('floors fractional ledger headroom before whole-cent reservations', () => {
+    expect(wholeCentReservation(1488.89)).toBe(1488);
+    expect(wholeCentReservation(0.99)).toBe(0);
+    expect(wholeCentReservation(-0.01)).toBe(0);
+  });
+
   test('checkpoints every phase and completes a clean zero-cost run', async () => {
     const updates: Record<string, unknown>[] = [];
     const result = await makeNightlyMaintenanceHandler(

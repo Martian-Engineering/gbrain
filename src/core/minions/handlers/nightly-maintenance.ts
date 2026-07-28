@@ -46,6 +46,11 @@ const PROBE_MAX_QUERIES = 20;
 const PROBE_TOP_K = 3;
 const CHILD_WAIT_MS = 35 * 60 * 1000;
 
+/** Convert fractional ledger headroom into a conservative whole-cent reservation. */
+export function wholeCentReservation(remainingCents: number): number {
+  return Math.max(0, Math.floor(remainingCents));
+}
+
 interface SourceSnapshot {
   source_id: string;
   last_commit: string | null;
@@ -447,7 +452,8 @@ export function makeNightlyMaintenanceHandler(
           break;
         }
         const budget = await getNightlyBudgetSummary(engine, input);
-        if (budget.remaining_cents < MIN_REPAIR_RESERVATION_CENTS) {
+        const reservationCents = wholeCentReservation(budget.remaining_cents);
+        if (reservationCents < MIN_REPAIR_RESERVATION_CENTS) {
           semantic.stopped_reason = 'budget_exhausted';
           break;
         }
@@ -455,7 +461,7 @@ export function makeNightlyMaintenanceHandler(
           const receipt = await deps.runRepairChild(
             input,
             manifest,
-            budget.remaining_cents,
+            reservationCents,
             job.signal,
           );
           receipts.push(receipt);
@@ -508,24 +514,25 @@ export function makeNightlyMaintenanceHandler(
     if (!isNightlyPhaseComplete(progress, 'contradiction_probe')) {
       const queries = await deps.loadProbeQueries(engine, verifiedAudits);
       const budget = await getNightlyBudgetSummary(engine, input);
+      const reservationCents = wholeCentReservation(budget.remaining_cents);
       let summary: Record<string, unknown> = {
         queries,
         skipped: queries.length === 0 ? 'no_unresolved_targets' : null,
       };
-      if (queries.length > 0 && budget.remaining_cents > 0) {
+      if (queries.length > 0 && reservationCents > 0) {
         let reservation: Awaited<ReturnType<typeof reserveNightlyBudget>> | null = null;
         try {
           reservation = await reserveNightlyBudget(engine, input, {
             phase: 'contradiction_probe',
             job_id: job.id,
-            estimated_cents: budget.remaining_cents,
+            estimated_cents: reservationCents,
             ttl_ms: 30 * 60 * 1000,
           });
           const result = await deps.runProbe(
             engine,
             input,
             queries,
-            budget.remaining_cents,
+            reservationCents,
             job,
           );
           const actualCents = Math.ceil(result.report.cost_usd.total * 100 * 100) / 100;
