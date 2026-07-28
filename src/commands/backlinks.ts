@@ -202,6 +202,7 @@ export interface BacklinksOpts {
 }
 
 export interface GraphBacklinkGap {
+  source_id: string;
   source_slug: string;
   target_slug: string;
   kind: 'missing_graph_edge' | 'missing_backlink_view';
@@ -265,7 +266,12 @@ export async function auditGraphBacklinks(
       const target = resolvedTarget(finding);
       if (!target) continue;
       if (!outgoingTargets.has(target)) {
-        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_graph_edge' });
+        graphFindings.push({
+          source_id: page.source_id,
+          source_slug: page.slug,
+          target_slug: target,
+          kind: 'missing_graph_edge',
+        });
         continue;
       }
       const targetKey = `${page.source_id}\u0000${target}`;
@@ -276,7 +282,12 @@ export async function auditGraphBacklinks(
         backlinkCache.set(targetKey, referrers);
       }
       if (!referrers.has(page.slug)) {
-        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_backlink_view' });
+        graphFindings.push({
+          source_id: page.source_id,
+          source_slug: page.slug,
+          target_slug: target,
+          kind: 'missing_backlink_view',
+        });
       }
     }
   }

@@ -136,7 +136,12 @@ describe('auditGraphBacklinks', () => {
     const report = await auditGraphBacklinks(e);
     expect(report.graph_edges_missing).toBe(1);
     expect(report.graph_findings).toEqual([
-      { source_slug: source.slug, target_slug: alice.slug, kind: 'missing_graph_edge' },
+      {
+        source_id: restrictedSource.source_id,
+        source_slug: source.slug,
+        target_slug: alice.slug,
+        kind: 'missing_graph_edge',
+      },
     ]);
   });
 
