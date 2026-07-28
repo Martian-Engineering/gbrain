@@ -3,9 +3,9 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   makeNightlyMaintenanceHandler,
   nightlyContradictionQueries,
-  wholeCentReservation,
   type NightlyMaintenanceDependencies,
 } from '../src/core/minions/handlers/nightly-maintenance.ts';
+import { wholeCentReservation } from '../src/core/minions/nightly-maintenance.ts';
 import type { BacklinksResult } from '../src/commands/backlinks.ts';
 import type { MinionJobContext } from '../src/core/minions/types.ts';
 import type { SemanticRepairManifest } from '../src/core/minions/semantic-repair-manifest.ts';

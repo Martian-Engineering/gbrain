@@ -21,6 +21,7 @@ import {
   parseNightlyMaintenanceInput,
   reserveNightlyBudget,
   settleNightlyBudget,
+  wholeCentReservation,
   type NightlyMaintenanceInput,
   type NightlyMaintenanceProgress,
   type NightlyMaintenanceReport,
@@ -45,11 +46,6 @@ const MIN_REPAIR_RESERVATION_CENTS = 50;
 const PROBE_MAX_QUERIES = 20;
 const PROBE_TOP_K = 3;
 const CHILD_WAIT_MS = 35 * 60 * 1000;
-
-/** Convert fractional ledger headroom into a conservative whole-cent reservation. */
-export function wholeCentReservation(remainingCents: number): number {
-  return Math.max(0, Math.floor(remainingCents));
-}
 
 interface SourceSnapshot {
   source_id: string;

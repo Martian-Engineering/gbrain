@@ -23,9 +23,11 @@ import {
   type SemanticRepairManifest,
 } from '../semantic-repair-manifest.ts';
 import {
+  getNightlyBudgetSummary,
   parseNightlyMaintenanceInput,
   reserveNightlyBudget,
   settleNightlyBudget,
+  wholeCentReservation,
   type NightlyMaintenanceInput,
   type NightlyMutationReceipt,
 } from '../nightly-maintenance.ts';
@@ -74,6 +76,11 @@ export interface NightlyRepairAgentDependencies {
     manifest: SemanticRepairManifest,
     page: Page,
   ): Promise<NightlyPageSnapshot>;
+  availableReservationCents(
+    engine: BrainEngine,
+    input: NightlyMaintenanceInput,
+    requestedCents: number,
+  ): Promise<number>;
   reserve(
     engine: BrainEngine,
     input: NightlyMaintenanceInput,
@@ -328,6 +335,10 @@ const DEFAULT_DEPENDENCIES = (engine: BrainEngine): NightlyRepairAgentDependenci
       version_id: version.id,
     };
   },
+  async availableReservationCents(budgetEngine, input, requestedCents) {
+    const budget = await getNightlyBudgetSummary(budgetEngine, input);
+    return Math.min(requestedCents, wholeCentReservation(budget.remaining_cents));
+  },
   reserve: reserveNightlyBudget,
   runAgent: makeSubagentHandler({ engine }),
   verify: verifyRepair,
@@ -364,10 +375,28 @@ export function makeNightlyRepairAgentHandler(
     const input = parseNightlyRepairAgentInput(job.data);
     const beforePage = await dependencies.assertFresh(engine, input.manifest);
     const snapshot = await dependencies.createSnapshot(engine, input.manifest, beforePage);
+    const reservationCents = await dependencies.availableReservationCents(
+      engine,
+      input.nightly,
+      input.reservation_cents,
+    );
+    if (reservationCents < 1) {
+      return {
+        source_id: input.manifest.source_id,
+        slug: input.manifest.page_slug,
+        before_hash: input.manifest.page_hash,
+        after_hash: input.manifest.page_hash,
+        manifest_hash: input.manifest.manifest_hash,
+        disposition: input.manifest.disposition,
+        validation_status: 'failed_rolled_back',
+        agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
+        verification_reason: 'budget_exhausted',
+      } satisfies NightlyRepairAgentResult;
+    }
     const reservation = await dependencies.reserve(engine, input.nightly, {
       phase: 'semantic_repair',
       job_id: job.id,
-      estimated_cents: input.reservation_cents,
+      estimated_cents: reservationCents,
       ttl_ms: RESERVATION_TTL_MS,
     });
     let agentResult: SubagentResult | null = null;
@@ -378,7 +407,7 @@ export function makeNightlyRepairAgentHandler(
       const agentData = buildAgentData(input, dependencies.loadSystemPrompt());
       tracker = new BudgetTracker({
         label: 'nightly-maintenance:semantic_repair',
-        maxCostUsd: input.reservation_cents / 100,
+        maxCostUsd: reservationCents / 100,
         maxRuntimeMs: RESERVATION_TTL_MS,
       });
       agentResult = await withBudgetTracker(tracker, () =>
@@ -406,13 +435,13 @@ export function makeNightlyRepairAgentHandler(
         output: agentResult.tokens.out,
         cache_read: agentResult.tokens.cache_read,
       });
-      if (actualCents > input.reservation_cents) {
+      if (actualCents > reservationCents) {
         throw new BudgetExhausted(
           'nightly-maintenance:semantic_repair actual cost exceeded its reservation',
           {
             reason: 'cost',
             spent: actualCents / 100,
-            cap: input.reservation_cents / 100,
+            cap: reservationCents / 100,
             modelId: input.nightly.model,
           },
         );

@@ -88,6 +88,11 @@ export interface NightlyBudgetReservationInput {
   ttl_ms?: number;
 }
 
+/** Convert fractional ledger headroom into a conservative whole-cent reservation. */
+export function wholeCentReservation(remainingCents: number): number {
+  return Math.max(0, Math.floor(remainingCents));
+}
+
 /**
  * Validate and normalize the operator-facing nightly-maintenance payload.
  * The model, reasoning effort, total budget, and initial mutation ceiling are

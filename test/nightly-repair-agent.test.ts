@@ -90,6 +90,10 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
       calls.push('snapshot');
       return { page: beforePage, markdown: '# Before', version_id: 9 };
     },
+    async availableReservationCents(_engine, _input, requestedCents) {
+      calls.push('available');
+      return requestedCents;
+    },
     async reserve() {
       calls.push('reserve');
       return { reservationId: 'reservation-1', estimatedCents: 1500, ttlMs: 1_800_000 };
@@ -135,7 +139,15 @@ describe('nightly repair agent', () => {
     const { deps, calls, settled } = dependencies();
     const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());
 
-    expect(calls).toEqual(['fresh', 'snapshot', 'reserve', 'agent', 'verify', 'settle']);
+    expect(calls).toEqual([
+      'fresh',
+      'snapshot',
+      'available',
+      'reserve',
+      'agent',
+      'verify',
+      'settle',
+    ]);
     expect(settled[0]).toBeGreaterThan(0);
     expect(result).toMatchObject({
       validation_status: 'passed',
@@ -249,6 +261,41 @@ describe('nightly repair agent', () => {
       makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job()),
     ).rejects.toThrow('budget exceeded');
     expect(calls).not.toContain('agent');
+  });
+
+  test('clamps a retry reservation to current whole-cent headroom', async () => {
+    let reservedCents = 0;
+    const { deps } = dependencies({
+      async availableReservationCents() { return 1469; },
+      async reserve(_engine, _input, request) {
+        reservedCents = request.estimated_cents;
+        return {
+          reservationId: 'reservation-2',
+          estimatedCents: reservedCents,
+          ttlMs: 1_800_000,
+        };
+      },
+    });
+
+    await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());
+
+    expect(reservedCents).toBe(1469);
+  });
+
+  test('returns budget exhaustion without a model call when no whole cent remains', async () => {
+    const { deps, calls } = dependencies({
+      async availableReservationCents() { return 0; },
+    });
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());
+
+    expect(calls).not.toContain('reserve');
+    expect(calls).not.toContain('agent');
+    expect(result).toMatchObject({
+      validation_status: 'failed_rolled_back',
+      verification_reason: 'budget_exhausted',
+      agent: { cost_cents: 0 },
+    });
   });
 
   test('submission permits exactly one retry', async () => {
