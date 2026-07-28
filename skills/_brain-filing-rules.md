@@ -23,6 +23,10 @@ not the source, not the skill that's running.
 | Reusable framework/thesis -> `sources/` | -> `concepts/` | It's a mental model |
 | Tweet thread about policy -> `media/` | -> `civic/` or `concepts/` | media/ is for content ops |
 
+Existing workspace-native records under `partners/` and derived event records
+under `life/` may be maintained in place. Do not use either directory for new
+subject pages; new knowledge still follows the primary-subject rule above.
+
 ## Sanctioned exception: synthesis output is sui generis
 
 The "file by primary subject" rule is for raw ingest. Synthesized output that

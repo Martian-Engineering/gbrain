@@ -68,4 +68,9 @@ describe('knowledge-correction skill', () => {
       expect(operationNames.has(tool)).toBe(true);
     }
   });
+
+  test('can correct source-derived partner and life pages', () => {
+    expect(frontmatterList('writes_to')).toContain('partners/');
+    expect(frontmatterList('writes_to')).toContain('life/');
+  });
 });

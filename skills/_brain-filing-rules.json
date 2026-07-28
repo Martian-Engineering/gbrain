@@ -28,6 +28,18 @@
       "description": "A meeting transcript or minutes. Propagate entities to companies/ and people/ pages."
     },
     {
+      "kind": "partner-record",
+      "directory": "partners/",
+      "examples": ["partner-scoped meeting records", "workspace-native collaboration history"],
+      "description": "An existing workspace-native record organized beneath a partner. Correction agents may maintain these pages but should file new subject knowledge in the primary-subject directory."
+    },
+    {
+      "kind": "life-event",
+      "directory": "life/",
+      "examples": ["derived event records", "chronological life history"],
+      "description": "An existing derived life-event record. Correction agents may maintain these pages but should file new subject knowledge in the primary-subject directory."
+    },
+    {
       "kind": "concept",
       "directory": "concepts/",
       "examples": ["mental models", "theses", "frameworks"],

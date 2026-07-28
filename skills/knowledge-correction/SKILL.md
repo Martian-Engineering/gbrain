@@ -37,6 +37,8 @@ writes_to:
   - companies/
   - deals/
   - meetings/
+  - partners/
+  - life/
   - concepts/
   - projects/
   - analysis/
