@@ -16,8 +16,34 @@ verification, and contradiction probing.
 - Repair retry limit: one retry.
 
 The root and repair child names are protected. Remote MCP clients cannot submit
-them. Each repair child is bound to one source and one exact page slug. It has
-no shell, delete, rename, merge, credential, or provisioning operation.
+them. Each repair child is bound to one source and can write only one exact
+page slug. It can use source-scoped page, search, query, resolution, schema,
+and link-validation operations to investigate. It has no shell, delete,
+rename, merge, credential, or provisioning operation.
+
+## Autonomous semantic outcomes
+
+The repair agent does not create review proposals. It returns one validated
+decision with its candidate evidence, exact edit, rationale, confidence,
+operations, and verification claims.
+
+- `applied + replace_reference` means the agent found one canonical
+  replacement at or above 0.90 confidence and wrote it immediately.
+- `deferred + recover_source` means the cited provenance object appears
+  unavailable or un-ingested, so the page was intentionally left unchanged.
+- `deferred + leave_unresolved` means the evidence could not support a unique
+  correction or a concrete recovery path.
+- `failed + leave_unresolved` is reserved for an execution failure.
+
+The 0.90 score is only one condition. An applied repair must also bind its
+replacement to retained candidate evidence, change the diagnosed page, remove
+the unresolved target, resolve the replacement, and pass frontmatter lint.
+The server independently performs those checks. Any failure restores the
+complete pre-write page snapshot.
+
+Provider-specific Gmail or Granola re-ingestion is not available to these
+agents yet. Such findings are retained as `recover_source`; they are not
+silently repointed to related material.
 
 ## Install without enabling
 
@@ -48,8 +74,10 @@ The command prints the root job ID. Inspect it with:
 gbrain jobs get JOB_ID
 ```
 
-Review the report, every changed slug and before/after hash, rolled-back
-receipts, remaining findings, and settled spend. If the result is acceptable:
+Review the report, every changed slug and before/after hash, complete autonomous
+outcomes, rolled-back receipts, remaining findings, and settled spend. Confirm
+that `applied` receipts contain a validated replacement and that `deferred`
+receipts have identical before/after hashes. If the result is acceptable:
 
 ```sh
 sudo systemctl enable --now gbrain-nightly-maintenance.timer

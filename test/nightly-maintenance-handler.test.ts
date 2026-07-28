@@ -73,6 +73,28 @@ const receipt = {
   manifest_hash: 'e'.repeat(64),
   validation_status: 'passed',
   disposition: 'repair',
+  outcome: {
+    status: 'applied',
+    decision: 'replace_reference',
+    source_id: 'default',
+    page_slug: 'notes/example',
+    manifest_hash: 'e'.repeat(64),
+    broken_reference: 'people/alice',
+    occurrence_context: 'The old reference points to [[people/alice]].',
+    candidates: [{
+      slug: 'people/alicia',
+      title: 'Alicia',
+      evidence: ['The candidate is the same person.'],
+      confidence: 0.98,
+    }],
+    proposed_replacement: 'people/alicia',
+    exact_edit_description: 'Replace only the broken link target.',
+    rationale: 'This is the unique canonical identity.',
+    confidence: 0.98,
+    unresolved_questions: [],
+    operations: ['get_page', 'search', 'put_page', 'validate_links'],
+    verification: { page_reread: true, links_validated: true },
+  },
   agent: { turns_count: 2, stop_reason: 'end_turn', cost_cents: 2.5 },
   verification_reason: null,
 } as NightlyRepairAgentResult;
@@ -226,6 +248,43 @@ describe('nightly maintenance root handler', () => {
 
     expect(maxActiveChildren).toBe(1);
     expect((result as any).mutation_receipts).toEqual([receipt]);
+    expect((result as any).mutation_receipts[0].outcome).toEqual(receipt.outcome);
+  });
+
+  test('does not charge a deferred outcome against the mutation ceiling', async () => {
+    let childCalls = 0;
+    const deferredReceipt = {
+      ...receipt,
+      after_hash: receipt.before_hash,
+      outcome: {
+        ...receipt.outcome,
+        status: 'deferred',
+        decision: 'recover_source',
+        candidates: [],
+        proposed_replacement: null,
+        exact_edit_description: 'Recover the missing source without changing the page.',
+        operations: ['get_page', 'search'],
+        verification: { page_reread: true, links_validated: false },
+      },
+    } as NightlyRepairAgentResult;
+    const secondManifest = {
+      ...manifest,
+      manifest_id: `${manifest.manifest_id}:second`,
+      manifest_hash: '9'.repeat(64),
+    };
+    const constrainedJob = job([]);
+    constrainedJob.data.max_page_mutations = 1;
+
+    const result = await makeNightlyMaintenanceHandler(engine, dependencies({
+      async buildManifests() { return [manifest, secondManifest]; },
+      async runRepairChild() {
+        childCalls++;
+        return childCalls === 1 ? deferredReceipt : receipt;
+      },
+    }))(constrainedJob);
+
+    expect(childCalls).toBe(2);
+    expect((result as any).mutation_receipts).toHaveLength(2);
   });
 
   test('does not repeat a child whose receipt was durably persisted', async () => {

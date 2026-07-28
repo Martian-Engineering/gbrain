@@ -189,7 +189,8 @@ export function parseNightlyRepairDecision(
 
   const candidates = candidateList(raw.candidates);
   const confidence = confidenceValue(raw.confidence, 'confidence');
-  const operations = stringList(raw.operations, 'operations', MAX_OPERATIONS);
+  const operations = stringList(raw.operations, 'operations', MAX_OPERATIONS)
+    .map(operation => operation.startsWith('brain_') ? operation.slice(6) : operation);
   if (operations.some(operation => !OPERATIONS.has(operation))) {
     throw new Error('nightly-repair-agent: operations contains an unauthorized operation');
   }
@@ -250,6 +251,9 @@ export function parseNightlyRepairDecision(
         throw new Error(
           'nightly-repair-agent: proposed_replacement must match a candidate slug',
         );
+      }
+      if (candidate.evidence.length === 0) {
+        throw new Error('nightly-repair-agent: replacement candidate must include evidence');
       }
       if (candidate.confidence < AUTONOMOUS_REPAIR_CONFIDENCE) {
         throw new Error(

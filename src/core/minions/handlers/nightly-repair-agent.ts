@@ -23,6 +23,10 @@ import {
   type SemanticRepairManifest,
 } from '../semantic-repair-manifest.ts';
 import {
+  parseNightlyRepairDecision,
+  type NightlyRepairDecision,
+} from '../nightly-repair-decision.ts';
+import {
   getNightlyBudgetSummary,
   parseNightlyMaintenanceInput,
   reserveNightlyBudget,
@@ -36,7 +40,7 @@ import { MinionQueue as Queue } from '../queue.ts';
 import { BudgetExhausted, BudgetTracker } from '../../budget/budget-tracker.ts';
 import { withBudgetTracker } from '../../ai/gateway.ts';
 
-const AGENT_MAX_TURNS = 6;
+const AGENT_MAX_TURNS = 12;
 const AGENT_MAX_OUTPUT_TOKENS = 4096;
 const RESERVATION_TTL_MS = 30 * 60 * 1000;
 const SKILL_PATH = join(import.meta.dir, '../../../../skills/nightly-semantic-repair/SKILL.md');
@@ -57,6 +61,7 @@ export interface NightlyRepairVerification {
   ok: boolean;
   after_hash: string;
   reason: string | null;
+  outcome: NightlyRepairDecision | null;
 }
 
 export interface NightlyRepairAgentResult extends NightlyMutationReceipt {
@@ -181,30 +186,6 @@ export function nightlyAgentCostCents(
   return Math.ceil(rawCents * 100) / 100;
 }
 
-/** Parse and bind the model's final JSON receipt to the immutable manifest. */
-function parseAgentReceipt(result: SubagentResult, manifest: SemanticRepairManifest): {
-  status: 'applied' | 'proposal' | 'failed';
-} {
-  if (result.stop_reason !== 'end_turn') {
-    throw new Error(`nightly-repair-agent: terminal stop reason ${result.stop_reason}`);
-  }
-  let value: Record<string, unknown>;
-  try {
-    value = JSON.parse(result.result) as Record<string, unknown>;
-  } catch {
-    throw new Error('nightly-repair-agent: final response was not one JSON object');
-  }
-  if (
-    !['applied', 'proposal', 'failed'].includes(String(value.status))
-    || value.source_id !== manifest.source_id
-    || value.page_slug !== manifest.page_slug
-    || value.manifest_hash !== manifest.manifest_hash
-  ) {
-    throw new Error('nightly-repair-agent: final receipt does not match the manifest');
-  }
-  return { status: value.status as 'applied' | 'proposal' | 'failed' };
-}
-
 /** Build the exact tool and prompt contract passed to the generic subagent loop. */
 function buildAgentData(
   input: NightlyRepairAgentInput,
@@ -220,9 +201,10 @@ function buildAgentData(
   ];
   return {
     prompt: [
-      'Apply the following server-issued manifest exactly as instructed.',
-      'It is already approved when disposition is "repair".',
-      'Return only the required JSON receipt.',
+      'Investigate and resolve the following server-issued manifest.',
+      'For an authorized high-confidence repair, write immediately.',
+      'For missing provenance or insufficient evidence, return a no-write deferred outcome.',
+      'Return only the required JSON decision.',
       JSON.stringify(input.manifest),
     ].join('\n\n'),
     system,
@@ -249,33 +231,63 @@ export async function verifyRepair(
   result: SubagentResult,
 ): Promise<NightlyRepairVerification> {
   const after = await engine.getPage(manifest.page_slug, { sourceId: manifest.source_id });
-  if (!after) return { ok: false, after_hash: manifest.page_hash, reason: 'page missing after agent' };
+  if (!after) {
+    return {
+      ok: false,
+      after_hash: manifest.page_hash,
+      reason: 'page missing after agent',
+      outcome: null,
+    };
+  }
   const afterHash = semanticRepairPageHash(after);
-  let receipt: ReturnType<typeof parseAgentReceipt>;
+  let outcome: NightlyRepairDecision;
   try {
-    receipt = parseAgentReceipt(result, manifest);
+    outcome = parseNightlyRepairDecision(result.result, result.stop_reason, manifest);
   } catch (error) {
     return {
       ok: false,
       after_hash: afterHash,
       reason: error instanceof Error ? error.message : String(error),
+      outcome: null,
     };
   }
 
-  if (manifest.disposition === 'proposal') {
+  if (outcome.status === 'deferred') {
     return {
-      ok: receipt.status === 'proposal' && afterHash === manifest.page_hash,
+      ok: afterHash === manifest.page_hash,
       after_hash: afterHash,
-      reason: receipt.status === 'proposal' && afterHash === manifest.page_hash
+      reason: afterHash === manifest.page_hash
         ? null
-        : 'proposal agent mutated the page or returned the wrong status',
+        : 'deferred decision mutated the page',
+      outcome,
     };
   }
-  if (receipt.status !== 'applied') {
-    return { ok: false, after_hash: afterHash, reason: `agent returned ${receipt.status}` };
+  if (outcome.status === 'failed') {
+    return {
+      ok: false,
+      after_hash: afterHash,
+      reason: 'agent reported an execution failure',
+      outcome,
+    };
+  }
+  if (
+    manifest.disposition !== 'repair'
+    || !manifest.allowed_actions.some(action => action.kind === outcome.decision)
+  ) {
+    return {
+      ok: false,
+      after_hash: afterHash,
+      reason: 'applied decision is not authorized by the manifest',
+      outcome,
+    };
   }
   if (afterHash === manifest.page_hash) {
-    return { ok: false, after_hash: afterHash, reason: 'page hash did not change' };
+    return {
+      ok: false,
+      after_hash: afterHash,
+      reason: 'page hash did not change',
+      outcome,
+    };
   }
 
   if (manifest.finding.kind === 'link_reference') {
@@ -288,7 +300,22 @@ export async function verifyRepair(
     const unresolved = findings.some(finding =>
       finding.target === target && finding.status !== 'resolved');
     if (unresolved) {
-      return { ok: false, after_hash: afterHash, reason: 'reference still unresolved' };
+      return {
+        ok: false,
+        after_hash: afterHash,
+        reason: 'reference still unresolved',
+        outcome,
+      };
+    }
+    const replacementResolved = findings.some(finding =>
+      finding.target === outcome.proposed_replacement && finding.status === 'resolved');
+    if (!replacementResolved) {
+      return {
+        ok: false,
+        after_hash: afterHash,
+        reason: 'replacement reference did not resolve',
+        outcome,
+      };
     }
   }
   const tags = await engine.getTags(after.slug, { sourceId: manifest.source_id });
@@ -296,9 +323,14 @@ export async function verifyRepair(
   const schemaIssues = lintContent(markdown, `${after.slug}.md`)
     .filter(issue => issue.rule.startsWith('frontmatter-'));
   if (schemaIssues.length > 0) {
-    return { ok: false, after_hash: afterHash, reason: schemaIssues[0]!.message };
+    return {
+      ok: false,
+      after_hash: afterHash,
+      reason: schemaIssues[0]!.message,
+      outcome,
+    };
   }
-  return { ok: true, after_hash: afterHash, reason: null };
+  return { ok: true, after_hash: afterHash, reason: null, outcome };
 }
 
 /** Restore the complete prewrite page through the canonical local write path. */
@@ -398,6 +430,7 @@ export function makeNightlyRepairAgentHandler(
         manifest_hash: input.manifest.manifest_hash,
         disposition: input.manifest.disposition,
         validation_status: 'failed_rolled_back',
+        outcome: null,
         agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
         verification_reason: 'budget_exhausted',
       } satisfies NightlyRepairAgentResult;
@@ -473,6 +506,7 @@ export function makeNightlyRepairAgentHandler(
         manifest_hash: input.manifest.manifest_hash,
         disposition: input.manifest.disposition,
         validation_status: verification.ok ? 'passed' : 'failed_rolled_back',
+        outcome: verification.outcome,
         agent: {
           turns_count: agentResult.turns_count,
           stop_reason: agentResult.stop_reason,
@@ -503,6 +537,7 @@ export function makeNightlyRepairAgentHandler(
           manifest_hash: input.manifest.manifest_hash,
           disposition: input.manifest.disposition,
           validation_status: 'failed_rolled_back',
+          outcome: null,
           agent: {
             turns_count: agentResult?.turns_count ?? 0,
             stop_reason: 'error',

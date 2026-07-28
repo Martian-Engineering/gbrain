@@ -9,6 +9,8 @@ import {
 import type { MinionJobContext, SubagentResult } from '../src/core/minions/types.ts';
 import type { MinionQueue } from '../src/core/minions/queue.ts';
 import type { SemanticRepairManifest } from '../src/core/minions/semantic-repair-manifest.ts';
+import { semanticRepairPageHash } from '../src/core/minions/semantic-repair-manifest.ts';
+import type { NightlyRepairDecision } from '../src/core/minions/nightly-repair-decision.ts';
 import type { Page } from '../src/core/types.ts';
 import { BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
 
@@ -60,6 +62,34 @@ const nightly = {
   max_page_mutations: 10,
 } satisfies import('../src/core/minions/nightly-maintenance.ts').NightlyMaintenanceInput;
 
+function decision(
+  overrides: Partial<NightlyRepairDecision> = {},
+): NightlyRepairDecision {
+  return {
+    status: 'applied',
+    decision: 'replace_reference',
+    source_id: manifest.source_id,
+    page_slug: manifest.page_slug,
+    manifest_hash: manifest.manifest_hash,
+    broken_reference: 'people/alice',
+    occurrence_context: 'The old reference points to [[people/alice]].',
+    candidates: [{
+      slug: 'people/alicia',
+      title: 'Alicia',
+      evidence: ['The canonical page has the same identity attributes.'],
+      confidence: 0.98,
+    }],
+    proposed_replacement: 'people/alicia',
+    exact_edit_description: 'Replace only the broken link target.',
+    rationale: 'The candidate is the unique canonical identity.',
+    confidence: 0.98,
+    unresolved_questions: [],
+    operations: ['get_page', 'search', 'put_page', 'validate_links'],
+    verification: { page_reread: true, links_validated: true },
+    ...overrides,
+  } as NightlyRepairDecision;
+}
+
 function job(): MinionJobContext {
   return {
     id: 73,
@@ -105,18 +135,13 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
         model: 'openai:gpt-5.6-terra',
         reasoning_effort: 'high',
         use_gateway_loop: true,
-        max_turns: 6,
+        max_turns: 12,
         max_tokens: 4096,
         allowed_slug_prefixes: ['notes/example'],
         source_id: 'wiki',
       });
       return {
-        result: JSON.stringify({
-          status: 'applied',
-          source_id: 'wiki',
-          page_slug: 'notes/example',
-          manifest_hash: manifest.manifest_hash,
-        }),
+        result: JSON.stringify(decision()),
         turns_count: 2,
         stop_reason: 'end_turn',
         tokens: { in: 1000, out: 100, cache_read: 0, cache_create: 0 },
@@ -124,7 +149,12 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
     },
     async verify() {
       calls.push('verify');
-      return { ok: true, after_hash: 'f'.repeat(64), reason: null };
+      return {
+        ok: true,
+        after_hash: 'f'.repeat(64),
+        reason: null,
+        outcome: decision(),
+      };
     },
     async rollback() { calls.push('rollback'); },
     async settle(_engine, _id, cents) { calls.push('settle'); settled.push(cents); },
@@ -158,7 +188,7 @@ describe('nightly repair agent', () => {
 
     expect(result).toMatchObject({
       ok: false,
-      reason: 'nightly-repair-agent: final receipt does not match the manifest',
+      reason: 'nightly-repair-agent: decision identity does not match the manifest',
     });
   });
 
@@ -183,6 +213,53 @@ describe('nightly repair agent', () => {
       before_hash: manifest.page_hash,
       after_hash: 'f'.repeat(64),
       manifest_hash: manifest.manifest_hash,
+      outcome: {
+        status: 'applied',
+        decision: 'replace_reference',
+        proposed_replacement: 'people/alicia',
+      },
+    });
+  });
+
+  test('retains source recovery without treating an unchanged page as failure', async () => {
+    const unchangedManifest = {
+      ...manifest,
+      page_hash: semanticRepairPageHash(beforePage),
+    };
+    const deferred = decision({
+      status: 'deferred',
+      decision: 'recover_source',
+      candidates: [],
+      proposed_replacement: null,
+      exact_edit_description: 'Do not edit the page; recover the missing source.',
+      rationale: 'The cited source is not available in the corpus.',
+      confidence: 0.97,
+      operations: ['get_page', 'search'],
+      verification: { page_reread: true, links_validated: false },
+    });
+
+    const result = await verifyRepair(
+      {
+        async getPage() { return beforePage; },
+      } as unknown as BrainEngine,
+      unchangedManifest,
+      { page: beforePage, markdown: '# Before', version_id: 9 },
+      {
+        result: JSON.stringify(deferred),
+        turns_count: 2,
+        stop_reason: 'end_turn',
+        tokens: { in: 100, out: 10, cache_read: 0, cache_create: 0 },
+      } as SubagentResult,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      after_hash: unchangedManifest.page_hash,
+      reason: null,
+      outcome: {
+        status: 'deferred',
+        decision: 'recover_source',
+      },
     });
   });
 
@@ -190,7 +267,12 @@ describe('nightly repair agent', () => {
     const { deps, calls } = dependencies({
       async verify() {
         calls.push('verify');
-        return { ok: false, after_hash: 'f'.repeat(64), reason: 'reference still unresolved' };
+        return {
+          ok: false,
+          after_hash: 'f'.repeat(64),
+          reason: 'reference still unresolved',
+          outcome: decision(),
+        };
       },
     });
 

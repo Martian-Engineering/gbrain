@@ -4,6 +4,7 @@ import { sqlQueryForEngine } from '../sql-query.ts';
 import { reserve, settle, type Reservation } from './budget-meter.ts';
 import type { MinionJob } from './types.ts';
 import type { MinionQueue } from './queue.ts';
+import type { NightlyRepairDecision } from './nightly-repair-decision.ts';
 
 export const NIGHTLY_MAINTENANCE_MODEL = 'openai:gpt-5.6-terra' as const;
 export const NIGHTLY_MAINTENANCE_REASONING = 'high' as const;
@@ -55,6 +56,8 @@ export interface NightlyMutationReceipt {
   after_hash: string;
   manifest_hash: string;
   validation_status: 'passed' | 'failed_rolled_back';
+  /** Validated agent decision, or null when execution ended before one was accepted. */
+  outcome: NightlyRepairDecision | null;
 }
 
 export interface NightlyMaintenanceReport {

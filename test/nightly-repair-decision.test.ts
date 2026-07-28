@@ -102,6 +102,28 @@ describe('nightly repair decision', () => {
     });
   });
 
+  test('normalizes the tool names surfaced by the subagent loop', () => {
+    const decision = parseNightlyRepairDecision(
+      JSON.stringify(replacement({
+        operations: [
+          'brain_get_page',
+          'brain_search',
+          'brain_put_page',
+          'brain_validate_links',
+        ],
+      })),
+      'end_turn',
+      manifest,
+    );
+
+    expect(decision.operations).toEqual([
+      'get_page',
+      'search',
+      'put_page',
+      'validate_links',
+    ]);
+  });
+
   test('rejects a low-confidence applied replacement', () => {
     expect(() => parseNightlyRepairDecision(
       JSON.stringify(replacement({ confidence: AUTONOMOUS_REPAIR_CONFIDENCE - 0.01 })),
@@ -116,6 +138,21 @@ describe('nightly repair decision', () => {
       'end_turn',
       manifest,
     )).toThrow('proposed_replacement must match a candidate slug');
+  });
+
+  test('rejects an applied candidate without identity evidence', () => {
+    expect(() => parseNightlyRepairDecision(
+      JSON.stringify(replacement({
+        candidates: [{
+          slug: 'companies/lucky-strike',
+          title: 'Lucky Strike',
+          evidence: [],
+          confidence: 0.98,
+        }],
+      })),
+      'end_turn',
+      manifest,
+    )).toThrow('replacement candidate must include evidence');
   });
 
   test('rejects output bound to another manifest', () => {
