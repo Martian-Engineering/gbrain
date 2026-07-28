@@ -43,6 +43,12 @@ describe('knowledge-correction skill', () => {
     expect(skill).toContain('In propose mode, do not call mutating tools.');
   });
 
+  test('plans against declared apply tools without exposing them before approval', () => {
+    expect(skill).toContain('available_apply_tools:');
+    expect(skill).toContain('do not call or require them to be callable in propose mode');
+    expect(skill).toContain('required operation appears in `available_apply_tools`');
+  });
+
   test('requires a caller-supplied correction date instead of inventing one', () => {
     expect(skill).toContain('correction_date: <caller-supplied YYYY-MM-DD>');
     expect(skill).toContain('Never infer or');

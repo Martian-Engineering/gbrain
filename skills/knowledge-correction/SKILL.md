@@ -114,6 +114,8 @@ page_slug: <selected page>
 anchor_quote: <exact selected text>
 comment: <operator's freeform correction>
 correction_date: <caller-supplied YYYY-MM-DD>
+available_apply_tools:
+  - <mutation or verification operation available after approval>
 page_snapshot_hash: <optional hash captured during proposal>
 approved_plan: <required in apply mode>
 ```
@@ -156,6 +158,8 @@ edit plus `create_or_enrich` plus `connect`.
 ### 3. Propose
 
 In propose mode, do not call mutating tools.
+`available_apply_tools` describes the operations the caller will expose only
+after approval; do not call or require them to be callable in propose mode.
 
 Return:
 
@@ -166,7 +170,9 @@ Return:
 - the current page snapshot hash when supplied by the caller.
 
 A proposal is `ready` only when every target resolves unambiguously and every
-required operation is available to the agent.
+required operation appears in `available_apply_tools`. Return
+`needs_clarification` when a required apply operation is absent from that
+declared list.
 
 ### 4. Apply
 
