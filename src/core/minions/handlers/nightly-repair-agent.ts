@@ -38,7 +38,7 @@ import {
   type NightlyMutationReceipt,
 } from '../nightly-maintenance.ts';
 import type { Reservation } from '../budget-meter.ts';
-import { MinionQueue as Queue } from '../queue.ts';
+import { settlePendingReservationForJob } from '../budget-meter.ts';
 import { BudgetExhausted, BudgetTracker } from '../../budget/budget-tracker.ts';
 import { withBudgetTracker } from '../../ai/gateway.ts';
 
@@ -76,7 +76,19 @@ export interface NightlyRepairAgentResult extends NightlyMutationReceipt {
   verification_reason: string | null;
 }
 
+interface NightlyTokenUsage {
+  input: number;
+  output: number;
+  cache_read: number;
+}
+
 export interface NightlyRepairAgentDependencies {
+  settlePendingReservation(
+    engine: BrainEngine,
+    clientId: string,
+    jobId: number,
+    actualCents: number,
+  ): Promise<number>;
   assertFresh(engine: BrainEngine, manifest: SemanticRepairManifest): Promise<Page>;
   createSnapshot(
     engine: BrainEngine,
@@ -110,7 +122,7 @@ export interface NightlyRepairAgentDependencies {
     reservationId: string,
     actualCents: number,
   ): Promise<void>;
-  readJobTokens(
+  readDurableTokens(
     engine: BrainEngine,
     jobId: number,
   ): Promise<{ input: number; output: number; cache_read: number }>;
@@ -186,6 +198,15 @@ export function nightlyAgentCostCents(
     + (tokens.output / 1_000_000) * pricing.output
   ) * 100;
   return Math.ceil(rawCents * 100) / 100;
+}
+
+/** Isolate the current attempt's usage from cumulative durable job counters. */
+function tokenDelta(total: NightlyTokenUsage, prior: NightlyTokenUsage): NightlyTokenUsage {
+  return {
+    input: Math.max(0, total.input - prior.input),
+    output: Math.max(0, total.output - prior.output),
+    cache_read: Math.max(0, total.cache_read - prior.cache_read),
+  };
 }
 
 /** Build the exact tool and prompt contract passed to the generic subagent loop. */
@@ -395,6 +416,20 @@ async function rollbackSnapshot(
 }
 
 const DEFAULT_DEPENDENCIES = (engine: BrainEngine): NightlyRepairAgentDependencies => ({
+  async settlePendingReservation(
+    reservationEngine,
+    clientId,
+    jobId,
+    actualCents,
+  ) {
+    return settlePendingReservationForJob(
+      reservationEngine,
+      clientId,
+      jobId,
+      actualCents,
+      'nightly-maintenance:semantic_repair',
+    );
+  },
   assertFresh: assertFreshSemanticRepairManifest,
   async createSnapshot(snapshotEngine, manifest, page) {
     const tags = await snapshotEngine.getTags(page.slug, { sourceId: manifest.source_id });
@@ -416,12 +451,23 @@ const DEFAULT_DEPENDENCIES = (engine: BrainEngine): NightlyRepairAgentDependenci
   async settle(settleEngine, reservationId, actualCents) {
     await settleNightlyBudget(settleEngine, reservationId, 'semantic_repair', actualCents);
   },
-  async readJobTokens(tokenEngine, jobId) {
-    const persisted = await new Queue(tokenEngine).getJob(jobId);
+  async readDurableTokens(tokenEngine, jobId) {
+    const rows = await tokenEngine.executeRaw<{
+      input: string | number;
+      output: string | number;
+      cache_read: string | number;
+    }>(
+      `SELECT COALESCE(SUM(tokens_in), 0) AS input,
+              COALESCE(SUM(tokens_out), 0) AS output,
+              COALESCE(SUM(tokens_cache_read), 0) AS cache_read
+         FROM subagent_messages
+        WHERE job_id = $1`,
+      [jobId],
+    );
     return {
-      input: persisted?.tokens_input ?? 0,
-      output: persisted?.tokens_output ?? 0,
-      cache_read: persisted?.tokens_cache_read ?? 0,
+      input: Number(rows[0]?.input ?? 0),
+      output: Number(rows[0]?.output ?? 0),
+      cache_read: Number(rows[0]?.cache_read ?? 0),
     };
   },
   loadSystemPrompt() {
@@ -443,6 +489,16 @@ export function makeNightlyRepairAgentHandler(
 ): MinionHandler {
   return async job => {
     const input = parseNightlyRepairAgentInput(job.data);
+    let priorTokens: NightlyTokenUsage = { input: 0, output: 0, cache_read: 0 };
+    if (job.attempts_made > 0) {
+      priorTokens = await dependencies.readDurableTokens(engine, job.id);
+      await dependencies.settlePendingReservation(
+        engine,
+        input.nightly.budget_client_id,
+        job.id,
+        nightlyAgentCostCents(input.nightly.model, priorTokens),
+      );
+    }
     let beforePage: Page;
     try {
       beforePage = await dependencies.assertFresh(engine, input.manifest);
@@ -520,11 +576,14 @@ export function makeNightlyRepairAgentHandler(
           },
         );
       }
-      actualCents = nightlyAgentCostCents(input.nightly.model, {
-        input: agentResult.tokens.in,
-        output: agentResult.tokens.out,
-        cache_read: agentResult.tokens.cache_read,
-      });
+      const attemptTokens = job.attempts_made > 0
+        ? tokenDelta(await dependencies.readDurableTokens(engine, job.id), priorTokens)
+        : {
+            input: agentResult.tokens.in,
+            output: agentResult.tokens.out,
+            cache_read: agentResult.tokens.cache_read,
+          };
+      actualCents = nightlyAgentCostCents(input.nightly.model, attemptTokens);
       if (actualCents > reservationCents) {
         throw new BudgetExhausted(
           'nightly-maintenance:semantic_repair actual cost exceeded its reservation',
@@ -564,14 +623,16 @@ export function makeNightlyRepairAgentHandler(
         verification_reason: verification.reason,
       } satisfies NightlyRepairAgentResult;
     } catch (error) {
-      const tokens = agentResult
-        ? {
+      const attemptTokens = job.attempts_made > 0
+        ? tokenDelta(await dependencies.readDurableTokens(engine, job.id), priorTokens)
+        : agentResult
+          ? {
             input: agentResult.tokens.in,
             output: agentResult.tokens.out,
             cache_read: agentResult.tokens.cache_read,
           }
-        : await dependencies.readJobTokens(engine, job.id);
-      actualCents = nightlyAgentCostCents(input.nightly.model, tokens);
+          : await dependencies.readDurableTokens(engine, job.id);
+      actualCents = nightlyAgentCostCents(input.nightly.model, attemptTokens);
       if (error instanceof BudgetExhausted && error.reason === 'cost') {
         actualCents = Math.max(actualCents, Math.ceil(error.spent * 100 * 100) / 100);
       }

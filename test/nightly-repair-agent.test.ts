@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
 import {
   makeNightlyRepairAgentHandler,
+  nightlyAgentCostCents,
   submitNightlyRepairAgent,
   verifyRepair,
   type NightlyRepairAgentDependencies,
@@ -120,6 +121,7 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
   const calls: string[] = [];
   const settled: number[] = [];
   const deps: NightlyRepairAgentDependencies = {
+    async settlePendingReservation() { calls.push('reconcile'); return 0; },
     async assertFresh() { calls.push('fresh'); return beforePage; },
     async createSnapshot() {
       calls.push('snapshot');
@@ -162,7 +164,7 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
     },
     async rollback() { calls.push('rollback'); },
     async settle(_engine, _id, cents) { calls.push('settle'); settled.push(cents); },
-    async readJobTokens() { return { input: 0, output: 0, cache_read: 0 }; },
+    async readDurableTokens() { return { input: 0, output: 0, cache_read: 0 }; },
     loadSystemPrompt() { return 'nightly repair system'; },
     ...overrides,
   };
@@ -248,6 +250,102 @@ describe('nightly repair agent', () => {
       verification_reason: 'stale_manifest',
       outcome: null,
       agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
+    });
+  });
+
+  test('accounts an abandoned reservation before a stale retry exits', async () => {
+    let reconciledCents = 0;
+    const { deps, calls } = dependencies({
+      async readDurableTokens() {
+        calls.push('tokens');
+        return { input: 400, output: 20, cache_read: 0 };
+      },
+      async settlePendingReservation(_engine, _clientId, _jobId, actualCents) {
+        calls.push('reconcile');
+        reconciledCents = actualCents;
+        return 1;
+      },
+      async assertFresh() {
+        calls.push('fresh');
+        throw new StaleSemanticRepairManifestError();
+      },
+    });
+    const retry = job();
+    retry.attempts_made = 1;
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(retry);
+
+    expect(calls).toEqual(['tokens', 'reconcile', 'fresh']);
+    expect(reconciledCents).toBeGreaterThan(0);
+    expect(result).toMatchObject({
+      validation_status: 'stale',
+      verification_reason: 'stale_manifest',
+    });
+  });
+
+  test('does not charge cumulative tokens twice on terminal replay', async () => {
+    let reconciledCents = 0;
+    const { deps, settled } = dependencies({
+      async readDurableTokens() {
+        return { input: 1000, output: 100, cache_read: 0 };
+      },
+      async settlePendingReservation(_engine, _clientId, _jobId, actualCents) {
+        reconciledCents = actualCents;
+        return 1;
+      },
+    });
+    const retry = job();
+    retry.attempts_made = 1;
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(retry);
+
+    expect(reconciledCents).toBeGreaterThan(0);
+    expect(settled).toEqual([0]);
+    expect(result).toMatchObject({
+      validation_status: 'passed',
+      agent: { cost_cents: 0 },
+    });
+  });
+
+  test('charges the persisted token delta for a resumed retry', async () => {
+    let reads = 0;
+    const prior = { input: 1000, output: 100, cache_read: 0 };
+    const current = { input: 500, output: 50, cache_read: 0 };
+    const { deps, settled } = dependencies({
+      async readDurableTokens() {
+        reads++;
+        return reads === 1
+          ? prior
+          : {
+              input: prior.input + current.input,
+              output: prior.output + current.output,
+              cache_read: 0,
+            };
+      },
+      async runAgent() {
+        return {
+          result: JSON.stringify(decision()),
+          turns_count: 3,
+          stop_reason: 'end_turn',
+          tokens: {
+            in: current.input,
+            out: current.output,
+            cache_read: 0,
+            cache_create: 0,
+          },
+        } as SubagentResult;
+      },
+    });
+    const retry = job();
+    retry.attempts_made = 1;
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(retry);
+
+    expect(reads).toBe(2);
+    expect(settled).toEqual([nightlyAgentCostCents(nightly.model, current)]);
+    expect(result).toMatchObject({
+      validation_status: 'passed',
+      agent: { cost_cents: nightlyAgentCostCents(nightly.model, current) },
     });
   });
 
@@ -363,7 +461,7 @@ describe('nightly repair agent', () => {
         calls.push('agent');
         throw new Error('provider timeout');
       },
-      async readJobTokens() { return { input: 400, output: 20, cache_read: 0 }; },
+      async readDurableTokens() { return { input: 400, output: 20, cache_read: 0 }; },
     });
 
     await expect(
@@ -379,7 +477,7 @@ describe('nightly repair agent', () => {
         calls.push('agent');
         throw new SyntaxError('JSON Parse error: Unterminated string');
       },
-      async readJobTokens() { return { input: 400, output: 20, cache_read: 0 }; },
+      async readDurableTokens() { return { input: 400, output: 20, cache_read: 0 }; },
     });
     const finalAttempt = job();
     finalAttempt.attempts_made = 1;

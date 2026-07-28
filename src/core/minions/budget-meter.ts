@@ -224,6 +224,51 @@ export async function sweepExpiredReservations(engine: BrainEngine): Promise<num
   return rows.length;
 }
 
+/**
+ * Settle the reservation abandoned by an earlier attempt of one durable job.
+ * Queue locking prevents concurrent attempts; the client advisory lock makes
+ * the reservation transition atomic with competing budget reservations.
+ */
+export async function settlePendingReservationForJob(
+  engine: BrainEngine,
+  clientId: string,
+  jobId: number,
+  actualCents: number,
+  operation: string,
+): Promise<number> {
+  if (!Number.isFinite(actualCents) || actualCents < 0) {
+    throw new Error(`actual spend must be a non-negative finite number, got ${actualCents}`);
+  }
+  return engine.transaction(async (tx) => {
+    const sql = sqlQueryForEngine(tx);
+    await tx.executeRaw('SELECT pg_advisory_xact_lock($1::bigint)', [clientLockKey(clientId)]);
+    const rows = await sql`
+      UPDATE mcp_spend_reservations
+         SET status = 'settled',
+             actual_cents = ${actualCents},
+             settled_at = now()
+       WHERE client_id = ${clientId}
+         AND job_id = ${jobId}
+         AND status = 'pending'
+      RETURNING model, provider
+    `;
+    if (rows.length > 1) {
+      throw new Error(`job ${jobId} has multiple pending spend reservations`);
+    }
+    if (rows.length === 1) {
+      const row = rows[0]!;
+      await sql`
+        INSERT INTO mcp_spend_log
+          (client_id, token_name, operation, spend_cents, provider, model)
+        VALUES
+          (${clientId}, ${null}, ${operation}, ${actualCents},
+           ${String(row.provider)}, ${String(row.model)})
+      `;
+    }
+    return rows.length;
+  });
+}
+
 /** Read the per-client cap from oauth_clients.budget_usd_per_day. Returns
  *  `null` when no cap is set (legacy clients pre-v83). */
 export async function getClientDailyCapCents(

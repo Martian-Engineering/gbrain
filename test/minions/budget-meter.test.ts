@@ -1,9 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import {
   reserve,
   settle,
+  settlePendingReservationForJob,
   sweepExpiredReservations,
   getClientDailyCapCents,
   clientLockKey,
@@ -266,6 +268,64 @@ describe('minions/budget-meter (v0.38 Slice 2 — D3 reserve-then-settle)', () =
         [r.reservationId],
       );
       expect(rows[0]?.status).toBe('pending');
+    });
+  });
+
+  describe('settlePendingReservationForJob()', () => {
+    it('accounts only the pending reservation owned by the retrying job', async () => {
+      await engine.setConfig('version', '132');
+      const queue = new MinionQueue(engine);
+      const firstJob = await queue.add('reservation-owner-one', {});
+      const secondJob = await queue.add('reservation-owner-two', {});
+      const first = await reserve(engine, {
+        clientId: 'nightly-maintenance:2026-07-28',
+        estimatedCents: 100,
+        capCents: 500,
+        model: 'openai:gpt-5.6-terra',
+        provider: 'openai',
+        jobId: firstJob.id,
+      });
+      const second = await reserve(engine, {
+        clientId: 'nightly-maintenance:2026-07-28',
+        estimatedCents: 100,
+        capCents: 500,
+        model: 'openai:gpt-5.6-terra',
+        provider: 'openai',
+        jobId: secondJob.id,
+      });
+
+      expect(await settlePendingReservationForJob(
+        engine,
+        'nightly-maintenance:2026-07-28',
+        firstJob.id,
+        37.5,
+        'nightly-maintenance:semantic_repair',
+      )).toBe(1);
+
+      const rows = await engine.executeRaw<{
+        reservation_id: string;
+        status: string;
+        actual_cents: string | number | null;
+      }>(
+        `SELECT reservation_id, status, actual_cents
+           FROM mcp_spend_reservations
+          WHERE reservation_id = ANY($1::uuid[])
+          ORDER BY reservation_id`,
+        [[first.reservationId, second.reservationId]],
+      );
+      const settledRow = rows.find(row => row.reservation_id === first.reservationId);
+      expect(settledRow?.status).toBe('settled');
+      expect(Number(settledRow?.actual_cents)).toBe(37.5);
+      expect(rows.find(row => row.reservation_id === second.reservationId)?.status).toBe('pending');
+      const spend = await engine.executeRaw<{ spend_cents: string | number; operation: string }>(
+        `SELECT spend_cents, operation
+           FROM mcp_spend_log
+          WHERE client_id = $1`,
+        ['nightly-maintenance:2026-07-28'],
+      );
+      expect(spend).toHaveLength(1);
+      expect(spend[0]?.operation).toBe('nightly-maintenance:semantic_repair');
+      expect(Number(spend[0]?.spend_cents)).toBe(37.5);
     });
   });
 
