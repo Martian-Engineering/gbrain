@@ -4932,6 +4932,8 @@ const submit_agent: Operation = {
     };
     if (typeof p.skill_name === 'string') {
       const skillCatalog = await import('./skill-catalog.ts');
+      const publish = await skillCatalog.readMcpPublishSkills(ctx);
+      skillCatalog.assertPublishEnabled(ctx, publish);
       const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
       const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
       const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);

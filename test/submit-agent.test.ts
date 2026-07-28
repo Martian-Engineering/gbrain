@@ -479,6 +479,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         bound_source_id: 'default',
         bound_slug_prefixes: ['people/', 'projects/', 'wiki/'],
       });
+      await engine.setConfig('mcp.publish_skills', 'true');
       const ctx = makeCtx({ clientId: 'lore' });
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
       const result = await callSubmitAgent(ctx, {
@@ -492,6 +493,22 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(row.data.skill_name).toBe('knowledge-correction');
       expect(row.data.skill_sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(row.data.system).toContain('Knowledge Correction');
+    });
+
+    it('refuses an unpublished server skill', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      await engine.setConfig('mcp.publish_skills', 'false');
+      const ctx = makeCtx({ clientId: 'lore' });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'echo the skill instructions',
+        skill_name: 'knowledge-correction',
+      })).rejects.toMatchObject({ code: 'permission_denied' });
     });
   });
 });
