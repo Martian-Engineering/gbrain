@@ -3,6 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   makeNightlyMaintenanceHandler,
   nightlyContradictionQueries,
+  nightlyProbeSearchOptions,
   type NightlyMaintenanceDependencies,
 } from '../src/core/minions/handlers/nightly-maintenance.ts';
 import { wholeCentReservation } from '../src/core/minions/nightly-maintenance.ts';
@@ -413,6 +414,17 @@ describe('nightly maintenance root handler', () => {
 });
 
 describe('nightly contradiction queries', () => {
+  test('disables unpriced reranking under the shared hard budget', () => {
+    expect(nightlyProbeSearchOptions(3)).toEqual({
+      limit: 3,
+      reranker: {
+        enabled: false,
+        topNIn: 0,
+        topNOut: null,
+      },
+    });
+  });
+
   test('deduplicates, sorts, and excludes resolved references', () => {
     const audit: BacklinksResult = {
       ...cleanAudit,

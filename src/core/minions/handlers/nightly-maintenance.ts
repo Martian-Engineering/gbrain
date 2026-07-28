@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../engine.ts';
+import { hybridSearch } from '../../search/hybrid.ts';
+import type { SearchOpts } from '../../types.ts';
 import type { OperationContext } from '../../operations.ts';
 import { operationsByName } from '../../operations.ts';
 import { loadConfigWithEngine } from '../../config.ts';
@@ -180,6 +182,18 @@ export function nightlyContradictionQueries(
   return [...queries].sort().slice(0, PROBE_MAX_QUERIES);
 }
 
+/** Keep nightly probe retrieval inside the hard cap without an unpriced reranker. */
+export function nightlyProbeSearchOptions(limit: number): SearchOpts {
+  return {
+    limit,
+    reranker: {
+      enabled: false,
+      topNIn: 0,
+      topNOut: null,
+    },
+  };
+}
+
 /** Convert a terminal child job into the strict nightly receipt shape. */
 function childResult(job: MinionJob): NightlyRepairAgentResult {
   if (job.status !== 'completed' || !job.result || typeof job.result !== 'object') {
@@ -317,6 +331,8 @@ const DEFAULT_DEPENDENCIES = (
       hardBudget: true,
       yesOverride: true,
       abortSignal: job.signal,
+      searchFn: (searchEngine, query, opts) =>
+        hybridSearch(searchEngine, query, nightlyProbeSearchOptions(opts.limit)),
     });
     await writeRunRow(probeEngine, result.report, result.report.duration_ms);
     return result;
