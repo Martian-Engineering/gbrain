@@ -73,6 +73,9 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // Nightly maintenance can launch paid, source-bound write agents. Only the
   // local operator scheduler may create the root job.
   'nightly-maintenance',
+  // Source-scoped deterministic repair writes derived links and timeline rows.
+  // Only the nightly root or an explicit trusted operator may submit it.
+  'link_repair',
 ]);
 
 /** Check a job name against the protected set. Normalizes whitespace first. */

@@ -232,14 +232,21 @@ function resolvedTarget(finding: LinkValidationFinding): string | null {
  */
 export async function auditGraphBacklinks(
   engine: BrainEngine,
-  opts: { sourceId?: string } = {},
+  opts: { sourceId?: string; prefix?: string; types?: string[] } = {},
 ): Promise<BacklinksResult> {
   const scope = opts.sourceId ? { sourceId: opts.sourceId } : {};
   const pages: Page[] = [];
   const batchSize = 100;
   for (let offset = 0; ; offset += batchSize) {
-    const batch = await engine.listPages({ ...scope, sort: 'slug', limit: batchSize, offset });
-    pages.push(...batch);
+    const batch = await engine.listPages({
+      ...scope,
+      ...(opts.prefix ? { slugPrefix: opts.prefix } : {}),
+      sort: 'slug',
+      limit: batchSize,
+      offset,
+    });
+    const allowedTypes = opts.types ? new Set(opts.types) : undefined;
+    pages.push(...(allowedTypes ? batch.filter(page => allowedTypes.has(page.type)) : batch));
     if (batch.length < batchSize) break;
   }
 

@@ -1690,6 +1690,11 @@ export async function registerBuiltinHandlers(
     });
   });
 
+  worker.register('link_repair', async (job) => {
+    const { makeLinkRepairHandler } = await import('../core/minions/handlers/link-repair.ts');
+    return makeLinkRepairHandler(engine)(job);
+  });
+
   // Local patch 2026-06-11: durable facts:absorb. One-shot CLI processes
   // (capture/put/sync) can't finish the extraction chat before their exit
   // drain aborts it, so backstop.ts submits this job instead and the
