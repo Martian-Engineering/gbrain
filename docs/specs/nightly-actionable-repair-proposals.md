@@ -1,37 +1,43 @@
-# Nightly actionable repair proposals
+# Autonomous nightly semantic repair
 
 ## Objective
 
-Make the GBrain nightly worker produce reviewable semantic-repair decisions
-with the quality demonstrated by the controlled Terra/high corpus sample.
+Make the GBrain nightly worker autonomously investigate and correct corpus
+findings with `openai:gpt-5.6-terra` at `high` reasoning.
+
+The agent may choose a replacement using normal source-scoped GBrain tools.
+The manifest bounds the finding, source, page, and action class; it does not
+need to name the semantic answer in advance.
 
 The worker must:
 
-- identify a unique canonical replacement and the exact edit when evidence
-  supports one;
-- distinguish a missing source from a replaceable reference;
-- retain candidate evidence, confidence, rationale, and unresolved questions;
-- support an operator proposal-only run with zero page writes;
-- keep recurring nightly operation write-enabled;
-- charge every run mode to the same 1,500-cent UTC-day budget.
+- apply high-confidence, evidence-supported corrections immediately;
+- preserve exact source and page write fences;
+- retain the agent's evidence and decision in the nightly report;
+- independently validate every page mutation and roll it back on failure;
+- record missing-source and unresolved outcomes without requesting review;
+- keep total model spend at or below 1,500 cents per UTC day.
 
 The first production acceptance corpus is the three unresolved references in
 the `martian` source on 2026-07-28:
 
-1. `companies/lucky-strike-entertainment` should propose
+1. `companies/lucky-strike-entertainment` should be replaced with
    `companies/lucky-strike`.
-2. The missing Michael onboarding meeting should recommend source recovery.
-3. Gmail thread `199e999cef850b78` should recommend source recovery.
+2. The missing Michael onboarding meeting should be classified
+   `recover_source` without repointing its citation.
+3. Gmail thread `199e999cef850b78` should be classified `recover_source`
+   without repointing its five citations.
 
 ## Tech stack
 
 - Bun and TypeScript
 - Existing Minions PostgreSQL/PGLite job and progress storage
 - Existing GBrain gateway-native agent loop
-- `openai:gpt-5.6-terra` with `high` reasoning
-- Existing shared spend reservation and settlement ledger
+- Existing nightly spend reservation and settlement ledger
+- Existing page-version, deterministic link-validation, lint, and rollback
+  paths
 
-No dependency changes are permitted.
+No dependency or database-schema changes are permitted.
 
 ## Commands
 
@@ -39,58 +45,51 @@ Focused tests:
 
 ```sh
 bun test \
-  test/nightly-maintenance-contract.test.ts \
+  test/nightly-repair-decision.test.ts \
   test/nightly-repair-agent.test.ts \
   test/nightly-maintenance-handler.test.ts \
   test/nightly-semantic-repair-skill.test.ts
 ```
 
-Type check:
+Type check and repository validation:
 
 ```sh
 bun run typecheck
-```
-
-Repository validation:
-
-```sh
 bun run check:all
 ```
 
-Controlled proposal-only production run:
+Controlled production run, with the recurring timer disabled:
 
 ```sh
 gbrain jobs nightly-maintenance \
-  --mode proposal-only \
-  --request-id operator-review-YYYYMMDD-HHMM \
   --sources martian \
   --budget-cents 1500 \
   --max-page-mutations 10
 ```
 
-The exact CLI spelling above is part of this specification.
-
 ## Project structure
 
+- `src/core/minions/nightly-repair-decision.ts`
+  - strict model-output validation and normalized decision types
 - `src/core/minions/nightly-maintenance.ts`
-  - run mode, run identity, shared budget identity, report types
+  - durable receipt and report types
 - `src/core/minions/handlers/nightly-repair-agent.ts`
-  - decision parsing, tool fence, verification, child receipt
-- `src/core/minions/handlers/nightly-maintenance.ts`
-  - root orchestration, checkpointing, durable decision reporting
-- `src/commands/jobs.ts`
-  - operator CLI flags
+  - tool fence, autonomous execution, verification, rollback, receipts
 - `skills/nightly-semantic-repair/SKILL.md`
-  - agent research and output contract
-- `test/nightly-*.test.ts`
-  - contract, child, root, and skill regression coverage
+  - investigation, action, confidence, and output contract
+- `test/nightly-repair-decision.test.ts`
+  - decision-parser contract tests
+- `test/nightly-repair-agent.test.ts`
+  - autonomous write/defer/rollback tests
+- `test/nightly-semantic-repair-skill.test.ts`
+  - agent instruction regression tests
 - `docs/guides/nightly-maintenance.md`
-  - operator workflow
+  - operator workflow and outcome taxonomy
 
 ## Code style
 
-Use explicit discriminated unions and small validators. The decision contract
-must make invalid combinations unrepresentable after parsing.
+Use explicit discriminated unions and small validators. Invalid model output
+must not reach verification or reporting.
 
 ```ts
 export type NightlyRepairDecision =
@@ -112,37 +111,13 @@ Public functions and types require purpose-oriented docstrings. Private
 validators require comments when their contract is not evident from the name.
 Do not disable lint rules.
 
-## Behavioral contract
+## Decision contract
 
-### Run identity
-
-`NightlyMaintenanceInput` gains:
-
-```ts
-mode: 'apply' | 'proposal_only';
-request_id: string | null;
-```
-
-- Timer/default mode is `apply`.
-- `proposal_only` requires an operator-supplied request ID.
-- Apply run ID remains `nightly-maintenance:<UTC date>`.
-- Preview run ID is
-  `nightly-maintenance:<UTC date>:proposal:<request-id>`.
-- Every mode uses budget client
-  `nightly-maintenance:<UTC date>`.
-- Request IDs are bounded safe identifiers and cannot contain `:` or path
-  separators.
-
-Thus a preview does not collide with the scheduled root, while repeated
-experiments cannot obtain another daily allowance.
-
-### Decision schema
-
-Every semantic child returns a strict JSON receipt containing:
+Every semantic child returns one JSON object:
 
 ```json
 {
-  "status": "applied | proposal | failed",
+  "status": "applied | deferred | failed",
   "decision": "replace_reference | recover_source | leave_unresolved | update_frontmatter",
   "source_id": "martian",
   "page_slug": "people/michael-noronha",
@@ -163,146 +138,164 @@ Every semantic child returns a strict JSON receipt containing:
   "exact_edit_description": "Replace only the link target.",
   "rationale": "Why this is the canonical entity.",
   "confidence": 0.99,
-  "unresolved_questions": []
+  "unresolved_questions": [],
+  "operations": ["get_page", "search", "put_page", "validate_links"],
+  "verification": {
+    "page_reread": true,
+    "links_validated": true
+  }
 }
 ```
 
 The server validates:
 
-- immutable source, page, and manifest identity;
+- immutable source, page, manifest, and broken-reference identity;
 - supported status and decision combinations;
 - confidence values in `[0, 1]`;
-- bounded candidate and evidence counts;
+- bounded candidate, evidence, operation, and question counts;
 - bounded string sizes;
-- source-local candidate existence for `replace_reference`;
 - `proposed_replacement` is present only for `replace_reference`;
 - the replacement appears among the candidate slugs;
-- the broken reference matches the manifest finding.
+- `applied` is permitted only for a write decision;
+- `recover_source` and `leave_unresolved` are always no-write outcomes.
 
-The normalized decision is retained in:
+The complete normalized decision is retained in the child result, root
+checkpoint, and final nightly report.
 
-- the child result;
-- `progress.semantic_receipts`;
-- the semantic-repair checkpoint summary;
-- the final root report.
+## Autonomous action policy
 
-### Proposal-only mode
+The initial automatic threshold is `0.90`.
 
-- Semantic children receive read tools only.
-- `put_page` and every other write operation are absent.
-- The child researches each finding even when its normal manifest disposition
-  is `repair`.
-- An unchanged page plus a valid decision is a passed semantic outcome.
-- The handler does not create a page version/snapshot in this mode.
-- Root deterministic link repair remains non-semantic and may continue its
-  existing safe behavior; the acceptance corpus is captured after that phase.
-- The root report states `mode: proposal_only` and records zero semantic page
-  mutations.
+For `replace_reference`, the agent may write only when:
 
-### Apply mode
+- it recommends exactly one replacement;
+- its overall confidence is at least `0.90`;
+- the replacement is present in its candidate evidence;
+- evidence supports identity, not merely topical similarity;
+- no credible conflicting candidate remains;
+- the target page is active and visible in the same source;
+- the edit changes only the diagnosed page and preserves unrelated content.
 
-- Preserve exact source and page tool fences.
-- Preserve prewrite version capture, rollback, and deterministic post-write
-  verification.
-- The agent researches before choosing whether to write.
-- `applied` must include the same evidence-rich decision that justified the
-  edit.
-- A valid `recover_source` or `leave_unresolved` decision with no mutation is
-  retained as a passed proposal outcome, not reported as
-  `failed_rolled_back`.
-- Manifest freshness is an authoritative server precondition. The skill tells
-  the model not to compare the manifest semantic hash to `get_page`'s
-  `content_hash`.
+The numerical threshold is necessary but not sufficient. The server also
+requires the original broken reference to disappear, the resulting references
+to validate, the semantic page hash to change, and frontmatter lint to pass.
+Any failed check restores the complete pre-write snapshot.
 
-### Outcome taxonomy
+The agent must return:
 
-- `replace_reference`
-  - one concrete replacement and exact edit;
-  - usable as a future Lore approval card;
-  - apply mode may write when the agent determines the evidence is unique.
-- `recover_source`
-  - the original provenance object appears missing or was not ingested;
-  - no page rewrite;
-  - future Lore presentation is maintenance work, not content approval.
-- `leave_unresolved`
-  - no safe replacement and no specific recoverable source;
-  - retained in diagnostics, not promoted as a review card.
-- `update_frontmatter`
-  - concrete frontmatter correction governed by existing validation.
+- `applied + replace_reference` after a successful high-confidence write;
+- `deferred + recover_source` when the cited source itself is unavailable and
+  related pages do not substantiate the claim;
+- `deferred + leave_unresolved` when evidence is insufficient and no specific
+  source-recovery path is supported;
+- `failed` only for an execution failure rather than a semantic abstention.
+
+No outcome requires human approval. Deferred outcomes remain visible in the
+maintenance report and can become inputs to future recovery automation.
+
+## Tool contract
+
+For repair-disposition link manifests, the child receives:
+
+- `get_page`
+- `search`
+- `query`
+- `resolve_slugs`
+- `validate_links`
+- `get_active_schema_pack`
+- `put_page`
+
+The child is bound to the finding's source and exact affected page slug.
+Search and read results may inform the semantic choice; they do not permit
+writing another page.
+
+For ambiguous, blocked, or graph-parity manifests, `put_page` remains absent.
+
+The current slice does not add Gmail or Granola connector operations to the
+agent allowlist. Those cases are classified autonomously as `recover_source`;
+executing recovery is separate follow-up work because normal GBrain agent
+tools cannot currently perform provider re-ingestion.
+
+## Hash ownership
+
+The server verifies manifest freshness before the agent runs and verifies the
+semantic page hash after it runs. The agent must not compare the manifest's
+semantic hash with `get_page.content_hash`; they are not an agent-side
+authorization check.
 
 ## Testing strategy
 
-Use TDD and keep the focused tests small.
+Use test-driven development.
 
-1. Contract tests:
-   - preview run and scheduled run have different run IDs;
-   - both use the same daily budget client ID;
-   - proposal-only requires a safe request ID;
-   - default mode remains apply.
-2. Receipt parser tests:
-   - normalize a unique replacement result;
-   - normalize source-recovery and unresolved results;
-   - reject invalid confidence, oversized evidence, mismatched identity, and
-     invalid decision/status combinations.
-3. Child tests:
-   - proposal-only receives no write tool;
-   - proposal-only creates no snapshot and accepts an unchanged page;
-   - apply mode preserves write verification and rollback;
-   - apply-mode recovery is retained without false rollback failure.
-4. Root tests:
-   - full decisions survive checkpoints and retries;
-   - proposal counts and decisions appear in the final report;
-   - a retry does not resubmit a completed manifest.
-5. Skill tests:
-   - require candidate evidence and exact edits;
-   - explain the server-owned semantic hash;
-   - distinguish source recovery from replacement.
-6. Production acceptance:
-   - deploy with the timer disabled;
-   - run `proposal-only` against `martian`;
-   - confirm all three expected outcome classes;
-   - confirm zero page hash changes;
-   - confirm settled plus pending spend never exceeds 1,500 cents.
+1. Decision parser:
+   - normalize a unique high-confidence replacement;
+   - normalize source-recovery and unresolved outcomes;
+   - reject low-confidence `applied`, invalid candidates, oversized evidence,
+     and mismatched identity.
+2. Child handler:
+   - Terra/high receives normal research tools and exact-page `put_page`;
+   - high-confidence applied repair passes deterministic verification;
+   - source recovery with an unchanged page is retained as a passed outcome;
+   - low-confidence or malformed applied output rolls back;
+   - cost is reserved and settled through the shared nightly ledger.
+3. Root handler:
+   - complete decisions survive checkpoints and retries;
+   - a completed manifest does not trigger a second paid call;
+   - deferred outcomes do not consume the mutation limit;
+   - final report retains the complete decision.
+4. Skill:
+   - explicitly authorizes evidence-based semantic choice;
+   - requires immediate application when the policy is satisfied;
+   - distinguishes missing-source recovery from replacement;
+   - forbids model-side hash comparison.
+5. Production:
+   - run with the timer disabled;
+   - inspect every changed page and deferred result;
+   - confirm the Lucky Strike edit survives validation;
+   - confirm both missing provenance targets are not repointed;
+   - confirm actual plus reserved spend stays within 1,500 cents.
 
 ## Boundaries
 
 Always:
 
-- retain the existing source/page/tool fences;
 - reserve budget before every paid call;
-- persist receipts after each completed child;
-- validate all model output before reporting it;
-- keep proposal-only mode unable to write by construction.
+- retain source and exact-page write fences;
+- snapshot before any potentially writing agent;
+- validate model output before trusting its status;
+- verify and roll back every mutation;
+- preserve complete agent evidence in the report.
 
 Ask first:
 
-- adding a new database table;
+- adding provider-specific source-recovery operations;
 - enabling the recurring timer;
-- automatically running Gmail or Granola re-ingestion;
-- changing the `$15` limit or ten-page mutation ceiling.
+- changing the `$15` limit, confidence threshold, or mutation ceiling;
+- adding a database table or dependency.
 
 Never:
 
-- trust model-reported confidence without retaining its evidence;
-- let a request ID create a new daily budget identity;
-- allow proposal-only mode to receive `put_page`;
-- replace a provenance link with a merely related source;
-- hide missing-source conditions by removing citations automatically.
+- use raw confidence as the only condition for retaining a write;
+- replace provenance with a merely related source;
+- let tool results broaden the writable source or page;
+- report semantic abstention as an execution failure;
+- hide missing-source conditions by deleting citations automatically.
 
 ## Success criteria
 
-- GBrain's own worker produces materially equivalent decisions to the
-  controlled Codex sample for the three live findings.
-- Lucky Strike yields a concrete `replace_reference` decision for
-  `companies/lucky-strike`.
-- The unavailable Granola meeting and Gmail thread yield `recover_source`.
-- No semantic page is written during the controlled proposal-only run.
-- The root report retains all candidates, evidence, exact edits, rationale,
-  confidence, and questions.
-- The run uses Terra/high through the GBrain gateway loop.
-- UTC-day GBrain model spend remains at or below `$15`.
+- GBrain's own nightly worker produces materially equivalent decisions to the
+  controlled Codex sample.
+- Lucky Strike is corrected automatically to `companies/lucky-strike`.
+- The unavailable Granola meeting and Gmail thread are classified
+  `recover_source` without page mutation.
+- Every retained mutation passes source, hash, link, and schema validation.
+- Every failed mutation is restored from its pre-write snapshot.
+- The report retains candidates, evidence, exact edits, rationale, confidence,
+  questions, operations, and verification.
+- The run uses Terra/high and total UTC-day GBrain model spend remains at or
+  below `$15`.
 
 ## Open questions
 
-None required for implementation. Automated source recovery and Lore
-presentation remain separate follow-up work.
+Provider-specific automatic source recovery remains follow-up work. It is not
+required for autonomous high-confidence page correction.
