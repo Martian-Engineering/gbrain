@@ -2,7 +2,7 @@
  * Parse and validate `provider:model` strings against the recipe registry.
  */
 
-import type { ParsedModelId, Recipe, TouchpointKind, ChatTouchpoint, EmbeddingTouchpoint, ExpansionTouchpoint, RerankerTouchpoint } from './types.ts';
+import type { ParsedModelId, Recipe, TouchpointKind, ChatTouchpoint, EmbeddingTouchpoint, ExpansionTouchpoint, ReasoningEffort, RerankerTouchpoint } from './types.ts';
 import { getRecipe, RECIPES } from './recipes/index.ts';
 import { AIConfigError } from './errors.ts';
 
@@ -75,6 +75,16 @@ export function resolveRecipe(modelId: string): { parsed: ParsedModelId; recipe:
     return { parsed: { providerId: parsed.providerId, modelId: canonical }, recipe };
   }
   return { parsed, recipe };
+}
+
+/** Return whether a model explicitly supports the requested reasoning level. */
+export function supportsReasoningEffort(modelId: string, effort: ReasoningEffort): boolean {
+  try {
+    const { parsed, recipe } = resolveRecipe(modelId);
+    return recipe.touchpoints.chat?.reasoning_efforts?.[parsed.modelId]?.includes(effort) === true;
+  } catch {
+    return false;
+  }
 }
 
 type KnownTouchpointKey = 'embedding' | 'expansion' | 'chat' | 'reranker';

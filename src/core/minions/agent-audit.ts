@@ -10,6 +10,7 @@
  *   - ts: ISO 8601 UTC
  *   - client_id: the OAuth client that submitted
  *   - model: the resolved provider:model string
+ *   - reasoning_effort: optional per-job OpenAI reasoning level
  *   - bound_tools: the (filtered) tools the agent could call
  *   - bound_source: the bound source_id from the client's registration
  *   - slug_prefixes: the put_page namespace allowlist
@@ -31,12 +32,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { gbrainPath } from '../config.ts';
+import type { ReasoningEffort } from '../ai/types.ts';
 
 export interface AgentAuditEvent {
   ts: string;
   client_id: string;
   job_id: number;
   model: string;
+  reasoning_effort?: ReasoningEffort;
   bound_tools: string[];
   bound_source: string | null;
   slug_prefixes: string[];

@@ -44,9 +44,10 @@ import type {
   MultimodalInput,
   ParsedModelId,
   Recipe,
+  ReasoningEffort,
   TouchpointKind,
 } from './types.ts';
-import { resolveRecipe, assertTouchpoint, parseModelId } from './model-resolver.ts';
+import { resolveRecipe, assertTouchpoint, parseModelId, supportsReasoningEffort } from './model-resolver.ts';
 import { resolveModel, TIER_DEFAULTS } from '../model-config.ts';
 import type { BrainEngine } from '../engine.ts';
 import { dimsProviderOptions } from './dims.ts';
@@ -2633,6 +2634,8 @@ export interface ChatOpts {
   tools?: ChatToolDef[];
   maxTokens?: number;
   abortSignal?: AbortSignal;
+  /** Native OpenAI reasoning level for this call. */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Anthropic-specific: cache the system prompt + last tool def. Silently
    * ignored on providers without `supports_prompt_cache`.
@@ -3028,6 +3031,12 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 
   const modelStr = modelStrEarly;
   const { model, recipe, modelId } = await resolveChatProvider(modelStr);
+  if (opts.reasoningEffort && !supportsReasoningEffort(modelStr, opts.reasoningEffort)) {
+    throw new AIConfigError(
+      `Model "${modelStr}" does not support reasoning effort "${opts.reasoningEffort}".`,
+      'Choose a reasoning-capable model and one of its declared reasoning levels.',
+    );
+  }
   const cfg = requireConfig();
 
   const supportsCache = recipe.touchpoints.chat?.supports_prompt_cache === true;
@@ -3074,6 +3083,14 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
     if (promptCacheKey) providerOptions.openai = { promptCacheKey };
   }
   applyConfiguredChatProviderOptions(providerOptions, cfg, recipe.id, modelId);
+  // An explicit job request is more specific than server-wide configuration.
+  // The OpenAI Responses adapter forwards this as reasoning.effort.
+  if (recipe.implementation === 'native-openai' && opts.reasoningEffort) {
+    providerOptions.openai = deepMergeRecords(
+      isPlainObject(providerOptions.openai) ? providerOptions.openai : undefined,
+      { reasoningEffort: opts.reasoningEffort },
+    );
+  }
 
   // Derive ONE canonical cache-control value AFTER config merging and reuse
   // it for every breakpoint (system block, last tool def, call-level). If
@@ -3258,6 +3275,8 @@ export interface ToolLoopOpts {
   /** Per-turn max output tokens. Default 4096. */
   maxTokens?: number;
   abortSignal?: AbortSignal;
+  /** Native OpenAI reasoning level applied to every turn. */
+  reasoningEffort?: ReasoningEffort;
   /** Apply Anthropic cache_control to system + last tool. Silently ignored elsewhere. */
   cacheSystem?: boolean;
 
@@ -3371,6 +3390,7 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
         maxTokens,
         abortSignal: opts.abortSignal,
         cacheSystem: opts.cacheSystem,
+        reasoningEffort: opts.reasoningEffort,
       });
     } catch (err) {
       opts.onHeartbeat?.('llm_call_failed', {

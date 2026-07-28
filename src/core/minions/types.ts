@@ -13,6 +13,8 @@
  *   await worker.start();
  */
 
+import type { ReasoningEffort } from '../ai/types.ts';
+
 // --- Status & Type Unions ---
 
 export type MinionJobStatus =
@@ -415,6 +417,8 @@ export interface SubagentHandlerData {
   subagent_def?: string;
   /** Anthropic model id. Defaults to sonnet at handler resolution time. */
   model?: string;
+  /** Native OpenAI reasoning level applied to every gateway-loop turn. */
+  reasoning_effort?: ReasoningEffort;
   /** Max assistant turns before the loop fails with stop_reason='max_turns'. */
   max_turns?: number;
   /**

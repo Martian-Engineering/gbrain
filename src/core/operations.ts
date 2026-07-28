@@ -8,6 +8,8 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
+import { isReasoningEffort, REASONING_EFFORTS } from './ai/types.ts';
+import { supportsReasoningEffort } from './ai/model-resolver.ts';
 import type { PageType } from './types.ts';
 import type { TakeMiningStatus } from './take-mining-control.ts';
 import { importFromContent } from './import-file.ts';
@@ -4748,6 +4750,11 @@ const submit_agent: Operation = {
   params: {
     prompt: { type: 'string', required: true, description: 'User prompt for the agent' },
     model: { type: 'string', description: 'provider:model string (defaults to models.tier.subagent)' },
+    reasoning_effort: {
+      type: 'string',
+      enum: [...REASONING_EFFORTS],
+      description: 'Native OpenAI reasoning effort for every agent turn',
+    },
     allowed_tools: { type: 'array', description: 'Subset of bound_tools the agent may invoke', items: { type: 'string' } },
     allowed_slug_prefixes: { type: 'array', description: 'Subset of bound_slug_prefixes for put_page writes', items: { type: 'string' } },
     max_turns: { type: 'number', description: 'Max LLM turns (default 20, hard cap 100)' },
@@ -4814,6 +4821,28 @@ const submit_agent: Operation = {
       }
     }
     const requestedSlugPrefixes = (p.allowed_slug_prefixes as string[] | undefined) ?? boundSlugPrefixes ?? [];
+    if (p.reasoning_effort !== undefined && !isReasoningEffort(p.reasoning_effort)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: reasoning_effort must be one of none, low, medium, high, xhigh, max.',
+      );
+    }
+    if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: reasoning_effort requires an explicit compatible model.',
+      );
+    }
+    if (
+      isReasoningEffort(p.reasoning_effort)
+      && typeof p.model === 'string'
+      && !supportsReasoningEffort(p.model, p.reasoning_effort)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        `submit_agent: model "${p.model}" does not support reasoning_effort "${p.reasoning_effort}".`,
+      );
+    }
     if (boundSlugPrefixes !== null) {
       for (const sp of requestedSlugPrefixes) {
         if (!boundSlugPrefixes.some(bp => sp.startsWith(bp) || bp === sp)) {
@@ -4850,6 +4879,8 @@ const submit_agent: Operation = {
         bound_tools: boundTools,
         bound_source: boundSource,
         bound_max_concurrent: boundMaxConcurrent,
+        model: typeof p.model === 'string' ? p.model : '<default>',
+        reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
       };
     }
 
@@ -4867,6 +4898,7 @@ const submit_agent: Operation = {
       __owner_client_id: clientId,
     };
     if (typeof p.model === 'string') jobData.model = p.model;
+    if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
     const job = await queue.add(
       'subagent',
@@ -4884,6 +4916,7 @@ const submit_agent: Operation = {
         client_id: clientId,
         job_id: job.id,
         model: typeof p.model === 'string' ? p.model : '<default>',
+        reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : undefined,
         bound_tools: requestedTools,
         bound_source: boundSource,
         slug_prefixes: requestedSlugPrefixes,
