@@ -4984,6 +4984,7 @@ const submit_agent: Operation = {
       max_turns: Math.min((p.max_turns as number) ?? 20, 100),
       allowed_tools: requestedTools,
       allowed_slug_prefixes: requestedSlugPrefixes,
+      use_gateway_loop: true,
       __owner_client_id: clientId,
     };
     if (typeof p.skill_name === 'string') {

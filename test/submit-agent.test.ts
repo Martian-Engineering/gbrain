@@ -514,6 +514,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(data.allowed_tools).toEqual(['search']);
       expect(data.__owner_client_id).toBe('cursor');
       expect(data.source_id).toBe('default'); // auto-set from bound_source_id
+      expect(data.use_gateway_loop).toBe(true);
 
       // Audit file written.
       const auditFiles = fs.readdirSync(tmpAuditDir).filter(f => f.startsWith('agent-jobs-'));
