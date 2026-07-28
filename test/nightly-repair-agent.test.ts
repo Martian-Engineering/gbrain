@@ -3,6 +3,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import {
   makeNightlyRepairAgentHandler,
   submitNightlyRepairAgent,
+  verifyRepair,
   type NightlyRepairAgentDependencies,
 } from '../src/core/minions/handlers/nightly-repair-agent.ts';
 import type { MinionJobContext, SubagentResult } from '../src/core/minions/types.ts';
@@ -135,6 +136,32 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
 }
 
 describe('nightly repair agent', () => {
+  test('turns a malformed final receipt into failed verification', async () => {
+    const result = await verifyRepair(
+      {
+        async getPage() { return beforePage; },
+      } as unknown as BrainEngine,
+      manifest,
+      { page: beforePage, markdown: '# Before', version_id: 9 },
+      {
+        result: JSON.stringify({
+          status: 'proposal',
+          source_id: 'wiki',
+          page_slug: 'notes/example',
+          manifest_hash: 'wrong',
+        }),
+        turns_count: 1,
+        stop_reason: 'end_turn',
+        tokens: { in: 100, out: 10, cache_read: 0, cache_create: 0 },
+      } as SubagentResult,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'nightly-repair-agent: final receipt does not match the manifest',
+    });
+  });
+
   test('runs Terra high once, verifies, and emits a mutation receipt', async () => {
     const { deps, calls, settled } = dependencies();
     const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());

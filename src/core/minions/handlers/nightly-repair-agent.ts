@@ -242,16 +242,25 @@ function buildAgentData(
 }
 
 /** Verify the resulting page against the manifest and deterministic validators. */
-async function verifyRepair(
+export async function verifyRepair(
   engine: BrainEngine,
   manifest: SemanticRepairManifest,
   before: NightlyPageSnapshot,
   result: SubagentResult,
 ): Promise<NightlyRepairVerification> {
-  const receipt = parseAgentReceipt(result, manifest);
   const after = await engine.getPage(manifest.page_slug, { sourceId: manifest.source_id });
   if (!after) return { ok: false, after_hash: manifest.page_hash, reason: 'page missing after agent' };
   const afterHash = semanticRepairPageHash(after);
+  let receipt: ReturnType<typeof parseAgentReceipt>;
+  try {
+    receipt = parseAgentReceipt(result, manifest);
+  } catch (error) {
+    return {
+      ok: false,
+      after_hash: afterHash,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 
   if (manifest.disposition === 'proposal') {
     return {
