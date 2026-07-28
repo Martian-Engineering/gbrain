@@ -242,6 +242,35 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         }),
       ).rejects.toThrow(/slug_prefix "private\/" is not under any.*bound_slug_prefixes/);
     });
+
+    it('does not widen an exact slug binding into a recursive namespace', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor', dryRun: true });
+      await expect(
+        callSubmitAgent(ctx, {
+          prompt: 'go',
+          allowed_slug_prefixes: ['people/'],
+        }),
+      ).rejects.toThrow(/slug_prefix "people\/" is not under any.*bound_slug_prefixes/);
+    });
+
+    it('allows a recursive binding to narrow to a child namespace', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor', dryRun: true });
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'go',
+        allowed_slug_prefixes: ['people/team/'],
+      });
+      expect(result.dry_run).toBe(true);
+    });
   });
 
   describe('concurrency cap enforcement', () => {
