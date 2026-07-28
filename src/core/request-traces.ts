@@ -75,6 +75,7 @@ interface RequestTraceRow {
   status: string;
   params: unknown;
   created_at: string | Date;
+  cursor_created_at: string;
 }
 
 /** Encode a trace boundary without exposing its timestamp or row id directly. */
@@ -146,7 +147,11 @@ export async function listRequestTraces(
 
   params.push(limit + 1);
   const rows = await engine.executeRaw<RequestTraceRow>(
-    `SELECT id, operation, latency_ms, status, params, created_at
+    `SELECT id, operation, latency_ms, status, params, created_at,
+            to_char(
+              created_at AT TIME ZONE 'UTC',
+              'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+            ) AS cursor_created_at
        FROM mcp_request_log
       WHERE ${where.join(' AND ')}
       ORDER BY created_at ${direction === 'after' ? 'ASC' : 'DESC'},
@@ -163,16 +168,22 @@ export async function listRequestTraces(
   const entries = selected.map(row => normalizeTraceRow(row, resolveFields(row.operation)));
   const hasOlder = entries.length > 0 && (direction === 'after' || overflow);
   const hasNewer = entries.length > 0 && (direction === 'before' || (direction === 'after' && overflow));
-  const oldest = entries.at(-1);
-  const newest = entries[0];
+  const oldest = selected.at(-1);
+  const newest = selected[0];
 
   return {
     entries,
     older_cursor: hasOlder && oldest
-      ? encodeRequestTraceCursor({ createdAt: oldest.created_at, id: oldest.id })
+      ? encodeRequestTraceCursor({
+        createdAt: oldest.cursor_created_at,
+        id: Number(oldest.id),
+      })
       : null,
     newer_cursor: hasNewer && newest
-      ? encodeRequestTraceCursor({ createdAt: newest.created_at, id: newest.id })
+      ? encodeRequestTraceCursor({
+        createdAt: newest.cursor_created_at,
+        id: Number(newest.id),
+      })
       : null,
     has_older: hasOlder,
     has_newer: hasNewer,
@@ -245,12 +256,12 @@ function validateCursorShape(value: unknown): asserts value is RequestTraceCurso
   }
   if (
     typeof value.createdAt !== 'string'
-    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.createdAt)
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(value.createdAt)
   ) {
     throw new RequestTraceValidationError('Invalid request trace cursor');
   }
-  const parsed = new Date(value.createdAt);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value.createdAt) {
+  const milliseconds = `${value.createdAt.slice(0, -4)}Z`;
+  if (Number.isNaN(new Date(milliseconds).getTime())) {
     throw new RequestTraceValidationError('Invalid request trace cursor');
   }
 }

@@ -85,12 +85,12 @@ async function list(params: Record<string, unknown>): Promise<RequestTracePage> 
 describe('request trace cursors', () => {
   test('round-trips an opaque timestamp/id boundary', () => {
     const encoded = encodeRequestTraceCursor({
-      createdAt: '2026-07-28T17:00:00.000Z',
+      createdAt: '2026-07-28T17:00:00.000000Z',
       id: 42,
     });
     expect(encoded).not.toContain('2026-07-28');
     expect(decodeRequestTraceCursor(encoded)).toEqual({
-      createdAt: '2026-07-28T17:00:00.000Z',
+      createdAt: '2026-07-28T17:00:00.000000Z',
       id: 42,
     });
   });
@@ -99,7 +99,7 @@ describe('request trace cursors', () => {
     expect(() => decodeRequestTraceCursor('not-json')).toThrow(RequestTraceValidationError);
     expect(() => decodeRequestTraceCursor('x'.repeat(513))).toThrow(RequestTraceValidationError);
     const unexpected = Buffer.from(JSON.stringify({
-      createdAt: '2026-07-28T17:00:00.000Z',
+      createdAt: '2026-07-28T17:00:00.000000Z',
       id: 42,
       clientId: 'other-client',
     })).toString('base64url');
@@ -122,6 +122,37 @@ describe('list_request_traces', () => {
     const page = await list({ client_id: 'target-client', limit: 10 });
     expect(page.entries.map(entry => entry.id)).toEqual([third, second, first]);
     expect(JSON.stringify(page)).not.toContain('private_other_client_op');
+  });
+
+  test('preserves microsecond timestamp precision across page boundaries', async () => {
+    await insertTrace({
+      operation: 'oldest-microsecond',
+      createdAt: '2026-07-28T17:00:00.123001Z',
+    });
+    await insertTrace({
+      operation: 'middle-microsecond',
+      createdAt: '2026-07-28T17:00:00.123456Z',
+    });
+    await insertTrace({
+      operation: 'newest-microsecond',
+      createdAt: '2026-07-28T17:00:00.123999Z',
+    });
+
+    const newest = await list({ client_id: 'target-client', limit: 1 });
+    const middle = await list({
+      client_id: 'target-client',
+      limit: 1,
+      before: newest.older_cursor,
+    });
+    const oldest = await list({
+      client_id: 'target-client',
+      limit: 1,
+      before: middle.older_cursor,
+    });
+
+    expect(newest.entries[0]?.operation).toBe('newest-microsecond');
+    expect(middle.entries[0]?.operation).toBe('middle-microsecond');
+    expect(oldest.entries[0]?.operation).toBe('oldest-microsecond');
   });
 
   test('installs the client/time/id keyset index', async () => {
@@ -228,7 +259,7 @@ describe('list_request_traces', () => {
 
   test('rejects conflicting cursors', async () => {
     const cursor = encodeRequestTraceCursor({
-      createdAt: '2026-07-28T17:00:00.000Z',
+      createdAt: '2026-07-28T17:00:00.000000Z',
       id: 1,
     });
     await expect(list({
