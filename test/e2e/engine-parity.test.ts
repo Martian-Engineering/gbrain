@@ -727,22 +727,30 @@ describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', 
   });
 
   test('getLinks identical under sourceIds[] (all three endpoints scoped)', async () => {
-    const pg = (await pgEngine.getLinks('fed/doc', grant)).map(l => l.to_slug).sort();
-    const pglite = (await pgliteEngine.getLinks('fed/doc', grant)).map(l => l.to_slug).sort();
+    const qualify = (link: Awaited<ReturnType<BrainEngine['getLinks']>>[number]) => ({
+      from: `${link.from_source_id}/${link.from_slug}`,
+      to: `${link.to_source_id}/${link.to_slug}`,
+      origin: link.origin_slug ? `${link.origin_source_id}/${link.origin_slug}` : null,
+      context: link.context,
+    });
+    const pg = (await pgEngine.getLinks('fed/doc', grant)).map(qualify).sort((a, b) => a.context.localeCompare(b.context));
+    const pglite = (await pgliteEngine.getLinks('fed/doc', grant)).map(qualify).sort((a, b) => a.context.localeCompare(b.context));
     expect(pg).toEqual(pglite);
-    expect([...new Set(pg)]).toEqual(['fed/target']); // far-endpoint 'fed/outside' excluded
+    expect([...new Set(pg.map(link => link.to))]).toEqual(['beta/fed/target']); // far-endpoint 'fed/outside' excluded
+    expect([...new Set(pg.map(link => link.from))]).toEqual(['beta/fed/doc']);
     // F1: origin_slug nulled identically on both engines when origin is out-of-grant.
-    const pgOrigins = (await pgEngine.getLinks('fed/doc', grant)).map(l => l.origin_slug ?? null);
-    const pgliteOrigins = (await pgliteEngine.getLinks('fed/doc', grant)).map(l => l.origin_slug ?? null);
-    expect(pgOrigins.sort()).toEqual(pgliteOrigins.sort());
-    expect(pgOrigins).not.toContain('fed/outside');
+    expect(pg.map(link => link.origin)).not.toContain('default/fed/outside');
   });
 
   test('getBacklinks identical under sourceIds[] (both endpoints scoped)', async () => {
-    const pg = (await pgEngine.getBacklinks('fed/doc', grant)).map(l => l.from_slug).sort();
-    const pglite = (await pgliteEngine.getBacklinks('fed/doc', grant)).map(l => l.from_slug).sort();
+    const qualify = (link: Awaited<ReturnType<BrainEngine['getBacklinks']>>[number]) => ({
+      from: `${link.from_source_id}/${link.from_slug}`,
+      to: `${link.to_source_id}/${link.to_slug}`,
+    });
+    const pg = (await pgEngine.getBacklinks('fed/doc', grant)).map(qualify);
+    const pglite = (await pgliteEngine.getBacklinks('fed/doc', grant)).map(qualify);
     expect(pg).toEqual(pglite);
-    expect(pg).toEqual(['fed/target']);
+    expect(pg).toEqual([{ from: 'beta/fed/target', to: 'beta/fed/doc' }]);
   });
 
   test('getTimeline identical under sourceIds[]', async () => {

@@ -187,7 +187,13 @@ describe('#2200 get_tags honors the federated grant', () => {
 describe('#2200 get_links honors the grant and scopes BOTH endpoints (D4A)', () => {
   test('[alpha,beta] returns the in-grant beta→beta link', async () => {
     const links = (await get_links.handler(remoteCtx(['alpha', 'beta']), { slug: 'secret/beta-doc' })) as any[];
-    expect(links.map(l => l.to_slug)).toContain('secret/beta-target');
+    const link = links.find(l => l.context === 'in-grant ctx');
+    expect(link).toMatchObject({
+      from_slug: 'secret/beta-doc',
+      from_source_id: 'beta',
+      to_slug: 'secret/beta-target',
+      to_source_id: 'beta',
+    });
   });
 
   test('[alpha,beta] does NOT leak the beta→default far-endpoint link', async () => {
@@ -207,6 +213,7 @@ describe('#2200 get_links honors the grant and scopes BOTH endpoints (D4A)', () 
     expect(originLeakLink).toBeDefined();
     // origin page 'default/only-doc' is out of the [alpha,beta] grant → origin_slug nulled.
     expect(originLeakLink.origin_slug ?? null).toBeNull();
+    expect(originLeakLink.origin_source_id ?? null).toBeNull();
     expect(links.map(l => l.origin_slug)).not.toContain('default/only-doc');
   });
 
@@ -223,14 +230,24 @@ describe('#2200 get_links honors the grant and scopes BOTH endpoints (D4A)', () 
     // reconcileLinks / validators depend on this — local CLI sees cross-source links.
     const ctx = ctxOf({ remote: false, sourceId: 'beta', auth: undefined });
     const links = (await get_links.handler(ctx, { slug: 'secret/beta-doc' })) as any[];
-    expect(links.map(l => l.to_slug)).toContain('default/only-doc'); // cross-source visible for trusted local
+    const crossSource = links.find(l => l.to_slug === 'default/only-doc');
+    expect(crossSource).toMatchObject({
+      from_source_id: 'beta',
+      to_source_id: 'default',
+    }); // cross-source visible for trusted local and unambiguous
   });
 });
 
 describe('#2200 get_backlinks honors the grant and scopes BOTH endpoints (D4A)', () => {
   test('[alpha,beta] returns the in-grant beta→beta backlink', async () => {
     const back = (await get_backlinks.handler(remoteCtx(['alpha', 'beta']), { slug: 'secret/beta-doc' })) as any[];
-    expect(back.map(l => l.from_slug)).toContain('secret/beta-target');
+    const link = back.find(l => l.context === 'in-grant back');
+    expect(link).toMatchObject({
+      from_slug: 'secret/beta-target',
+      from_source_id: 'beta',
+      to_slug: 'secret/beta-doc',
+      to_source_id: 'beta',
+    });
   });
 
   test('[alpha,beta] does NOT leak the default→beta far-referrer backlink', async () => {
@@ -289,6 +306,10 @@ describe('#2200 engine secondary-fetch methods honor sourceIds[]', () => {
   test('getLinks: sourceIds[] scopes both endpoints (no far-endpoint leak); precedence over scalar', async () => {
     const links = await engine.getLinks('secret/beta-doc', { sourceIds: ['alpha', 'beta'] });
     expect(links.map(l => l.to_slug)).toContain('secret/beta-target');
+    expect(links.find(l => l.context === 'in-grant ctx')).toMatchObject({
+      from_source_id: 'beta',
+      to_source_id: 'beta',
+    });
     expect(links.map(l => l.to_slug)).not.toContain('default/only-doc');
     expect(await engine.getLinks('secret/beta-doc', { sourceIds: ['alpha'] })).toEqual([]);
     // array beats scalar: scalar 'default' would surface the leak link; array ['beta'] must not.
@@ -300,6 +321,10 @@ describe('#2200 engine secondary-fetch methods honor sourceIds[]', () => {
   test('getBacklinks: sourceIds[] scopes both endpoints; precedence over scalar', async () => {
     const back = await engine.getBacklinks('secret/beta-doc', { sourceIds: ['alpha', 'beta'] });
     expect(back.map(l => l.from_slug)).toContain('secret/beta-target');
+    expect(back.find(l => l.context === 'in-grant back')).toMatchObject({
+      from_source_id: 'beta',
+      to_source_id: 'beta',
+    });
     expect(back.map(l => l.from_slug)).not.toContain('default/only-doc');
     const prec = await engine.getBacklinks('secret/beta-doc', { sourceId: 'default', sourceIds: ['beta'] });
     expect(prec.map(l => l.from_slug)).toEqual(['secret/beta-target']);
