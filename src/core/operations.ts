@@ -4787,6 +4787,10 @@ const submit_agent: Operation = {
     allowed_slug_prefixes: { type: 'array', description: 'Subset of bound_slug_prefixes for put_page writes', items: { type: 'string' } },
     max_turns: { type: 'number', description: 'Max LLM turns (default 20, hard cap 100)' },
     queue: { type: 'string', description: 'Queue name (default "default")' },
+    idempotency_key: {
+      type: 'string',
+      description: 'Caller-stable key that returns the same agent job for retries by this OAuth client',
+    },
   },
   mutating: true,
   scope: 'agent' as any,
@@ -4849,6 +4853,21 @@ const submit_agent: Operation = {
       }
     }
     const requestedSlugPrefixes = (p.allowed_slug_prefixes as string[] | undefined) ?? boundSlugPrefixes ?? [];
+    const callerIdempotencyKey = typeof p.idempotency_key === 'string'
+      ? p.idempotency_key.trim()
+      : undefined;
+    if (
+      p.idempotency_key !== undefined
+      && (!callerIdempotencyKey || callerIdempotencyKey.length > 200)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: idempotency_key must contain 1-200 characters.',
+      );
+    }
+    const queueIdempotencyKey = callerIdempotencyKey
+      ? `submit-agent:${clientId}:${callerIdempotencyKey}`
+      : undefined;
     if (p.reasoning_effort !== undefined && !isReasoningEffort(p.reasoning_effort)) {
       throw new OperationError(
         'invalid_params',
@@ -4879,6 +4898,24 @@ const submit_agent: Operation = {
             `submit_agent: slug_prefix "${sp}" is not under any of client ${clientId}'s bound_slug_prefixes.`,
           );
         }
+      }
+    }
+
+    // A retried caller key resolves before the concurrency cap so its own
+    // live job cannot turn a safe replay into a rate-limit failure.
+    if (!ctx.dryRun && queueIdempotencyKey) {
+      const existing = await sql`
+        SELECT id
+          FROM minion_jobs
+         WHERE idempotency_key = ${queueIdempotencyKey}
+         LIMIT 1
+      `;
+      if (existing.length > 0) {
+        return {
+          id: Number(existing[0]!.id),
+          name: 'subagent',
+          client_id: clientId,
+        };
       }
     }
 
@@ -4950,7 +4987,12 @@ const submit_agent: Operation = {
     const job = await queue.add(
       'subagent',
       jobData,
-      { queue: (p.queue as string) || 'default' },
+      {
+        queue: (p.queue as string) || 'default',
+        ...(queueIdempotencyKey
+          ? { idempotency_key: queueIdempotencyKey }
+          : {}),
+      },
       { allowProtectedSubmit: true },
     );
 
