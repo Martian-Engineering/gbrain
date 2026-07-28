@@ -1,0 +1,58 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { operations } from '../src/core/operations.ts';
+
+const skillPath = join(import.meta.dir, '..', 'skills', 'knowledge-correction', 'SKILL.md');
+const skill = readFileSync(skillPath, 'utf8');
+
+/** Extract one block-list field from the skill's YAML frontmatter. */
+function frontmatterList(field: string): string[] {
+  const frontmatter = skill.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? '';
+  const lines = frontmatter.split('\n');
+  const start = lines.findIndex(line => line === `${field}:`);
+  if (start < 0) return [];
+  const values: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const match = line.match(/^  - (.+)$/);
+    if (!match) break;
+    values.push(match[1]);
+  }
+  return values;
+}
+
+describe('knowledge-correction skill', () => {
+  test('covers every correction effect and compound page creation', () => {
+    for (const effect of [
+      'fix',
+      'changed',
+      'rename',
+      'same_thing',
+      'aka',
+      'connect',
+      'remove',
+      'create_or_enrich',
+    ]) {
+      expect(skill).toContain(`\`${effect}\``);
+    }
+  });
+
+  test('defaults to proposal mode and requires accepted approval before writes', () => {
+    expect(skill).toContain('Default to `propose`');
+    expect(skill).toContain('`mode: apply` and `approval_state: accepted`');
+    expect(skill).toContain('In propose mode, do not call mutating tools.');
+  });
+
+  test('requires a caller-supplied correction date instead of inventing one', () => {
+    expect(skill).toContain('correction_date: <caller-supplied YYYY-MM-DD>');
+    expect(skill).toContain('Never infer or');
+    expect(skill).toContain('invent the date');
+  });
+
+  test('declared tools resolve to canonical GBrain operations', () => {
+    const operationNames = new Set(operations.map(operation => operation.name));
+    for (const tool of frontmatterList('tools')) {
+      expect(operationNames.has(tool)).toBe(true);
+    }
+  });
+});
