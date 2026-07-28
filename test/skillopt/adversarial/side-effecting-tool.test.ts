@@ -11,6 +11,7 @@
 import { describe, expect, test } from 'bun:test';
 import { READ_ONLY_BRAIN_TOOLS } from '../../../src/core/skillopt/rollout.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../../../src/core/minions/tools/brain-allowlist.ts';
+import { operations } from '../../../src/core/operations.ts';
 
 describe('adversarial: D13 read-only tool sandbox', () => {
   test('put_page is NOT in the SkillOpt allowlist', () => {
@@ -58,7 +59,12 @@ describe('adversarial: D13 read-only tool sandbox', () => {
     }
   });
 
-  test('SkillOpt allowlist size = BRAIN_TOOL_ALLOWLIST size minus 1 (put_page)', () => {
-    expect(READ_ONLY_BRAIN_TOOLS.size).toBe(BRAIN_TOOL_ALLOWLIST.size - 1);
+  test('SkillOpt allowlist excludes every mutating brain operation', () => {
+    const mutating = new Set(
+      operations.filter((operation) => operation.mutating).map((operation) => operation.name),
+    );
+    for (const name of READ_ONLY_BRAIN_TOOLS) {
+      expect(mutating.has(name)).toBe(false);
+    }
   });
 });

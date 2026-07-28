@@ -32,7 +32,10 @@ import type { BenchmarkTask, Trajectory } from './types.ts';
  * mustn't be silently widened; the rollout test pins zero-write invariant.
  */
 export const READ_ONLY_BRAIN_TOOLS: ReadonlySet<string> = new Set(
-  [...BRAIN_TOOL_ALLOWLIST].filter((name) => name !== 'put_page'),
+  [...BRAIN_TOOL_ALLOWLIST].filter((name) => {
+    const op = operations.find(candidate => candidate.name === name);
+    return op?.mutating !== true;
+  }),
 );
 
 export interface RolloutOpts {

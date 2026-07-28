@@ -25,6 +25,7 @@ import { operationsByName } from '../src/core/operations.ts';
  */
 
 const submit_agent = operationsByName['submit_agent'];
+const get_agent_job = operationsByName['get_agent_job'];
 if (!submit_agent) {
   throw new Error('submit_agent op missing from operations registry — test fixture invalid');
 }
@@ -471,5 +472,47 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         : (rows[0].data as Record<string, unknown>);
       expect(data.max_turns).toBe(100);
     });
+
+    it('loads a named server skill into immutable job instructions', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search', 'get_page', 'put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/', 'projects/', 'wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'lore' });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        skill_name: 'knowledge-correction',
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row.data.skill_name).toBe('knowledge-correction');
+      expect(row.data.skill_sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(row.data.system).toContain('Knowledge Correction');
+    });
+  });
+});
+
+describe('get_agent_job owner-scoped receipt', () => {
+  it('returns structured JSON only to the submitting client', async () => {
+    await seedClient('lore', { bound_tools: ['search'] });
+    await seedClient('other', { bound_tools: ['search'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, result, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, $2::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [
+        JSON.stringify({ __owner_client_id: 'lore' }),
+        JSON.stringify({ result: JSON.stringify({ status: 'ready', effects: [] }) }),
+      ],
+    );
+    const owned = await get_agent_job.handler(makeCtx({ clientId: 'lore' }), { id: row.id });
+    expect((owned as any).receipt).toEqual({ status: 'ready', effects: [] });
+    await expect(
+      get_agent_job.handler(makeCtx({ clientId: 'other' }), { id: row.id }),
+    ).rejects.toThrow(/not owned/i);
   });
 });

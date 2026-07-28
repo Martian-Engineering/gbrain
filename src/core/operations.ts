@@ -234,6 +234,8 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
       const base = p.slice(0, -2);
       if (slug === base) continue;
       if (slug.startsWith(base + '/')) return true;
+    } else if (p.endsWith('/')) {
+      if (slug.startsWith(p) && slug.length > p.length) return true;
     } else if (p === slug) {
       return true;
     }
@@ -1556,6 +1558,7 @@ const delete_page: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
+    enforceSubagentSlugFence(ctx, slug, 'delete_page');
     if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
     // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
     // intended row instead of always targeting (default, slug).
@@ -1716,6 +1719,10 @@ const add_slug_alias: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    const aliasSlug = p.alias_slug as string;
+    const canonicalSlug = p.canonical_slug as string;
+    enforceSubagentSlugFence(ctx, aliasSlug, 'add_slug_alias');
+    enforceSubagentSlugFence(ctx, canonicalSlug, 'add_slug_alias');
     if (ctx.dryRun) {
       return {
         dry_run: true,
@@ -1724,8 +1731,6 @@ const add_slug_alias: Operation = {
         canonical_slug: p.canonical_slug,
       };
     }
-    const aliasSlug = p.alias_slug as string;
-    const canonicalSlug = p.canonical_slug as string;
     let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
     try {
       sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
@@ -2994,6 +2999,7 @@ const supersede_take: Operation = {
       throw new OperationError('invalid_params', 'slug must be non-empty.');
     }
     validatePageSlug(slug);
+    enforceSubagentSlugFence(ctx, slug, 'supersede_take');
     if (!Number.isSafeInteger(takeId) || takeId <= 0) {
       throw new OperationError('invalid_params', 'take_id must be a positive safe integer.');
     }
@@ -3401,6 +3407,7 @@ const add_link: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    enforceSubagentSlugFence(ctx, p.from as string, 'add_link');
     if (ctx.dryRun) return { dry_run: true, action: 'add_link', from: p.from, to: p.to };
     // v114 (#1941): default omitted provenance to 'manual' (NOT the engine's
     // 'markdown' default) so hand/tool-created CLI edges are honestly manual,
@@ -3441,6 +3448,7 @@ const remove_link: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    enforceSubagentSlugFence(ctx, p.from as string, 'remove_link');
     if (ctx.dryRun) return { dry_run: true, action: 'remove_link', from: p.from, to: p.to };
     const linkOpts = ctx.sourceId
       ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId }
@@ -4749,6 +4757,7 @@ const submit_agent: Operation = {
   description: 'Submit an LLM agent job that the worker dispatches via the gateway-native tool loop. Requires the `agent` OAuth scope. Tools, source, slug prefixes, max concurrency, and daily budget are bound at OAuth client registration time.',
   params: {
     prompt: { type: 'string', required: true, description: 'User prompt for the agent' },
+    skill_name: { type: 'string', description: 'Server-installed skill to use as the agent system instructions' },
     model: { type: 'string', description: 'provider:model string (defaults to models.tier.subagent)' },
     reasoning_effort: {
       type: 'string',
@@ -4881,6 +4890,7 @@ const submit_agent: Operation = {
         bound_max_concurrent: boundMaxConcurrent,
         model: typeof p.model === 'string' ? p.model : '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
+        skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
       };
     }
 
@@ -4897,6 +4907,16 @@ const submit_agent: Operation = {
       allowed_slug_prefixes: requestedSlugPrefixes,
       __owner_client_id: clientId,
     };
+    if (typeof p.skill_name === 'string') {
+      const skillCatalog = await import('./skill-catalog.ts');
+      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+      const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
+      const { createHash } = await import('crypto');
+      jobData.system = skill.body;
+      jobData.skill_name = skill.name;
+      jobData.skill_sha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+    }
     if (typeof p.model === 'string') jobData.model = p.model;
     if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
@@ -4928,6 +4948,49 @@ const submit_agent: Operation = {
     } catch { /* never block submission */ }
 
     return { id: job.id, name: 'subagent', client_id: clientId };
+  },
+};
+
+const get_agent_job: Operation = {
+  name: 'get_agent_job',
+  description: 'Get status and the structured result for a submit_agent job owned by this OAuth client.',
+  params: {
+    id: { type: 'number', required: true, description: 'Agent job ID returned by submit_agent' },
+  },
+  scope: 'agent' as any,
+  handler: async (ctx, p) => {
+    const clientId = ctx.auth?.clientId;
+    if (!clientId) {
+      throw new OperationError('permission_denied', 'get_agent_job requires an OAuth client.');
+    }
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const job = await new MinionQueue(ctx.engine).getJob(p.id as number);
+    if (
+      !job
+      || job.name !== 'subagent'
+      || job.data.__owner_client_id !== clientId
+    ) {
+      throw new OperationError('permission_denied', 'Agent job is not owned by this OAuth client.');
+    }
+    const raw = job.result?.result;
+    let receipt: unknown = null;
+    if (typeof raw === 'string') {
+      try {
+        receipt = JSON.parse(raw);
+      } catch {
+        receipt = null;
+      }
+    }
+    return {
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      receipt,
+      result_text: typeof raw === 'string' ? raw : null,
+      error: job.error_text,
+      created_at: job.created_at,
+      finished_at: job.finished_at,
+    };
   },
 };
 
@@ -6118,11 +6181,31 @@ const forget_fact: Operation = {
   description: 'v0.32.2: forget a fact. Rewrites the page\'s `## Facts` fence to strike through the row and set valid_until=today (the DB\'s expired_at derives via valid_until + now() on the next reconcile so the forget survives `gbrain rebuild`). Falls back to legacy DB-only expire for pre-v51 / thin-client rows. Idempotent on already-expired or unknown ids.',
   params: {
     id: { type: 'number', required: true, description: 'Fact id to forget.' },
+    slug: { type: 'string', required: false, description: 'Owning page slug; required for subagent calls.' },
     reason: { type: 'string', required: false, description: 'Optional reason; written to the fence row\'s context cell as "forgotten: <reason>". Default: "forgotten".' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    if (ctx.viaSubagent === true) {
+      const slug = typeof p.slug === 'string' ? p.slug : '';
+      if (!slug) {
+        throw new OperationError('invalid_params', 'forget_fact via subagent requires slug.');
+      }
+      enforceSubagentSlugFence(ctx, slug, 'forget_fact');
+      const sourceId = ctx.sourceId ?? 'default';
+      const rows = await ctx.engine.executeRaw<{ id: number }>(
+        `SELECT f.id
+           FROM facts f
+           JOIN pages p ON p.id = f.page_id
+          WHERE f.id = $1 AND p.slug = $2 AND p.source_id = $3
+          LIMIT 1`,
+        [p.id, slug, sourceId],
+      );
+      if (rows.length === 0) {
+        throw new OperationError('fact_not_found', `Fact id ${p.id} is not owned by ${slug}.`);
+      }
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'forget_fact', id: p.id };
     const id = p.id as number;
     const reason = typeof p.reason === 'string' ? p.reason : undefined;
@@ -7443,7 +7526,7 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent,
+  submit_agent, get_agent_job,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP

@@ -64,6 +64,13 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'resolve_slugs',
   'get_ingest_log',
   'put_page',
+  'rename_page',
+  'add_slug_alias',
+  'delete_page',
+  'add_link',
+  'remove_link',
+  'forget_fact',
+  'supersede_take',
   // Page-owned refutations use the same fail-closed operation-layer slug
   // fence as put_page. Both mutations are idempotent over their active state.
   'suppress_claim',
@@ -116,6 +123,13 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   get_recent_salience: 'Read pages ranked by emotional + activity salience over a recency window. Use for "what\'s been on my mind lately".',
   find_anomalies: 'Read cohort-level activity outliers (e.g. tag-cohort or type-cohort with unusual recent volume). Use for "what\'s unusual lately".',
 };
+
+/** Mutations that must never be replayed after an ambiguous tool-call failure. */
+export const NON_IDEMPOTENT_BRAIN_TOOLS: ReadonlySet<string> = new Set([
+  'rename_page',
+  'forget_fact',
+  'supersede_take',
+]);
 
 /** Matches Anthropic's tool-name constraint. No dots. */
 const ANTHROPIC_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -285,9 +299,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
       name: toolName,
       description: op.description,
       input_schema: schema,
-      // v0.15 ships only idempotent brain tools (every allow-listed op is
-      // deterministic over its input; put_page re-writes the same slug).
-      idempotent: true,
+      idempotent: !NON_IDEMPOTENT_BRAIN_TOOLS.has(op.name),
       // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
       // Keyed by the unprefixed op name. Undefined when no hint is registered.
       usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],
