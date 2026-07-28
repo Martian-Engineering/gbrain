@@ -291,6 +291,18 @@ describe('list_request_traces', () => {
       operation: 'tools/list',
       createdAt: '2026-07-28T17:03:00.000Z',
     });
+    await insertTrace({
+      operation: 'query',
+      createdAt: '2026-07-28T17:04:00.000Z',
+      params: {
+        redacted: true,
+        version: 2,
+        kind: 'object',
+        display_fields: [
+          { name: 'question', kind: 'page', value: 'projects/forged-page' },
+        ],
+      },
+    });
 
     const newest = await list({
       client_id: 'target-client',

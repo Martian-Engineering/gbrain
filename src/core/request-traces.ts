@@ -57,6 +57,12 @@ export interface RequestTraceFieldDefinition {
   params: Record<string, { trace?: { kind: TraceDisplayField['kind'] } }>;
 }
 
+/** One operation parameter approved as a page identifier in trace output. */
+export interface RequestTracePageField {
+  operation: string;
+  name: string;
+}
+
 /** Resolves the canonical trace allowlist for one logged operation. */
 export type RequestTraceFieldResolver =
   (operation: string) => RequestTraceFieldDefinition | undefined;
@@ -111,6 +117,7 @@ export async function listRequestTraces(
   engine: BrainEngine,
   input: ListRequestTracesInput,
   resolveFields: RequestTraceFieldResolver = () => undefined,
+  pageFields: readonly RequestTracePageField[] = [],
 ): Promise<RequestTracePage> {
   validateListInput(input);
   const outcome = input.outcome ?? 'all';
@@ -136,7 +143,28 @@ export async function listRequestTraces(
     where.push(`status <> 'success'`);
   }
   if (input.pageOnly) {
-    where.push(`params->'display_fields' @> '[{"kind":"page"}]'::jsonb`);
+    const operations = pageFields.map(field => field.operation);
+    const names = pageFields.map(field => field.name);
+    params.push(operations, names);
+    where.push(
+      `EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(
+             CASE
+               WHEN jsonb_typeof(params->'display_fields') = 'array'
+               THEN params->'display_fields'
+               ELSE '[]'::jsonb
+             END
+           ) AS display(field)
+           JOIN unnest(
+             $${params.length - 1}::text[],
+             $${params.length}::text[]
+           ) AS approved(operation, name)
+             ON approved.operation = mcp_request_log.operation
+            AND approved.name = display.field->>'name'
+          WHERE display.field->>'kind' = 'page'
+       )`,
+    );
   }
 
   if (boundary) {

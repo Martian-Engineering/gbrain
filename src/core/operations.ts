@@ -5774,6 +5774,11 @@ const list_request_traces: Operation = {
           after: p.after as string | undefined,
         },
         operation => operationsByName[operation],
+        Object.values(operationsByName).flatMap(operation =>
+          Object.entries(operation.params)
+            .filter(([, definition]) => definition.trace?.kind === 'page')
+            .map(([name]) => ({ operation: operation.name, name }))
+        ),
       );
     } catch (error) {
       if (error instanceof RequestTraceValidationError) {
