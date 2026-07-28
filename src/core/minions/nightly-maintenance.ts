@@ -83,6 +83,7 @@ export interface NightlyBudgetReservationInput {
   phase: NightlyMaintenancePhase;
   job_id: number;
   estimated_cents: number;
+  ttl_ms?: number;
 }
 
 /**
@@ -219,6 +220,7 @@ export async function reserveNightlyBudget(
     model: input.model,
     provider: 'openai',
     jobId: request.job_id,
+    ttlMs: request.ttl_ms,
   });
 }
 

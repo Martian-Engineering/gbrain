@@ -45,6 +45,8 @@ export interface ReserveOpts {
   model: string;
   provider: string;
   jobId?: number;
+  /** Reservation lifetime for long-running bounded jobs. Defaults to 10 minutes. */
+  ttlMs?: number;
 }
 
 export interface Reservation {
@@ -72,7 +74,11 @@ export async function reserve(
 ): Promise<Reservation> {
   const reservationId = randomUUIDv7();
   const lockKey = clientLockKey(opts.clientId);
-  const expiresAt = new Date(Date.now() + RESERVATION_TTL_MS);
+  const ttlMs = opts.ttlMs ?? RESERVATION_TTL_MS;
+  if (!Number.isInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 2 * 60 * 60 * 1000) {
+    throw new Error('reservation ttlMs must be an integer from 60000 through 7200000');
+  }
+  const expiresAt = new Date(Date.now() + ttlMs);
   const todayStart = todayStartIso();
 
   await engine.transaction(async (tx) => {
@@ -131,7 +137,7 @@ export async function reserve(
   return {
     reservationId,
     estimatedCents: opts.estimatedCents,
-    ttlMs: RESERVATION_TTL_MS,
+    ttlMs,
   };
 }
 

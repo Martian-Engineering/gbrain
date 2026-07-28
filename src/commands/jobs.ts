@@ -48,6 +48,7 @@ const GATEWAY_REFRESH_JOB_NAMES = new Set([
   'embed-backfill',
   'extract-takes-from-pages',
   'embed-catch-up',
+  'nightly-repair-agent',
 ]);
 
 function registerBuiltinJob(
@@ -1693,6 +1694,13 @@ export async function registerBuiltinHandlers(
   worker.register('link_repair', async (job) => {
     const { makeLinkRepairHandler } = await import('../core/minions/handlers/link-repair.ts');
     return makeLinkRepairHandler(engine)(job);
+  });
+
+  registerBuiltinJob(worker, engine, 'nightly-repair-agent', async (job) => {
+    const { makeNightlyRepairAgentHandler } = await import(
+      '../core/minions/handlers/nightly-repair-agent.ts'
+    );
+    return makeNightlyRepairAgentHandler(engine)(job);
   });
 
   // Local patch 2026-06-11: durable facts:absorb. One-shot CLI processes

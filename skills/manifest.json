@@ -273,6 +273,11 @@
       "name": "knowledge-correction",
       "path": "knowledge-correction/SKILL.md",
       "description": "Plan and apply freeform brain corrections, including compound page creation, identity, alias, link, and removal work"
+    },
+    {
+      "name": "nightly-semantic-repair",
+      "path": "nightly-semantic-repair/SKILL.md",
+      "description": "Apply one immutable source-bound nightly repair manifest with a one-page write fence"
     }
   ],
   "dependencies": {

@@ -53,6 +53,30 @@ describe('minions/budget-meter (v0.38 Slice 2 — D3 reserve-then-settle)', () =
   });
 
   describe('reserve()', () => {
+    it('honors a bounded custom lifetime for long-running jobs', async () => {
+      const reservation = await reserve(engine, {
+        clientId: 'nightly-maintenance:2026-07-28',
+        estimatedCents: 100,
+        capCents: 1500,
+        model: 'openai:gpt-5.6-terra',
+        provider: 'openai',
+        ttlMs: 30 * 60 * 1000,
+      });
+
+      expect(reservation.ttlMs).toBe(30 * 60 * 1000);
+    });
+
+    it('rejects custom lifetimes outside the supported range', async () => {
+      await expect(reserve(engine, {
+        clientId: 'nightly-maintenance:2026-07-28',
+        estimatedCents: 100,
+        capCents: 1500,
+        model: 'openai:gpt-5.6-terra',
+        provider: 'openai',
+        ttlMs: 30_000,
+      })).rejects.toThrow('reservation ttlMs');
+    });
+
     it('passes when projected total ≤ cap', async () => {
       await seedClient('alice', 5.00);
       const r = await reserve(engine, {

@@ -53,7 +53,7 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // the edge-WRITE ops add_link/remove_link stay out (separate trust call).
     // #2778 added add_timeline_entry (write, fenced like put_page via
     // operations.ts:enforceSubagentSlugFence).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(24);
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(26);
     expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);

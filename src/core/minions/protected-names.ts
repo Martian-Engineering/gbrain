@@ -76,6 +76,8 @@ export const PROTECTED_JOB_NAMES: ReadonlySet<string> = new Set([
   // Source-scoped deterministic repair writes derived links and timeline rows.
   // Only the nightly root or an explicit trusted operator may submit it.
   'link_repair',
+  // One immutable nightly manifest may invoke a paid, source-bound write agent.
+  'nightly-repair-agent',
 ]);
 
 /** Check a job name against the protected set. Normalizes whitespace first. */
