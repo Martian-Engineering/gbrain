@@ -243,6 +243,25 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
   return false;
 }
 
+/** Return whether every slug matched by a requested fence is inside a bound fence. */
+function slugFenceContains(bound: string, requested: string): boolean {
+  const boundBase = recursiveSlugFenceBase(bound);
+  const requestedBase = recursiveSlugFenceBase(requested);
+  if (boundBase === null) {
+    return requestedBase === null && requested === bound;
+  }
+  const requestedAnchor = requestedBase ?? requested;
+  return requestedAnchor.startsWith(`${boundBase}/`)
+    || (requestedBase !== null && requestedAnchor === boundBase);
+}
+
+/** Strip the recursive suffix from one slash- or glob-form slug fence. */
+function recursiveSlugFenceBase(fence: string): string | null {
+  if (fence.endsWith('/*')) return fence.slice(0, -2);
+  if (fence.endsWith('/')) return fence.slice(0, -1);
+  return null;
+}
+
 /**
  * Subagent slug-fence enforcement, shared by every mutating op a subagent
  * can reach (put_page, add_timeline_entry). FAIL-CLOSED: `viaSubagent=true`
@@ -4854,7 +4873,7 @@ const submit_agent: Operation = {
     }
     if (boundSlugPrefixes !== null) {
       for (const sp of requestedSlugPrefixes) {
-        if (!boundSlugPrefixes.some(bp => sp.startsWith(bp) || bp === sp)) {
+        if (!boundSlugPrefixes.some(bp => slugFenceContains(bp, sp))) {
           throw new OperationError(
             'permission_denied',
             `submit_agent: slug_prefix "${sp}" is not under any of client ${clientId}'s bound_slug_prefixes.`,
