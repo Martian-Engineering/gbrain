@@ -32,7 +32,7 @@ export const openai: Recipe = {
     chat: {
       models: ['gpt-5.6-terra', 'gpt-5.2', 'gpt-4o-mini'],
       reasoning_efforts: {
-        'gpt-5.6-terra': REASONING_EFFORTS,
+        'gpt-5.6-terra': ['none', 'low', 'medium', 'high', 'xhigh'],
         'gpt-5.2': ['none', 'low', 'medium', 'high', 'xhigh'],
       },
       supports_tools: true,

@@ -169,9 +169,9 @@ export interface ExpansionTouchpoint {
 }
 
 /** OpenAI reasoning levels accepted by GBrain's per-call agent contract. */
-// Keep this aligned with the installed @ai-sdk/openai adapter's accepted
-// reasoningEffort values, not only the upstream model API's capabilities.
-export const REASONING_EFFORTS = ['none', 'low', 'medium', 'high', 'xhigh'] as const;
+// Keep this aligned with the installed @ai-sdk/openai adapter. Recipes narrow
+// the set further for each model's actual upstream capabilities.
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 /** Return whether an untrusted value is a supported reasoning effort. */
