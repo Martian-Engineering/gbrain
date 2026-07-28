@@ -91,6 +91,10 @@ import {
   PageTimelineNotFoundError,
   resolvePageTimelineEvents,
 } from './chronicle/page-timeline.ts';
+import {
+  listRequestTraces,
+  RequestTraceValidationError,
+} from './request-traces.ts';
 
 // --- Types ---
 
@@ -299,7 +303,26 @@ export interface ParamDef {
   default?: unknown;
   enum?: string[];
   items?: ParamDef;
+  /**
+   * Explicitly permits this scalar parameter to appear in redacted request
+   * traces. Parameters without this annotation remain presence-only.
+   */
+  trace?: {
+    kind: TraceFieldKind;
+  };
 }
+
+/** Semantic identifier categories exposed by redacted request traces. */
+export type TraceFieldKind =
+  | 'action'
+  | 'client'
+  | 'filter'
+  | 'job'
+  | 'link_type'
+  | 'page'
+  | 'proposal'
+  | 'source'
+  | 'take';
 
 export interface Logger {
   info(msg: string): void;
@@ -799,7 +822,7 @@ const get_page: Operation = {
   name: 'get_page',
   description: 'Read a page by slug (supports optional fuzzy matching). Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
   params: {
-    slug: { type: 'string', required: true, description: 'Page slug' },
+    slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
   },
@@ -903,7 +926,7 @@ const validate_links: Operation = {
   name: 'validate_links',
   description: 'Read-only, source-scoped validation of explicit internal references. Reports missing and ambiguous targets that graph extraction would otherwise discard.',
   params: {
-    slug: { type: 'string', description: 'Validate one page. Omit to validate every page visible in the caller source scope.' },
+    slug: { type: 'string', description: 'Validate one page. Omit to validate every page visible in the caller source scope.', trace: { kind: 'page' } },
   },
   handler: async (ctx, p) => {
     const scope = sourceScopeOpts(ctx);
@@ -923,7 +946,7 @@ const put_page: Operation = {
   name: 'put_page',
   description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
-    slug: { type: 'string', required: true, description: 'Page slug' },
+    slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
@@ -1548,7 +1571,7 @@ const delete_page: Operation = {
   name: 'delete_page',
   description: 'Soft-delete a page. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed.',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
   },
   mutating: true,
   scope: 'write',
@@ -1581,8 +1604,8 @@ const rename_page: Operation = {
   name: 'rename_page',
   description: 'Atomically create a renamed destination and retire the old page as a source-scoped slug alias. Database changes commit together; source-file write-through and optional old-file removal run afterward and are reported explicitly.',
   params: {
-    old_slug: { type: 'string', required: true, description: 'Active page slug to retire' },
-    new_slug: { type: 'string', required: true, description: 'Unoccupied destination slug in the same source' },
+    old_slug: { type: 'string', required: true, description: 'Active page slug to retire', trace: { kind: 'page' } },
+    new_slug: { type: 'string', required: true, description: 'Unoccupied destination slug in the same source', trace: { kind: 'page' } },
     content: { type: 'string', required: true, description: 'Complete renamed Markdown content' },
     remove_file: { type: 'boolean', description: 'Trusted local or source-admin callers only: remove the old source file after the renamed file is written.' },
     source_id: { type: 'string', description: 'Source id. Remote callers may only name their OAuth-assigned write source.' },
@@ -2068,7 +2091,7 @@ const restore_page: Operation = {
   name: 'restore_page',
   description: 'v0.26.5 — restore a soft-deleted page (clear deleted_at). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
   },
   mutating: true,
   scope: 'write',
@@ -3390,9 +3413,9 @@ const add_link: Operation = {
   name: 'add_link',
   description: 'Create link between pages',
   params: {
-    from: { type: 'string', required: true },
-    to: { type: 'string', required: true },
-    link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at)' },
+    from: { type: 'string', required: true, trace: { kind: 'page' } },
+    to: { type: 'string', required: true, trace: { kind: 'page' } },
+    link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at)', trace: { kind: 'link_type' } },
     context: { type: 'string', description: 'Context for the link' },
     link_source: { type: 'string', description: "Provenance tag (kebab-case, e.g. 'citation-graph'). Defaults to 'manual'. Reconciliation-managed built-ins (markdown/frontmatter/mentions/wikilink-resolved) are rejected." },
   },
@@ -3431,9 +3454,9 @@ const remove_link: Operation = {
   name: 'remove_link',
   description: 'Remove link between pages',
   params: {
-    from: { type: 'string', required: true },
-    to: { type: 'string', required: true },
-    link_type: { type: 'string', description: 'Only remove edges of this link type (omit = all types)' },
+    from: { type: 'string', required: true, trace: { kind: 'page' } },
+    to: { type: 'string', required: true, trace: { kind: 'page' } },
+    link_type: { type: 'string', description: 'Only remove edges of this link type (omit = all types)', trace: { kind: 'link_type' } },
     link_source: { type: 'string', description: 'Only remove edges of this provenance (e.g. citation-graph); omit = any provenance' },
   },
   mutating: true,
@@ -3458,7 +3481,7 @@ const get_links: Operation = {
   name: 'get_links',
   description: 'List outgoing links from a page',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
   },
   handler: async (ctx, p) => {
     // #2200: linkReadScopeOpts so a federated grant — and an untrusted remote
@@ -3474,7 +3497,7 @@ const get_backlinks: Operation = {
   name: 'get_backlinks',
   description: 'List incoming links to a page',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
   },
   handler: async (ctx, p) => {
     // #2200: linkReadScopeOpts — federated grant + untrusted remote scalar
@@ -3516,9 +3539,9 @@ const traverse_graph: Operation = {
   name: 'traverse_graph',
   description: 'Traverse link graph from a page. With link_type/direction, returns edges (GraphPath[]) instead of nodes.',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
     depth: { type: 'number', description: `Max traversal depth (default 5, capped at ${TRAVERSE_DEPTH_CAP})` },
-    link_type: { type: 'string', description: 'Filter to one link type (per-edge filter, traversal only follows matching edges)' },
+    link_type: { type: 'string', description: 'Filter to one link type (per-edge filter, traversal only follows matching edges)', trace: { kind: 'link_type' } },
     direction: { type: 'string', enum: ['in', 'out', 'both'], description: 'Traversal direction (default out)' },
   },
   handler: async (ctx, p) => {
@@ -3600,7 +3623,7 @@ const get_timeline: Operation = {
   name: 'get_timeline',
   description: 'Get timeline entries for a page, optionally filtered by date window',
   params: {
-    slug: { type: 'string', required: true },
+    slug: { type: 'string', required: true, trace: { kind: 'page' } },
     after: { type: 'string', description: 'Return entries on or after this date (YYYY-MM-DD)' },
     before: { type: 'string', description: 'Return entries on or before this date (YYYY-MM-DD)' },
     since: { type: 'string', description: 'Alias for after; accepted for agent callers' },
@@ -5702,6 +5725,60 @@ const revoke_client: Operation = {
   },
 };
 
+const list_request_traces: Operation = {
+  name: 'list_request_traces',
+  description:
+    'Admin-only, privacy-normalized request history for one OAuth client. ' +
+    'Returns newest-first entries with opaque older/newer keyset cursors.',
+  params: {
+    client_id: {
+      type: 'string',
+      required: true,
+      description: 'OAuth client id whose request history should be listed',
+      trace: { kind: 'client' },
+    },
+    outcome: {
+      type: 'string',
+      enum: ['all', 'success', 'failed'],
+      description: 'Outcome filter (default all)',
+      trace: { kind: 'filter' },
+    },
+    limit: {
+      type: 'number',
+      description: 'Page size (default 50, clamped to 1-100)',
+    },
+    before: {
+      type: 'string',
+      description: 'Opaque cursor for the next older page',
+    },
+    after: {
+      type: 'string',
+      description: 'Opaque cursor for the next newer page',
+    },
+  },
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    try {
+      return await listRequestTraces(
+        ctx.engine,
+        {
+          clientId: p.client_id as string,
+          outcome: p.outcome as 'all' | 'success' | 'failed' | undefined,
+          limit: p.limit as number | undefined,
+          before: p.before as string | undefined,
+          after: p.after as string | undefined,
+        },
+        operation => operationsByName[operation],
+      );
+    } catch (error) {
+      if (error instanceof RequestTraceValidationError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+};
+
 const whoami: Operation = {
   name: 'whoami',
   description:
@@ -7421,7 +7498,7 @@ export const operations: Operation[] = [
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
-  provision_client, revoke_client,
+  provision_client, revoke_client, list_request_traces,
   whoami, sources_add, sources_list, sources_remove, sources_status,
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,

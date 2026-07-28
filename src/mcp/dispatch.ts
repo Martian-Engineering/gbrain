@@ -9,7 +9,12 @@
 import type { BrainEngine } from '../core/engine.ts';
 import type { PageWriteContext } from '../core/engine.ts';
 import { operations, OperationError } from '../core/operations.ts';
-import type { Operation, OperationContext, AuthInfo } from '../core/operations.ts';
+import type {
+  AuthInfo,
+  Operation,
+  OperationContext,
+  TraceFieldKind,
+} from '../core/operations.ts';
 import { loadConfig } from '../core/config.ts';
 
 export interface ToolResult {
@@ -102,12 +107,30 @@ export interface DispatchOpts {
  */
 export interface ParamSummary {
   redacted: true;
+  version?: 2;
   kind: 'array' | 'object' | string;
   declared_keys?: string[];
   unknown_key_count?: number;
   length?: number;
   approx_bytes?: number;
+  display_fields?: TraceDisplayField[];
+  source_scope?: string[];
 }
+
+/** A bounded scalar identifier approved for display in a redacted trace. */
+export interface TraceDisplayField {
+  name: string;
+  kind: TraceFieldKind;
+  value: string | number | boolean;
+}
+
+/** Trusted server context that may enrich a redacted request summary. */
+export interface ParamSummaryContext {
+  sourceIds?: string[];
+}
+
+const MAX_TRACE_IDENTIFIER_LENGTH = 255;
+const MAX_TRACE_SOURCE_COUNT = 32;
 
 /**
  * Round a byte count UP to the nearest 1KB so the redacted summary keeps a
@@ -128,7 +151,11 @@ function bucketBytes(n: number | undefined): number | undefined {
   return Math.ceil(n / KB) * KB;
 }
 
-export function summarizeMcpParams(opName: string, params: unknown): ParamSummary | null {
+export function summarizeMcpParams(
+  opName: string,
+  params: unknown,
+  context: ParamSummaryContext = {},
+): ParamSummary | null {
   if (params == null) return null;
 
   let approxBytes: number | undefined;
@@ -147,19 +174,44 @@ export function summarizeMcpParams(opName: string, params: unknown): ParamSummar
     const submittedKeys = Object.keys(params as Record<string, unknown>);
     const op = operations.find(o => o.name === opName);
     const allowList = op ? new Set(Object.keys(op.params)) : new Set<string>();
+    const paramValues = params as Record<string, unknown>;
     const declared: string[] = [];
+    const displayFields: TraceDisplayField[] = [];
     let unknown = 0;
     for (const k of submittedKeys) {
       if (allowList.has(k)) declared.push(k);
       else unknown += 1;
     }
     declared.sort();
+
+    for (const [name, definition] of Object.entries(op?.params ?? {})) {
+      if (!definition.trace || !Object.hasOwn(paramValues, name)) continue;
+      const value = paramValues[name];
+      const isBoundedString = typeof value === 'string'
+        && value.length > 0
+        && value.length <= MAX_TRACE_IDENTIFIER_LENGTH;
+      const isBoundedScalar = isBoundedString
+        || typeof value === 'boolean'
+        || (typeof value === 'number' && Number.isFinite(value));
+      if (!isBoundedScalar) continue;
+      displayFields.push({ name, kind: definition.trace.kind, value: value as string | number | boolean });
+    }
+
+    const sourceScope = [...new Set(
+      (context.sourceIds ?? []).filter(sourceId =>
+        sourceId.length > 0 && sourceId.length <= MAX_TRACE_IDENTIFIER_LENGTH
+      ),
+    )].sort().slice(0, MAX_TRACE_SOURCE_COUNT);
+
     return {
       redacted: true,
+      version: 2,
       kind: 'object',
       declared_keys: declared,
       unknown_key_count: unknown,
       ...(approxBytes !== undefined ? { approx_bytes: approxBytes } : {}),
+      ...(displayFields.length > 0 ? { display_fields: displayFields } : {}),
+      ...(sourceScope.length > 0 ? { source_scope: sourceScope } : {}),
     };
   }
 
