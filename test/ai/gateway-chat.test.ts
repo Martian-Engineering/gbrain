@@ -220,6 +220,10 @@ describe('chat touchpoint — chat() smoke + stop-reason mapping (Codex D8)', ()
     const mod = await import('../../src/core/ai/gateway.ts');
     expect(mod).toBeDefined();
   });
+
+  test('OpenAI chat touchpoint accepts GPT-5.6 Terra', () => {
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.6-terra')).not.toThrow();
+  });
 });
 
 describe('chat touchpoint — provider_chat_options passthrough', () => {
@@ -294,6 +298,25 @@ describe('chat touchpoint — provider_chat_options passthrough', () => {
     });
 
     expect(providerOptions).toBeUndefined();
+  });
+
+  test('per-call reasoning effort reaches native OpenAI and overrides configured effort', async () => {
+    const providerOptions = await captureProviderOptions({
+      chat_model: 'openai:gpt-5.6-terra',
+      provider_chat_options: {
+        openai: { reasoningEffort: 'low' },
+      },
+      env: { OPENAI_API_KEY: 'fake' },
+    }, { reasoningEffort: 'high' } as any);
+
+    expect(providerOptions?.openai?.reasoningEffort).toBe('high');
+  });
+
+  test('rejects reasoning effort for a model without that capability', async () => {
+    await expect(captureProviderOptions({
+      chat_model: 'openai:gpt-4o-mini',
+      env: { OPENAI_API_KEY: 'fake' },
+    }, { reasoningEffort: 'high' } as any)).rejects.toThrow(/does not support reasoning effort/i);
   });
 
   test('anthropic cacheControl survives provider_chat_options merging', async () => {

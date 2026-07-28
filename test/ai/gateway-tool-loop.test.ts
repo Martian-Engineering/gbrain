@@ -295,6 +295,31 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(seen).toEqual([4096, 4096, 32000, 32000]);
   });
 
+  it('applies the requested reasoning effort to every loop turn', async () => {
+    const seen: Array<string | undefined> = [];
+    __setChatTransportForTests(async (opts) => {
+      seen.push(opts.reasoningEffort);
+      return {
+        text: 'ok',
+        blocks: [{ type: 'text', text: 'ok' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: opts.model ?? 'openai:gpt-5.6-terra',
+        providerId: 'openai',
+      };
+    });
+
+    await toolLoop({
+      model: 'openai:gpt-5.6-terra',
+      reasoningEffort: 'high',
+      initialMessages: [{ role: 'user', content: 'hi' }],
+      tools: [],
+      toolHandlers: new Map(),
+    });
+
+    expect(seen).toEqual(['high']);
+  });
+
   it('hits max_turns when the model keeps calling tools', async () => {
     __setChatTransportForTests(async () => ({
       text: '',

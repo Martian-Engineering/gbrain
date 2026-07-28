@@ -1,4 +1,4 @@
-import type { Recipe } from '../types.ts';
+import { REASONING_EFFORTS, type Recipe } from '../types.ts';
 
 export const openai: Recipe = {
   id: 'openai',
@@ -30,7 +30,11 @@ export const openai: Recipe = {
       price_last_verified: '2026-04-20',
     },
     chat: {
-      models: ['gpt-5.2', 'gpt-4o-mini'],
+      models: ['gpt-5.6-terra', 'gpt-5.2', 'gpt-4o-mini'],
+      reasoning_efforts: {
+        'gpt-5.6-terra': REASONING_EFFORTS,
+        'gpt-5.2': ['none', 'low', 'medium', 'high', 'xhigh'],
+      },
       supports_tools: true,
       supports_subagent_loop: true,
       supports_prompt_cache: false,

@@ -51,6 +51,10 @@ describe('CANONICAL_PRICING — table integrity', () => {
     expect(CANONICAL_PRICING['anthropic:claude-fable-5']).toEqual({ input: 10.0, output: 50.0 });
   });
 
+  test('GPT-5.6 Terra present at $2.50/$15', () => {
+    expect(CANONICAL_PRICING['openai:gpt-5.6-terra']).toEqual({ input: 2.5, output: 15.0 });
+  });
+
   test('Gemini 2.0 Flash reconciled to $0.10/$0.40; legacy alias agrees', () => {
     expect(CANONICAL_PRICING['google:gemini-2.0-flash']).toEqual({ input: 0.1, output: 0.4 });
     expect(CANONICAL_PRICING['google:gemini-2-flash']).toEqual(

@@ -119,6 +119,9 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(submit_agent.params.prompt).toBeDefined();
       expect((submit_agent.params.prompt as any).required).toBe(true);
     });
+    it('declares an explicit reasoning_effort param', () => {
+      expect(submit_agent.params.reasoning_effort).toBeDefined();
+    });
   });
 
   describe('local CLI bypass (ctx.remote === false)', () => {
@@ -318,6 +321,89 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
+    it('persists and audits the requested model and reasoning effort', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search', 'get_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+        bound_max_concurrent: 3,
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        model: 'openai:gpt-5.6-terra',
+        reasoning_effort: 'high',
+      });
+      const rows = await engine.executeRaw<Record<string, unknown>>(
+        `SELECT data FROM minion_jobs WHERE id = $1`,
+        [result.id],
+      );
+      const data = typeof rows[0].data === 'string'
+        ? JSON.parse(rows[0].data as string)
+        : (rows[0].data as Record<string, unknown>);
+      expect(data.model).toBe('openai:gpt-5.6-terra');
+      expect(data.reasoning_effort).toBe('high');
+
+      const auditFile = fs.readdirSync(tmpAuditDir).find(f => f.startsWith('agent-jobs-'));
+      const auditLine = JSON.parse(fs.readFileSync(path.join(tmpAuditDir, auditFile!), 'utf8').trim());
+      expect(auditLine.model).toBe('openai:gpt-5.6-terra');
+      expect(auditLine.reasoning_effort).toBe('high');
+    });
+
+    it('rejects an unsupported reasoning effort', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        reasoning_effort: 'extreme',
+      })).rejects.toThrow(/reasoning_effort.*none.*max/i);
+    });
+
+    it('rejects reasoning effort for a non-OpenAI model', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'anthropic:claude-sonnet-4-6',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/does not support reasoning_effort/i);
+    });
+
+    it('rejects reasoning effort when the model is omitted', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/reasoning_effort requires an explicit compatible model/i);
+    });
+
+    it('rejects reasoning effort for an OpenAI model without reasoning support', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-4o-mini',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/does not support reasoning_effort/i);
+    });
+
     it('inserts a subagent job + writes audit row', async () => {
       await seedClient('cursor', {
         bound_tools: ['search', 'get_page'],
