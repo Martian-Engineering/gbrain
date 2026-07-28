@@ -360,6 +360,32 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
+    it('deduplicates a client idempotency key before enforcing concurrency', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+        bound_max_concurrent: 1,
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const first = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        idempotency_key: 'lore-job-01',
+      });
+      const repeated = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        idempotency_key: 'lore-job-01',
+      });
+
+      expect(repeated.id).toBe(first.id);
+      const rows = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM minion_jobs
+          WHERE idempotency_key = 'submit-agent:cursor:lore-job-01'`,
+      );
+      expect(rows[0]?.n).toBe(1);
+    });
+
     it('persists and audits the requested model and reasoning effort', async () => {
       await seedClient('cursor', {
         bound_tools: ['search', 'get_page'],
