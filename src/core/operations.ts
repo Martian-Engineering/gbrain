@@ -5743,6 +5743,10 @@ const list_request_traces: Operation = {
       description: 'Outcome filter (default all)',
       trace: { kind: 'filter' },
     },
+    page_only: {
+      type: 'boolean',
+      description: 'Return only requests with an approved page identifier',
+    },
     limit: {
       type: 'number',
       description: 'Page size (default 50, clamped to 1-100)',
@@ -5764,11 +5768,17 @@ const list_request_traces: Operation = {
         {
           clientId: p.client_id as string,
           outcome: p.outcome as 'all' | 'success' | 'failed' | undefined,
+          pageOnly: p.page_only as boolean | undefined,
           limit: p.limit as number | undefined,
           before: p.before as string | undefined,
           after: p.after as string | undefined,
         },
         operation => operationsByName[operation],
+        Object.values(operationsByName).flatMap(operation =>
+          Object.entries(operation.params)
+            .filter(([, definition]) => definition.trace?.kind === 'page')
+            .map(([name]) => ({ operation: operation.name, name }))
+        ),
       );
     } catch (error) {
       if (error instanceof RequestTraceValidationError) {

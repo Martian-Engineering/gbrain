@@ -46,6 +46,7 @@ export interface RequestTracePage {
 export interface ListRequestTracesInput {
   clientId: string;
   outcome?: 'all' | 'success' | 'failed';
+  pageOnly?: boolean;
   limit?: number;
   before?: string;
   after?: string;
@@ -54,6 +55,12 @@ export interface ListRequestTracesInput {
 /** Trace-safe parameter metadata resolved from an operation definition. */
 export interface RequestTraceFieldDefinition {
   params: Record<string, { trace?: { kind: TraceDisplayField['kind'] } }>;
+}
+
+/** One operation parameter approved as a page identifier in trace output. */
+export interface RequestTracePageField {
+  operation: string;
+  name: string;
 }
 
 /** Resolves the canonical trace allowlist for one logged operation. */
@@ -110,6 +117,7 @@ export async function listRequestTraces(
   engine: BrainEngine,
   input: ListRequestTracesInput,
   resolveFields: RequestTraceFieldResolver = () => undefined,
+  pageFields: readonly RequestTracePageField[] = [],
 ): Promise<RequestTracePage> {
   validateListInput(input);
   const outcome = input.outcome ?? 'all';
@@ -133,6 +141,30 @@ export async function listRequestTraces(
     where.push(`status = 'success'`);
   } else if (outcome === 'failed') {
     where.push(`status <> 'success'`);
+  }
+  if (input.pageOnly) {
+    const operations = pageFields.map(field => field.operation);
+    const names = pageFields.map(field => field.name);
+    params.push(operations, names);
+    where.push(
+      `EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(
+             CASE
+               WHEN jsonb_typeof(params->'display_fields') = 'array'
+               THEN params->'display_fields'
+               ELSE '[]'::jsonb
+             END
+           ) AS display(field)
+           JOIN unnest(
+             $${params.length - 1}::text[],
+             $${params.length}::text[]
+           ) AS approved(operation, name)
+             ON approved.operation = mcp_request_log.operation
+            AND approved.name = display.field->>'name'
+          WHERE display.field->>'kind' = 'page'
+       )`,
+    );
   }
 
   if (boundary) {
@@ -279,6 +311,9 @@ function validateListInput(input: ListRequestTracesInput): void {
   }
   if (input.outcome && !['all', 'success', 'failed'].includes(input.outcome)) {
     throw new RequestTraceValidationError('outcome must be all, success, or failed');
+  }
+  if (input.pageOnly !== undefined && typeof input.pageOnly !== 'boolean') {
+    throw new RequestTraceValidationError('page_only must be a boolean');
   }
 }
 

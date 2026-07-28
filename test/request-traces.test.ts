@@ -257,6 +257,85 @@ describe('list_request_traces', () => {
     ]);
   });
 
+  test('filters page requests before applying outcome and keyset pagination', async () => {
+    await insertTrace({
+      operation: 'get_page',
+      createdAt: '2026-07-28T17:00:00.000Z',
+      params: {
+        redacted: true,
+        version: 2,
+        kind: 'object',
+        display_fields: [
+          { name: 'slug', kind: 'page', value: 'projects/older-page' },
+        ],
+      },
+    });
+    await insertTrace({
+      operation: 'tools/list',
+      createdAt: '2026-07-28T17:01:00.000Z',
+    });
+    await insertTrace({
+      operation: 'put_page',
+      status: 'error',
+      createdAt: '2026-07-28T17:02:00.000Z',
+      params: {
+        redacted: true,
+        version: 2,
+        kind: 'object',
+        display_fields: [
+          { name: 'slug', kind: 'page', value: 'projects/newer-page' },
+        ],
+      },
+    });
+    await insertTrace({
+      operation: 'tools/list',
+      createdAt: '2026-07-28T17:03:00.000Z',
+    });
+    await insertTrace({
+      operation: 'query',
+      createdAt: '2026-07-28T17:04:00.000Z',
+      params: {
+        redacted: true,
+        version: 2,
+        kind: 'object',
+        display_fields: [
+          { name: 'question', kind: 'page', value: 'projects/forged-page' },
+        ],
+      },
+    });
+
+    const newest = await list({
+      client_id: 'target-client',
+      page_only: true,
+      limit: 1,
+    });
+    expect(newest.entries.map(entry => entry.operation)).toEqual(['put_page']);
+    expect(newest.has_older).toBe(true);
+
+    const older = await list({
+      client_id: 'target-client',
+      page_only: true,
+      limit: 1,
+      before: newest.older_cursor,
+    });
+    expect(older.entries.map(entry => entry.operation)).toEqual(['get_page']);
+
+    const successful = await list({
+      client_id: 'target-client',
+      page_only: true,
+      outcome: 'success',
+      limit: 10,
+    });
+    expect(successful.entries.map(entry => entry.operation)).toEqual(['get_page']);
+  });
+
+  test('rejects a non-boolean page_only filter', async () => {
+    await expect(list({
+      client_id: 'target-client',
+      page_only: 'yes',
+    })).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
   test('rejects conflicting cursors', async () => {
     const cursor = encodeRequestTraceCursor({
       createdAt: '2026-07-28T17:00:00.000000Z',
