@@ -57,6 +57,10 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
 }
 
 describe('matchesSlugAllowList — glob semantics', () => {
+  test('treats OAuth-style trailing-slash bindings as recursive prefixes', () => {
+    expect(matchesSlugAllowList('people/alex-river', ['people/'])).toBe(true);
+    expect(matchesSlugAllowList('projects/alex-river', ['people/'])).toBe(false);
+  });
   test('exact match (no glob suffix)', () => {
     expect(matchesSlugAllowList('foo/bar', ['foo/bar'])).toBe(true);
     expect(matchesSlugAllowList('foo/bar/baz', ['foo/bar'])).toBe(false);

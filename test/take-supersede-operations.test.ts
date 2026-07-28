@@ -188,7 +188,7 @@ describe('supersede_take operation contract', () => {
         description: 'Preview the validated supersession without writing',
       },
     });
-    expect(BRAIN_TOOL_ALLOWLIST.has('supersede_take')).toBe(false);
+    expect(BRAIN_TOOL_ALLOWLIST.has('supersede_take')).toBe(true);
   });
 });
 
