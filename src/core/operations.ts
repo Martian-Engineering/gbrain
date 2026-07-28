@@ -5679,6 +5679,18 @@ const provision_client: Operation = {
       type: 'string',
       description: 'Optional person slug this client acts for',
     },
+    agent_skill_name: {
+      type: 'string',
+      description: 'Published server skill whose tools and write namespaces bind this agent client',
+    },
+    bound_max_concurrent: {
+      type: 'number',
+      description: 'Maximum concurrent agent jobs for this client',
+    },
+    budget_usd_per_day: {
+      type: 'number',
+      description: 'Daily agent spend cap in USD',
+    },
   },
   mutating: true,
   scope: 'admin',
@@ -5707,6 +5719,60 @@ const provision_client: Operation = {
     if (boundPrincipal !== undefined && boundPrincipal.length === 0) {
       throw new OperationError('invalid_params', 'bound_principal must be non-empty when provided.');
     }
+    const agentSkillName = p.agent_skill_name as string | undefined;
+    const requestsAgent = scopes.includes('agent');
+    if (requestsAgent !== (agentSkillName !== undefined)) {
+      throw new OperationError(
+        'invalid_params',
+        'agent scope and agent_skill_name must be supplied together.',
+      );
+    }
+    const boundMaxConcurrent = p.bound_max_concurrent as number | undefined;
+    if (
+      boundMaxConcurrent !== undefined
+      && (!Number.isInteger(boundMaxConcurrent) || boundMaxConcurrent < 1)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'bound_max_concurrent must be a positive integer.',
+      );
+    }
+    const budgetUsdPerDay = p.budget_usd_per_day as number | undefined;
+    if (
+      budgetUsdPerDay !== undefined
+      && (!Number.isFinite(budgetUsdPerDay) || budgetUsdPerDay < 0)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'budget_usd_per_day must be a non-negative number.',
+      );
+    }
+    let agentBindings:
+      | {
+          skill_name: string;
+          bound_tools: string[];
+          bound_source_id: string;
+          bound_slug_prefixes: string[];
+          bound_max_concurrent: number;
+          budget_usd_per_day: number | null;
+        }
+      | undefined;
+    if (agentSkillName) {
+      const skillCatalog = await import('./skill-catalog.ts');
+      const publish = await skillCatalog.readMcpPublishSkills(ctx);
+      skillCatalog.assertPublishEnabled(ctx, publish);
+      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+      const derived = skillCatalog.getSkillAgentBindings(dir, agentSkillName);
+      agentBindings = {
+        skill_name: agentSkillName,
+        bound_tools: derived.tools,
+        bound_source_id: sourceId,
+        bound_slug_prefixes: derived.writes_to,
+        bound_max_concurrent: boundMaxConcurrent ?? 1,
+        budget_usd_per_day: budgetUsdPerDay ?? null,
+      };
+    }
 
     const requestedSources = Array.from(new Set([sourceId, ...federatedRead]));
     const placeholders = requestedSources.map((_, index) => `$${index + 1}`).join(', ');
@@ -5731,7 +5797,17 @@ const provision_client: Operation = {
       sourceId,
       federatedRead,
       'client_secret_post',
-      undefined,
+      agentBindings
+        ? {
+            boundTools: agentBindings.bound_tools,
+            boundSourceId: agentBindings.bound_source_id,
+            boundSlugPrefixes: agentBindings.bound_slug_prefixes,
+            boundMaxConcurrent: agentBindings.bound_max_concurrent,
+            budgetUsdPerDay: agentBindings.budget_usd_per_day === null
+              ? undefined
+              : agentBindings.budget_usd_per_day.toFixed(2),
+          }
+        : undefined,
       boundPrincipal,
     );
     if (!clientSecret) {
@@ -5779,6 +5855,7 @@ const provision_client: Operation = {
       source_id: sourceId,
       federated_read: federatedRead,
       bound_principal: boundPrincipal ?? null,
+      agent_bindings: agentBindings,
     };
   },
 };
