@@ -12,6 +12,7 @@ import {
   SKILL_CLIENT_GUIDANCE,
 } from '../src/core/operations-descriptions.ts';
 import { operations, operationsByName } from '../src/core/operations.ts';
+import { PAGE_SORT_SQL } from '../src/core/types.ts';
 import { BRAIN_TOOL_ALLOWLIST } from '../src/core/minions/tools/brain-allowlist.ts';
 
 /**
@@ -131,10 +132,37 @@ describe('v0.29 — subagent allow-list', () => {
     }
   });
 
-  test('list_pages has new sort + updated_after params surfaced to MCP', () => {
+  test('list_pages surfaces sort, updated_after, and pagination to MCP', () => {
     const op = operationsByName['list_pages'];
     expect(op.params.sort).toBeDefined();
     expect(op.params.updated_after).toBeDefined();
+    expect(op.params.offset).toBeDefined();
+  });
+
+  test('list_pages threads a normalized offset to the engine', async () => {
+    let received: Record<string, unknown> | undefined;
+    const op = operationsByName['list_pages'];
+    await op.handler({
+      engine: {
+        listPages: async (filters: Record<string, unknown>) => {
+          received = filters;
+          return [];
+        },
+      },
+      config: {},
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      dryRun: false,
+      remote: false,
+    } as never, { offset: 125.8, sort: 'slug' });
+
+    expect(received?.offset).toBe(125);
+  });
+
+  test('every pagination order has a source-qualified total order', () => {
+    expect(PAGE_SORT_SQL.updated_desc).toEndWith('p.source_id ASC, p.slug ASC');
+    expect(PAGE_SORT_SQL.updated_asc).toEndWith('p.source_id ASC, p.slug ASC');
+    expect(PAGE_SORT_SQL.created_desc).toEndWith('p.source_id ASC, p.slug ASC');
+    expect(PAGE_SORT_SQL.slug).toBe('p.slug ASC, p.source_id ASC');
   });
 });
 

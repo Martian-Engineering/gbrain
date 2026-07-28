@@ -348,10 +348,10 @@ export interface GetPageOpts {
 
 /** v0.29: literal ORDER BY fragments for the PageFilters.sort enum. Whitelisted. */
 export const PAGE_SORT_SQL: Record<NonNullable<PageFilters['sort']>, string> = {
-  updated_desc: 'p.updated_at DESC',
-  updated_asc:  'p.updated_at ASC',
-  created_desc: 'p.created_at DESC',
-  slug:         'p.slug ASC',
+  updated_desc: 'p.updated_at DESC, p.source_id ASC, p.slug ASC',
+  updated_asc:  'p.updated_at ASC, p.source_id ASC, p.slug ASC',
+  created_desc: 'p.created_at DESC, p.source_id ASC, p.slug ASC',
+  slug:         'p.slug ASC, p.source_id ASC',
 };
 
 /**
