@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GBrain maintenance nightly at 10:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 UTC
+Persistent=true
+RandomizedDelaySec=0
+Unit=gbrain-nightly-maintenance.service
+
+[Install]
+WantedBy=timers.target

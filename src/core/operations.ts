@@ -8,6 +8,8 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine, PageWriteContext } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
+import { isReasoningEffort, REASONING_EFFORTS } from './ai/types.ts';
+import { supportsReasoningEffort } from './ai/model-resolver.ts';
 import type { PageType } from './types.ts';
 import type { TakeMiningStatus } from './take-mining-control.ts';
 import { importFromContent } from './import-file.ts';
@@ -236,11 +238,32 @@ export function matchesSlugAllowList(slug: string, prefixes: readonly string[]):
       const base = p.slice(0, -2);
       if (slug === base) continue;
       if (slug.startsWith(base + '/')) return true;
+    } else if (p.endsWith('/')) {
+      if (slug.startsWith(p) && slug.length > p.length) return true;
     } else if (p === slug) {
       return true;
     }
   }
   return false;
+}
+
+/** Return whether every slug matched by a requested fence is inside a bound fence. */
+function slugFenceContains(bound: string, requested: string): boolean {
+  const boundBase = recursiveSlugFenceBase(bound);
+  const requestedBase = recursiveSlugFenceBase(requested);
+  if (boundBase === null) {
+    return requestedBase === null && requested === bound;
+  }
+  const requestedAnchor = requestedBase ?? requested;
+  return requestedAnchor.startsWith(`${boundBase}/`)
+    || (requestedBase !== null && requestedAnchor === boundBase);
+}
+
+/** Strip the recursive suffix from one slash- or glob-form slug fence. */
+function recursiveSlugFenceBase(fence: string): string | null {
+  if (fence.endsWith('/*')) return fence.slice(0, -2);
+  if (fence.endsWith('/')) return fence.slice(0, -1);
+  return null;
 }
 
 /**
@@ -1577,6 +1600,7 @@ const delete_page: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
+    enforceSubagentSlugFence(ctx, slug, 'delete_page');
     if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
     // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
     // intended row instead of always targeting (default, slug).
@@ -1737,6 +1761,10 @@ const add_slug_alias: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    const aliasSlug = p.alias_slug as string;
+    const canonicalSlug = p.canonical_slug as string;
+    enforceSubagentSlugFence(ctx, aliasSlug, 'add_slug_alias');
+    enforceSubagentSlugFence(ctx, canonicalSlug, 'add_slug_alias');
     if (ctx.dryRun) {
       return {
         dry_run: true,
@@ -1745,8 +1773,6 @@ const add_slug_alias: Operation = {
         canonical_slug: p.canonical_slug,
       };
     }
-    const aliasSlug = p.alias_slug as string;
-    const canonicalSlug = p.canonical_slug as string;
     let sourceId = ctx.auth?.sourceId ?? ctx.sourceId ?? 'default';
     try {
       sourceId = resolveWriteSourceId(ctx, requestedAliasSource(p));
@@ -3015,6 +3041,7 @@ const supersede_take: Operation = {
       throw new OperationError('invalid_params', 'slug must be non-empty.');
     }
     validatePageSlug(slug);
+    enforceSubagentSlugFence(ctx, slug, 'supersede_take');
     if (!Number.isSafeInteger(takeId) || takeId <= 0) {
       throw new OperationError('invalid_params', 'take_id must be a positive safe integer.');
     }
@@ -3422,6 +3449,7 @@ const add_link: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    enforceSubagentSlugFence(ctx, p.from as string, 'add_link');
     if (ctx.dryRun) return { dry_run: true, action: 'add_link', from: p.from, to: p.to };
     // v114 (#1941): default omitted provenance to 'manual' (NOT the engine's
     // 'markdown' default) so hand/tool-created CLI edges are honestly manual,
@@ -3462,6 +3490,7 @@ const remove_link: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    enforceSubagentSlugFence(ctx, p.from as string, 'remove_link');
     if (ctx.dryRun) return { dry_run: true, action: 'remove_link', from: p.from, to: p.to };
     const linkOpts = ctx.sourceId
       ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId }
@@ -4770,11 +4799,21 @@ const submit_agent: Operation = {
   description: 'Submit an LLM agent job that the worker dispatches via the gateway-native tool loop. Requires the `agent` OAuth scope. Tools, source, slug prefixes, max concurrency, and daily budget are bound at OAuth client registration time.',
   params: {
     prompt: { type: 'string', required: true, description: 'User prompt for the agent' },
+    skill_name: { type: 'string', description: 'Server-installed skill to use as the agent system instructions' },
     model: { type: 'string', description: 'provider:model string (defaults to models.tier.subagent)' },
+    reasoning_effort: {
+      type: 'string',
+      enum: [...REASONING_EFFORTS],
+      description: 'Native OpenAI reasoning effort for every agent turn',
+    },
     allowed_tools: { type: 'array', description: 'Subset of bound_tools the agent may invoke', items: { type: 'string' } },
     allowed_slug_prefixes: { type: 'array', description: 'Subset of bound_slug_prefixes for put_page writes', items: { type: 'string' } },
     max_turns: { type: 'number', description: 'Max LLM turns (default 20, hard cap 100)' },
     queue: { type: 'string', description: 'Queue name (default "default")' },
+    idempotency_key: {
+      type: 'string',
+      description: 'Caller-stable key that returns the same agent job for retries by this OAuth client',
+    },
   },
   mutating: true,
   scope: 'agent' as any,
@@ -4837,14 +4876,69 @@ const submit_agent: Operation = {
       }
     }
     const requestedSlugPrefixes = (p.allowed_slug_prefixes as string[] | undefined) ?? boundSlugPrefixes ?? [];
+    const callerIdempotencyKey = typeof p.idempotency_key === 'string'
+      ? p.idempotency_key.trim()
+      : undefined;
+    if (
+      p.idempotency_key !== undefined
+      && (!callerIdempotencyKey || callerIdempotencyKey.length > 200)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: idempotency_key must contain 1-200 characters.',
+      );
+    }
+    const queueIdempotencyKey = callerIdempotencyKey
+      ? `submit-agent:${clientId}:${callerIdempotencyKey}`
+      : undefined;
+    if (p.reasoning_effort !== undefined && !isReasoningEffort(p.reasoning_effort)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: reasoning_effort must be one of none, minimal, low, medium, high, xhigh.',
+      );
+    }
+    if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: reasoning_effort requires an explicit compatible model.',
+      );
+    }
+    if (
+      isReasoningEffort(p.reasoning_effort)
+      && typeof p.model === 'string'
+      && !supportsReasoningEffort(p.model, p.reasoning_effort)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        `submit_agent: model "${p.model}" does not support reasoning_effort "${p.reasoning_effort}".`,
+      );
+    }
     if (boundSlugPrefixes !== null) {
       for (const sp of requestedSlugPrefixes) {
-        if (!boundSlugPrefixes.some(bp => sp.startsWith(bp) || bp === sp)) {
+        if (!boundSlugPrefixes.some(bp => slugFenceContains(bp, sp))) {
           throw new OperationError(
             'permission_denied',
             `submit_agent: slug_prefix "${sp}" is not under any of client ${clientId}'s bound_slug_prefixes.`,
           );
         }
+      }
+    }
+
+    // A retried caller key resolves before the concurrency cap so its own
+    // live job cannot turn a safe replay into a rate-limit failure.
+    if (!ctx.dryRun && queueIdempotencyKey) {
+      const existing = await sql`
+        SELECT id
+          FROM minion_jobs
+         WHERE idempotency_key = ${queueIdempotencyKey}
+         LIMIT 1
+      `;
+      if (existing.length > 0) {
+        return {
+          id: Number(existing[0]!.id),
+          name: 'subagent',
+          client_id: clientId,
+        };
       }
     }
 
@@ -4873,6 +4967,9 @@ const submit_agent: Operation = {
         bound_tools: boundTools,
         bound_source: boundSource,
         bound_max_concurrent: boundMaxConcurrent,
+        model: typeof p.model === 'string' ? p.model : '<default>',
+        reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
+        skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
       };
     }
 
@@ -4889,12 +4986,36 @@ const submit_agent: Operation = {
       allowed_slug_prefixes: requestedSlugPrefixes,
       __owner_client_id: clientId,
     };
+    if (typeof p.skill_name === 'string') {
+      if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
+        throw new OperationError(
+          'permission_denied',
+          'submit_agent: skill_name requires read scope in addition to agent scope.',
+        );
+      }
+      const skillCatalog = await import('./skill-catalog.ts');
+      const publish = await skillCatalog.readMcpPublishSkills(ctx);
+      skillCatalog.assertPublishEnabled(ctx, publish);
+      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+      const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
+      const { createHash } = await import('crypto');
+      jobData.system = skill.body;
+      jobData.skill_name = skill.name;
+      jobData.skill_sha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+    }
     if (typeof p.model === 'string') jobData.model = p.model;
+    if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
     const job = await queue.add(
       'subagent',
       jobData,
-      { queue: (p.queue as string) || 'default' },
+      {
+        queue: (p.queue as string) || 'default',
+        ...(queueIdempotencyKey
+          ? { idempotency_key: queueIdempotencyKey }
+          : {}),
+      },
       { allowProtectedSubmit: true },
     );
 
@@ -4907,6 +5028,7 @@ const submit_agent: Operation = {
         client_id: clientId,
         job_id: job.id,
         model: typeof p.model === 'string' ? p.model : '<default>',
+        reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : undefined,
         bound_tools: requestedTools,
         bound_source: boundSource,
         slug_prefixes: requestedSlugPrefixes,
@@ -4918,6 +5040,49 @@ const submit_agent: Operation = {
     } catch { /* never block submission */ }
 
     return { id: job.id, name: 'subagent', client_id: clientId };
+  },
+};
+
+const get_agent_job: Operation = {
+  name: 'get_agent_job',
+  description: 'Get status and the structured result for a submit_agent job owned by this OAuth client.',
+  params: {
+    id: { type: 'number', required: true, description: 'Agent job ID returned by submit_agent' },
+  },
+  scope: 'agent' as any,
+  handler: async (ctx, p) => {
+    const clientId = ctx.auth?.clientId;
+    if (!clientId) {
+      throw new OperationError('permission_denied', 'get_agent_job requires an OAuth client.');
+    }
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const job = await new MinionQueue(ctx.engine).getJob(p.id as number);
+    if (
+      !job
+      || job.name !== 'subagent'
+      || job.data.__owner_client_id !== clientId
+    ) {
+      throw new OperationError('permission_denied', 'Agent job is not owned by this OAuth client.');
+    }
+    const raw = job.result?.result;
+    let receipt: unknown = null;
+    if (typeof raw === 'string') {
+      try {
+        receipt = JSON.parse(raw);
+      } catch {
+        receipt = null;
+      }
+    }
+    return {
+      id: job.id,
+      status: job.status,
+      progress: job.progress,
+      receipt,
+      result_text: typeof raw === 'string' ? raw : null,
+      error: job.error_text,
+      created_at: job.created_at,
+      finished_at: job.finished_at,
+    };
   },
 };
 
@@ -5579,6 +5744,18 @@ const provision_client: Operation = {
       type: 'string',
       description: 'Optional person slug this client acts for',
     },
+    agent_skill_name: {
+      type: 'string',
+      description: 'Published server skill whose tools and write namespaces bind this agent client',
+    },
+    bound_max_concurrent: {
+      type: 'number',
+      description: 'Maximum concurrent agent jobs for this client',
+    },
+    budget_usd_per_day: {
+      type: 'number',
+      description: 'Daily agent spend cap in USD',
+    },
   },
   mutating: true,
   scope: 'admin',
@@ -5607,6 +5784,60 @@ const provision_client: Operation = {
     if (boundPrincipal !== undefined && boundPrincipal.length === 0) {
       throw new OperationError('invalid_params', 'bound_principal must be non-empty when provided.');
     }
+    const agentSkillName = p.agent_skill_name as string | undefined;
+    const requestsAgent = scopes.includes('agent');
+    if (requestsAgent !== (agentSkillName !== undefined)) {
+      throw new OperationError(
+        'invalid_params',
+        'agent scope and agent_skill_name must be supplied together.',
+      );
+    }
+    const boundMaxConcurrent = p.bound_max_concurrent as number | undefined;
+    if (
+      boundMaxConcurrent !== undefined
+      && (!Number.isInteger(boundMaxConcurrent) || boundMaxConcurrent < 1)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'bound_max_concurrent must be a positive integer.',
+      );
+    }
+    const budgetUsdPerDay = p.budget_usd_per_day as number | undefined;
+    if (
+      budgetUsdPerDay !== undefined
+      && (!Number.isFinite(budgetUsdPerDay) || budgetUsdPerDay < 0)
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'budget_usd_per_day must be a non-negative number.',
+      );
+    }
+    let agentBindings:
+      | {
+          skill_name: string;
+          bound_tools: string[];
+          bound_source_id: string;
+          bound_slug_prefixes: string[];
+          bound_max_concurrent: number;
+          budget_usd_per_day: number | null;
+        }
+      | undefined;
+    if (agentSkillName) {
+      const skillCatalog = await import('./skill-catalog.ts');
+      const publish = await skillCatalog.readMcpPublishSkills(ctx);
+      skillCatalog.assertPublishEnabled(ctx, publish);
+      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+      const derived = skillCatalog.getSkillAgentBindings(dir, agentSkillName);
+      agentBindings = {
+        skill_name: agentSkillName,
+        bound_tools: derived.tools,
+        bound_source_id: sourceId,
+        bound_slug_prefixes: derived.writes_to,
+        bound_max_concurrent: boundMaxConcurrent ?? 1,
+        budget_usd_per_day: budgetUsdPerDay ?? null,
+      };
+    }
 
     const requestedSources = Array.from(new Set([sourceId, ...federatedRead]));
     const placeholders = requestedSources.map((_, index) => `$${index + 1}`).join(', ');
@@ -5631,7 +5862,17 @@ const provision_client: Operation = {
       sourceId,
       federatedRead,
       'client_secret_post',
-      undefined,
+      agentBindings
+        ? {
+            boundTools: agentBindings.bound_tools,
+            boundSourceId: agentBindings.bound_source_id,
+            boundSlugPrefixes: agentBindings.bound_slug_prefixes,
+            boundMaxConcurrent: agentBindings.bound_max_concurrent,
+            budgetUsdPerDay: agentBindings.budget_usd_per_day === null
+              ? undefined
+              : agentBindings.budget_usd_per_day.toFixed(2),
+          }
+        : undefined,
       boundPrincipal,
     );
     if (!clientSecret) {
@@ -5679,6 +5920,7 @@ const provision_client: Operation = {
       source_id: sourceId,
       federated_read: federatedRead,
       bound_principal: boundPrincipal ?? null,
+      agent_bindings: agentBindings,
     };
   },
 };
@@ -6172,11 +6414,31 @@ const forget_fact: Operation = {
   description: 'v0.32.2: forget a fact. Rewrites the page\'s `## Facts` fence to strike through the row and set valid_until=today (the DB\'s expired_at derives via valid_until + now() on the next reconcile so the forget survives `gbrain rebuild`). Falls back to legacy DB-only expire for pre-v51 / thin-client rows. Idempotent on already-expired or unknown ids.',
   params: {
     id: { type: 'number', required: true, description: 'Fact id to forget.' },
+    slug: { type: 'string', required: false, description: 'Owning page slug; required for subagent calls.' },
     reason: { type: 'string', required: false, description: 'Optional reason; written to the fence row\'s context cell as "forgotten: <reason>". Default: "forgotten".' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
+    if (ctx.viaSubagent === true) {
+      const slug = typeof p.slug === 'string' ? p.slug : '';
+      if (!slug) {
+        throw new OperationError('invalid_params', 'forget_fact via subagent requires slug.');
+      }
+      enforceSubagentSlugFence(ctx, slug, 'forget_fact');
+      const sourceId = ctx.sourceId ?? 'default';
+      const rows = await ctx.engine.executeRaw<{ id: number }>(
+        `SELECT f.id
+           FROM facts f
+           JOIN pages p ON p.id = f.page_id
+          WHERE f.id = $1 AND p.slug = $2 AND p.source_id = $3
+          LIMIT 1`,
+        [p.id, slug, sourceId],
+      );
+      if (rows.length === 0) {
+        throw new OperationError('fact_not_found', `Fact id ${p.id} is not owned by ${slug}.`);
+      }
+    }
     if (ctx.dryRun) return { dry_run: true, action: 'forget_fact', id: p.id };
     const id = p.id as number;
     const reason = typeof p.reason === 'string' ? p.reason : undefined;
@@ -7497,7 +7759,7 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent,
+  submit_agent, get_agent_job,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP

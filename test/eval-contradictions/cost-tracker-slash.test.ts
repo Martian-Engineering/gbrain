@@ -40,6 +40,11 @@ describe('eval-contradictions/cost-tracker pricingFor (via recordJudgeCall)', ()
     expect(spendCheck('anthropic/claude-opus-4-7', 1_000_000, 0)).toBeCloseTo(5.0, 5);
   });
 
+  test('OpenAI Terra uses canonical pricing instead of the Haiku fallback', () => {
+    expect(spendCheck('openai:gpt-5.6-terra', 1_000_000, 0)).toBeCloseTo(2.5, 5);
+    expect(spendCheck('openai:gpt-5.6-terra', 0, 1_000_000)).toBeCloseTo(15.0, 5);
+  });
+
   test('LEGACY BEHAVIOR PIN: unknown model silently falls back to Haiku pricing', () => {
     // D9 from the v0.41.20.0 plan: we deliberately preserve the silent-Haiku
     // fallback in this duplicate pricing table. The right fix is unifying

@@ -202,6 +202,7 @@ export interface BacklinksOpts {
 }
 
 export interface GraphBacklinkGap {
+  source_id: string;
   source_slug: string;
   target_slug: string;
   kind: 'missing_graph_edge' | 'missing_backlink_view';
@@ -232,14 +233,21 @@ function resolvedTarget(finding: LinkValidationFinding): string | null {
  */
 export async function auditGraphBacklinks(
   engine: BrainEngine,
-  opts: { sourceId?: string } = {},
+  opts: { sourceId?: string; prefix?: string; types?: string[] } = {},
 ): Promise<BacklinksResult> {
   const scope = opts.sourceId ? { sourceId: opts.sourceId } : {};
   const pages: Page[] = [];
   const batchSize = 100;
   for (let offset = 0; ; offset += batchSize) {
-    const batch = await engine.listPages({ ...scope, sort: 'slug', limit: batchSize, offset });
-    pages.push(...batch);
+    const batch = await engine.listPages({
+      ...scope,
+      ...(opts.prefix ? { slugPrefix: opts.prefix } : {}),
+      sort: 'slug',
+      limit: batchSize,
+      offset,
+    });
+    const allowedTypes = opts.types ? new Set(opts.types) : undefined;
+    pages.push(...(allowedTypes ? batch.filter(page => allowedTypes.has(page.type)) : batch));
     if (batch.length < batchSize) break;
   }
 
@@ -258,7 +266,12 @@ export async function auditGraphBacklinks(
       const target = resolvedTarget(finding);
       if (!target) continue;
       if (!outgoingTargets.has(target)) {
-        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_graph_edge' });
+        graphFindings.push({
+          source_id: page.source_id,
+          source_slug: page.slug,
+          target_slug: target,
+          kind: 'missing_graph_edge',
+        });
         continue;
       }
       const targetKey = `${page.source_id}\u0000${target}`;
@@ -269,7 +282,12 @@ export async function auditGraphBacklinks(
         backlinkCache.set(targetKey, referrers);
       }
       if (!referrers.has(page.slug)) {
-        graphFindings.push({ source_slug: page.slug, target_slug: target, kind: 'missing_backlink_view' });
+        graphFindings.push({
+          source_id: page.source_id,
+          source_slug: page.slug,
+          target_slug: target,
+          kind: 'missing_backlink_view',
+        });
       }
     }
   }

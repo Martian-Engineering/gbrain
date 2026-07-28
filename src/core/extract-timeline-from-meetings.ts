@@ -34,12 +34,18 @@ interface TimelineSourcePolicy {
 export interface ExtractTimelineFromMeetingsOpts {
   dryRun?: boolean;
   sourceIdFilter?: string;
+  /** Optional slug-prefix filter on meeting/event source pages. */
+  prefixFilter?: string;
+  /** Optional exact page-type filters on meeting/event source pages. */
+  typeFilters?: string[];
   /** Only scan meetings with updated_at after this ISO date. */
   since?: string;
   /** Optional pre-built gazetteer (for shared-walk callers). */
   gazetteer?: Gazetteer;
   /** Optional pre-loaded active pack (avoids a second config resolution). */
   activePack?: TimelinePack | null;
+  /** Persist pack-authorized reciprocal Markdown lines. Defaults to true. */
+  materializeBacklinks?: boolean;
   onProgress?: (done: number, total: number, created: number) => void;
 }
 
@@ -248,7 +254,7 @@ export async function extractTimelineFromMeetings(
   }
 
   // 1. Fetch all pack-selected meeting/event pages (one round-trip).
-  const meetings = await engine.executeRaw<EventRow>(
+  let meetings = await engine.executeRaw<EventRow>(
     `SELECT slug, source_id, type, title, effective_date, updated_at,
             compiled_truth, COALESCE(timeline, '') AS timeline
        FROM pages
@@ -257,6 +263,16 @@ export async function extractTimelineFromMeetings(
       ORDER BY effective_date DESC NULLS LAST, slug`,
     eventPredicate.params,
   );
+  if (opts.sourceIdFilter) {
+    meetings = meetings.filter(meeting => meeting.source_id === opts.sourceIdFilter);
+  }
+  if (opts.prefixFilter) {
+    meetings = meetings.filter(meeting => meeting.slug.startsWith(opts.prefixFilter!));
+  }
+  if (opts.typeFilters && opts.typeFilters.length > 0) {
+    const allowedTypes = new Set(opts.typeFilters);
+    meetings = meetings.filter(meeting => allowedTypes.has(meeting.type));
+  }
 
   if (meetings.length === 0) {
     return {
@@ -408,7 +424,9 @@ export async function extractTimelineFromMeetings(
   }
 
   await flush();
-  const materialized = await materializeBacklinks(engine, materializedTargets, dryRun);
+  const materialized = opts.materializeBacklinks === false
+    ? { written: 0, errors: 0 }
+    : await materializeBacklinks(engine, materializedTargets, dryRun);
   return {
     meetings_scanned: meetingsScanned,
     entries_created: entriesCreated,

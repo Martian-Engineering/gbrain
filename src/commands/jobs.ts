@@ -48,6 +48,8 @@ const GATEWAY_REFRESH_JOB_NAMES = new Set([
   'embed-backfill',
   'extract-takes-from-pages',
   'embed-catch-up',
+  'nightly-repair-agent',
+  'nightly-maintenance',
 ]);
 
 function registerBuiltinJob(
@@ -205,6 +207,8 @@ USAGE
                             [--idempotency-key K] [--queue Q] [--dry-run]
                             [--redact-secrets]   (shell only; scrubs inherit
                                                   values from stdout/stderr)
+  gbrain jobs nightly-maintenance [--sources a,b] [--scheduled-for ISO]
+                                  [--budget-cents N] [--max-page-mutations N]
   gbrain jobs list [--status S] [--queue Q] [--limit N]
   gbrain jobs get <id>
   gbrain jobs cancel <id>
@@ -280,6 +284,40 @@ HANDLER TYPES (built in)
   const queue = new MinionQueue(engine);
 
   switch (sub) {
+    case 'nightly-maintenance': {
+      const scheduledFor = parseFlag(args, '--scheduled-for') ?? new Date().toISOString();
+      const sourceFlag = parseFlag(args, '--sources');
+      const sourceIds = sourceFlag
+        ? sourceFlag.split(',').map(value => value.trim()).filter(Boolean)
+        : (await engine.executeRaw<{ id: string }>(
+            `SELECT id FROM sources WHERE COALESCE(archived, false) = false ORDER BY id`,
+          )).map(row => row.id);
+      const budgetRaw = parseFlag(args, '--budget-cents');
+      const mutationRaw = parseFlag(args, '--max-page-mutations');
+      const { parseNightlyMaintenanceInput, submitNightlyMaintenance } = await import(
+        '../core/minions/nightly-maintenance.ts'
+      );
+      const input = parseNightlyMaintenanceInput({
+        scheduled_for: scheduledFor,
+        source_ids: sourceIds,
+        ...(budgetRaw ? { budget_limit_cents: Number(budgetRaw) } : {}),
+        ...(mutationRaw ? { max_page_mutations: Number(mutationRaw) } : {}),
+      });
+      const job = await submitNightlyMaintenance(queue, input);
+      console.log(JSON.stringify({
+        job_id: job.id,
+        status: job.status,
+        run_id: input.run_id,
+        scheduled_for: input.scheduled_for,
+        source_ids: input.source_ids,
+        budget_limit_cents: input.budget_limit_cents,
+        max_page_mutations: input.max_page_mutations,
+        model: input.model,
+        reasoning_effort: input.reasoning_effort,
+      }));
+      return;
+    }
+
     case 'submit': {
       const name = args[1];
       if (!name) {
@@ -1688,6 +1726,25 @@ export async function registerBuiltinHandlers(
       sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined,
       materialized: job.data.materialized === true,
     });
+  });
+
+  worker.register('link_repair', async (job) => {
+    const { makeLinkRepairHandler } = await import('../core/minions/handlers/link-repair.ts');
+    return makeLinkRepairHandler(engine)(job);
+  });
+
+  registerBuiltinJob(worker, engine, 'nightly-repair-agent', async (job) => {
+    const { makeNightlyRepairAgentHandler } = await import(
+      '../core/minions/handlers/nightly-repair-agent.ts'
+    );
+    return makeNightlyRepairAgentHandler(engine)(job);
+  });
+
+  registerBuiltinJob(worker, engine, 'nightly-maintenance', async (job) => {
+    const { makeNightlyMaintenanceHandler } = await import(
+      '../core/minions/handlers/nightly-maintenance.ts'
+    );
+    return makeNightlyMaintenanceHandler(engine)(job);
   });
 
   // Local patch 2026-06-11: durable facts:absorb. One-shot CLI processes

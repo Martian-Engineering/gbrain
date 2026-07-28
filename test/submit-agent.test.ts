@@ -25,6 +25,7 @@ import { operationsByName } from '../src/core/operations.ts';
  */
 
 const submit_agent = operationsByName['submit_agent'];
+const get_agent_job = operationsByName['get_agent_job'];
 if (!submit_agent) {
   throw new Error('submit_agent op missing from operations registry — test fixture invalid');
 }
@@ -92,14 +93,23 @@ async function seedClient(clientId: string, opts: SeedOpts = {}): Promise<void> 
   );
 }
 
-function makeCtx(opts: { clientId?: string; remote?: boolean; dryRun?: boolean } = {}): any {
+function makeCtx(
+  opts: {
+    clientId?: string;
+    remote?: boolean;
+    dryRun?: boolean;
+    scopes?: string[];
+  } = {},
+): any {
   return {
     engine,
     config: {},
     logger: console,
     dryRun: opts.dryRun ?? false,
     remote: opts.remote ?? true,
-    auth: opts.clientId ? { clientId: opts.clientId } : undefined,
+    auth: opts.clientId
+      ? { clientId: opts.clientId, scopes: opts.scopes ?? [] }
+      : undefined,
   };
 }
 
@@ -118,6 +128,9 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     it('declares required prompt param', () => {
       expect(submit_agent.params.prompt).toBeDefined();
       expect((submit_agent.params.prompt as any).required).toBe(true);
+    });
+    it('declares an explicit reasoning_effort param', () => {
+      expect(submit_agent.params.reasoning_effort).toBeDefined();
     });
   });
 
@@ -229,6 +242,35 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         }),
       ).rejects.toThrow(/slug_prefix "private\/" is not under any.*bound_slug_prefixes/);
     });
+
+    it('does not widen an exact slug binding into a recursive namespace', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor', dryRun: true });
+      await expect(
+        callSubmitAgent(ctx, {
+          prompt: 'go',
+          allowed_slug_prefixes: ['people/'],
+        }),
+      ).rejects.toThrow(/slug_prefix "people\/" is not under any.*bound_slug_prefixes/);
+    });
+
+    it('allows a recursive binding to narrow to a child namespace', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor', dryRun: true });
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'go',
+        allowed_slug_prefixes: ['people/team/'],
+      });
+      expect(result.dry_run).toBe(true);
+    });
   });
 
   describe('concurrency cap enforcement', () => {
@@ -318,6 +360,129 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
+    it('deduplicates a client idempotency key before enforcing concurrency', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+        bound_max_concurrent: 1,
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const first = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        idempotency_key: 'lore-job-01',
+      });
+      const repeated = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        idempotency_key: 'lore-job-01',
+      });
+
+      expect(repeated.id).toBe(first.id);
+      const rows = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM minion_jobs
+          WHERE idempotency_key = 'submit-agent:cursor:lore-job-01'`,
+      );
+      expect(rows[0]?.n).toBe(1);
+    });
+
+    it('persists and audits the requested model and reasoning effort', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search', 'get_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+        bound_max_concurrent: 3,
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        model: 'openai:gpt-5.6-terra',
+        reasoning_effort: 'high',
+      });
+      const rows = await engine.executeRaw<Record<string, unknown>>(
+        `SELECT data FROM minion_jobs WHERE id = $1`,
+        [result.id],
+      );
+      const data = typeof rows[0].data === 'string'
+        ? JSON.parse(rows[0].data as string)
+        : (rows[0].data as Record<string, unknown>);
+      expect(data.model).toBe('openai:gpt-5.6-terra');
+      expect(data.reasoning_effort).toBe('high');
+
+      const auditFile = fs.readdirSync(tmpAuditDir).find(f => f.startsWith('agent-jobs-'));
+      const auditLine = JSON.parse(fs.readFileSync(path.join(tmpAuditDir, auditFile!), 'utf8').trim());
+      expect(auditLine.model).toBe('openai:gpt-5.6-terra');
+      expect(auditLine.reasoning_effort).toBe('high');
+    });
+
+    it('rejects an unsupported reasoning effort', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        reasoning_effort: 'extreme',
+      })).rejects.toThrow(/reasoning_effort.*none.*xhigh/i);
+    });
+
+    it('rejects an adapter effort unsupported by the selected model', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-5.6-terra',
+        reasoning_effort: 'minimal',
+      })).rejects.toThrow(/does not support reasoning_effort "minimal"/i);
+    });
+
+    it('rejects reasoning effort for a non-OpenAI model', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'anthropic:claude-sonnet-4-6',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/does not support reasoning_effort/i);
+    });
+
+    it('rejects reasoning effort when the model is omitted', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/reasoning_effort requires an explicit compatible model/i);
+    });
+
+    it('rejects reasoning effort for an OpenAI model without reasoning support', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-4o-mini',
+        reasoning_effort: 'high',
+      })).rejects.toThrow(/does not support reasoning_effort/i);
+    });
+
     it('inserts a subagent job + writes audit row', async () => {
       await seedClient('cursor', {
         bound_tools: ['search', 'get_page'],
@@ -385,5 +550,83 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         : (rows[0].data as Record<string, unknown>);
       expect(data.max_turns).toBe(100);
     });
+
+    it('loads a named server skill into immutable job instructions', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search', 'get_page', 'put_page'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/', 'projects/', 'wiki/'],
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'correct the selected claim',
+        skill_name: 'knowledge-correction',
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row.data.skill_name).toBe('knowledge-correction');
+      expect(row.data.skill_sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(row.data.system).toContain('Knowledge Correction');
+    });
+
+    it('refuses an unpublished server skill', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      await engine.setConfig('mcp.publish_skills', 'false');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'echo the skill instructions',
+        skill_name: 'knowledge-correction',
+      })).rejects.toMatchObject({ code: 'permission_denied' });
+    });
+
+    it('requires read scope before loading a published server skill', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'echo the skill instructions',
+        skill_name: 'knowledge-correction',
+      })).rejects.toMatchObject({
+        code: 'permission_denied',
+        message: expect.stringContaining('requires read scope'),
+      });
+    });
+  });
+});
+
+describe('get_agent_job owner-scoped receipt', () => {
+  it('returns structured JSON only to the submitting client', async () => {
+    await seedClient('lore', { bound_tools: ['search'] });
+    await seedClient('other', { bound_tools: ['search'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, result, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, $2::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [
+        JSON.stringify({ __owner_client_id: 'lore' }),
+        JSON.stringify({ result: JSON.stringify({ status: 'ready', effects: [] }) }),
+      ],
+    );
+    const owned = await get_agent_job.handler(makeCtx({ clientId: 'lore' }), { id: row.id });
+    expect((owned as any).receipt).toEqual({ status: 'ready', effects: [] });
+    await expect(
+      get_agent_job.handler(makeCtx({ clientId: 'other' }), { id: row.id }),
+    ).rejects.toThrow(/not owned/i);
   });
 });

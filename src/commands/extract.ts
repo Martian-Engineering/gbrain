@@ -958,7 +958,11 @@ Status (v0.42):
           ? await buildGz(engine, { sourceId: sourceIdFilter })
           : undefined;
         if (byMention) {
-          const r = await extractMentionsFromDb(engine, dryRun, jsonMode, typeFilter, since, {
+          const r = await extractMentionsFromDb(engine, {
+            dryRun,
+            jsonMode,
+            typeFilter,
+            since,
             sourceIdFilter,
             gazetteer: sharedGazetteer,
           });
@@ -1846,19 +1850,36 @@ export async function extractStaleFromDB(
  * source A mentions entity in source B → no link created. v1
  * conservative posture; relaxable in a future wave.
  */
-async function extractMentionsFromDb(
-  engine: BrainEngine,
-  dryRun: boolean,
-  jsonMode: boolean,
-  typeFilter: PageType | undefined,
-  since: string | undefined,
-  opts?: { sourceIdFilter?: string; gazetteer?: Gazetteer },
-): Promise<{ created: number; pages: number }> {
-  const sourceIdFilter = opts?.sourceIdFilter;
+export interface ExtractMentionsOpts {
+  dryRun?: boolean;
+  jsonMode?: boolean;
+  typeFilter?: string;
+  since?: string;
+  sourceIdFilter?: string;
+  prefixFilter?: string;
+  gazetteer?: Gazetteer;
+}
 
-  const allRefs = sourceIdFilter
+export interface ExtractMentionsResult {
+  created: number;
+  pages: number;
+}
+
+/** Run the DB-backed entity-mention pass as a source-scoped library operation. */
+export async function extractMentionsFromDb(
+  engine: BrainEngine,
+  opts: ExtractMentionsOpts,
+): Promise<ExtractMentionsResult> {
+  const dryRun = opts.dryRun ?? false;
+  const jsonMode = opts.jsonMode ?? false;
+  const typeFilter = opts.typeFilter as PageType | undefined;
+  const since = opts.since;
+  const sourceIdFilter = opts.sourceIdFilter;
+
+  let allRefs = sourceIdFilter
     ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
     : await engine.listAllPageRefs();
+  if (opts.prefixFilter) allRefs = allRefs.filter(r => r.slug.startsWith(opts.prefixFilter!));
   const sourceIds = [...new Set(allRefs.map(ref => ref.source_id))];
   const gazetteers = new Map<string, Gazetteer>();
   await Promise.all(sourceIds.map(async sourceId => {

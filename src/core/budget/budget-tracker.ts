@@ -32,6 +32,7 @@ import { mkdirSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
@@ -189,6 +190,8 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
   // brainstorm/lsd.
   const bare = ANTHROPIC_PRICING[modelId];
   if (bare) return bare;
+  const canonical = canonicalLookup(modelId);
+  if (canonical) return canonical;
   const { provider: providerId, model: modelTail } = splitProviderModelId(modelId);
   if (modelTail) {
     const tailHit = ANTHROPIC_PRICING[modelTail];

@@ -131,6 +131,12 @@ export interface GetSkillResult {
   };
 }
 
+/** Private capability metadata used to bind a remote agent to one skill. */
+export interface SkillAgentBindings {
+  tools: string[];
+  writes_to: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Skills-dir resolution
 // ---------------------------------------------------------------------------
@@ -550,6 +556,32 @@ export function getSkillDetail(
       mutating,
     },
   };
+}
+
+/** Read the private tool and write-namespace declarations for agent binding. */
+export function getSkillAgentBindings(
+  skillsDir: string,
+  name: string,
+): SkillAgentBindings {
+  const path = resolveSkillMdPath(skillsDir, name);
+  const size = statSync(path).size;
+  if (size > MAX_SKILL_MD_BYTES) {
+    throw new OperationError(
+      'payload_too_large',
+      `Skill ${name} is ${size} bytes (cap ${MAX_SKILL_MD_BYTES}).`,
+    );
+  }
+  const content = readFileSync(path, 'utf-8');
+  const parsed = parseSkillFrontmatter(content);
+  const tools = parsed?.tools ?? [];
+  const writesTo = parsed?.writes_to ?? [];
+  if (tools.length === 0 || writesTo.length === 0) {
+    throw new OperationError(
+      'invalid_params',
+      `Skill ${name} must declare non-empty tools and writes_to for agent provisioning.`,
+    );
+  }
+  return { tools, writes_to: writesTo };
 }
 
 // ---------------------------------------------------------------------------

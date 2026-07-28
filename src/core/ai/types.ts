@@ -168,6 +168,17 @@ export interface ExpansionTouchpoint {
   price_last_verified?: string;
 }
 
+/** OpenAI reasoning levels accepted by GBrain's per-call agent contract. */
+// Keep this aligned with the installed @ai-sdk/openai adapter. Recipes narrow
+// the set further for each model's actual upstream capabilities.
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/** Return whether an untrusted value is a supported reasoning effort. */
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
 /**
  * Chat touchpoint: tool-using conversational LLMs that can drive Minions
  * subagents. `supports_tools` and `supports_subagent_loop` are intentionally
@@ -215,6 +226,8 @@ export interface RerankerTouchpoint {
 
 export interface ChatTouchpoint {
   models: string[];
+  /** Supported reasoning levels keyed by exact model id. Omitted means unsupported. */
+  reasoning_efforts?: Partial<Record<string, readonly ReasoningEffort[]>>;
   /** Provider returns native function/tool calling. */
   supports_tools: boolean;
   /**

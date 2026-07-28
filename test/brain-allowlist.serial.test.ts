@@ -13,6 +13,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations, OperationError } from '../src/core/operations.ts';
 import {
   BRAIN_TOOL_ALLOWLIST,
+  NON_IDEMPOTENT_BRAIN_TOOLS,
   buildBrainTools,
   filterAllowedTools,
   __testing,
@@ -52,7 +53,7 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // the edge-WRITE ops add_link/remove_link stay out (separate trust call).
     // #2778 added add_timeline_entry (write, fenced like put_page via
     // operations.ts:enforceSubagentSlugFence).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(17);
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(26);
     expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);
@@ -64,14 +65,18 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     expect(BRAIN_TOOL_ALLOWLIST.has('get_recent_salience')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('find_anomalies')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('list_link_sources')).toBe(true);
-    expect(BRAIN_TOOL_ALLOWLIST.has('add_link')).toBe(false);
-    expect(BRAIN_TOOL_ALLOWLIST.has('remove_link')).toBe(false);
+    expect(BRAIN_TOOL_ALLOWLIST.has('add_link')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('remove_link')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('rename_page')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('add_slug_alias')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('delete_page')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('forget_fact')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('supersede_take')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_recent_transcripts')).toBe(false);
   });
 
   test('does NOT contain destructive ops', () => {
     expect(BRAIN_TOOL_ALLOWLIST.has('file_upload')).toBe(false);
-    expect(BRAIN_TOOL_ALLOWLIST.has('delete_page')).toBe(false);
     expect(BRAIN_TOOL_ALLOWLIST.has('delete_file')).toBe(false);
     expect(BRAIN_TOOL_ALLOWLIST.has('sync')).toBe(false);
   });
@@ -93,9 +98,12 @@ describe('buildBrainTools', () => {
     }
   });
 
-  test('tools are flagged idempotent in v0.15', () => {
+  test('marks replay-unsafe correction tools non-idempotent', () => {
     const tools = buildBrainTools({ subagentId: 1, engine, config });
-    expect(tools.every(t => t.idempotent === true)).toBe(true);
+    for (const tool of tools) {
+      const shortName = tool.name.replace(/^brain_/, '');
+      expect(tool.idempotent).toBe(!NON_IDEMPOTENT_BRAIN_TOOLS.has(shortName));
+    }
   });
 
   test('tools carry the op description verbatim', () => {
@@ -147,6 +155,30 @@ describe('buildBrainTools', () => {
         ctx,
       ),
     ).rejects.toBeInstanceOf(OperationError);
+  });
+
+  test('every correction mutation rejects targets outside the job slug fence', async () => {
+    const tools = buildBrainTools({
+      subagentId: 42,
+      engine,
+      config,
+      allowedSlugPrefixes: ['people/'],
+    });
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['brain_rename_page', { old_slug: 'projects/outside', new_slug: 'people/new', content: 'x' }],
+      ['brain_add_slug_alias', { alias_slug: 'projects/outside', canonical_slug: 'people/new' }],
+      ['brain_delete_page', { slug: 'projects/outside' }],
+      ['brain_add_link', { from: 'projects/outside', to: 'people/new' }],
+      ['brain_remove_link', { from: 'projects/outside', to: 'people/new' }],
+      ['brain_forget_fact', { id: 1, slug: 'projects/outside' }],
+      ['brain_supersede_take', { slug: 'projects/outside', take_id: 1, replacement: 'x' }],
+    ];
+    for (const [name, input] of cases) {
+      const tool = tools.find(candidate => candidate.name === name);
+      expect(tool).toBeDefined();
+      await expect(tool!.execute(input, ctx)).rejects.toBeInstanceOf(OperationError);
+    }
   });
 
   // #1586: sourceId threads through buildBrainTools → buildOpContext →

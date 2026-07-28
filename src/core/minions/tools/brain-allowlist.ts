@@ -63,7 +63,16 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'list_link_sources',
   'resolve_slugs',
   'get_ingest_log',
+  'validate_links',
+  'get_active_schema_pack',
   'put_page',
+  'rename_page',
+  'add_slug_alias',
+  'delete_page',
+  'add_link',
+  'remove_link',
+  'forget_fact',
+  'supersede_take',
   // Page-owned refutations use the same fail-closed operation-layer slug
   // fence as put_page. Both mutations are idempotent over their active state.
   'suppress_claim',
@@ -109,6 +118,8 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   list_link_sources: 'List the distinct link provenances in the brain with edge counts (e.g. `citation-graph`, `manual`). Use to discover which edge-writers have populated the graph.',
   resolve_slugs: 'Resolve free-form entity names to canonical slugs (e.g. "Alice" → `people/alice-example`). Use before any tool that takes a slug if the user gave a name not a slug.',
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
+  validate_links: 'Validate explicit references on one page after a repair. Read-only.',
+  get_active_schema_pack: 'Read the active source schema-pack identity before a schema-sensitive repair.',
   put_page: 'Write a markdown page to the gbrain DATABASE (NOT the local filesystem). Page becomes searchable + linkable. Slug must match the agent\'s allowed namespace.',
   suppress_claim: 'Record a user-refuted prose claim on an existing page without editing its prose. Slug must match the agent\'s allowed namespace.',
   unsuppress_claim: 'Deactivate a page-owned claim suppression while retaining its audit row. Slug must match the agent\'s allowed namespace.',
@@ -116,6 +127,13 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   get_recent_salience: 'Read pages ranked by emotional + activity salience over a recency window. Use for "what\'s been on my mind lately".',
   find_anomalies: 'Read cohort-level activity outliers (e.g. tag-cohort or type-cohort with unusual recent volume). Use for "what\'s unusual lately".',
 };
+
+/** Mutations that must never be replayed after an ambiguous tool-call failure. */
+export const NON_IDEMPOTENT_BRAIN_TOOLS: ReadonlySet<string> = new Set([
+  'rename_page',
+  'forget_fact',
+  'supersede_take',
+]);
 
 /** Matches Anthropic's tool-name constraint. No dots. */
 const ANTHROPIC_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -285,9 +303,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
       name: toolName,
       description: op.description,
       input_schema: schema,
-      // v0.15 ships only idempotent brain tools (every allow-listed op is
-      // deterministic over its input; put_page re-writes the same slug).
-      idempotent: true,
+      idempotent: !NON_IDEMPOTENT_BRAIN_TOOLS.has(op.name),
       // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
       // Keyed by the unprefixed op name. Undefined when no hint is registered.
       usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],

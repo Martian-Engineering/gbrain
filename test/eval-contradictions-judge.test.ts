@@ -331,6 +331,26 @@ describe('judgeContradiction', () => {
     expect(out.usage.outputTokens).toBe(50);
   });
 
+  test('forwards provider-native reasoning effort to the judge call', async () => {
+    let observed: Record<string, unknown> | undefined;
+    await judgeContradiction({
+      ...baseInput,
+      model: 'openai:gpt-5.6-terra',
+      reasoningEffort: 'high',
+      chatFn: async (opts) => {
+        observed = opts as unknown as Record<string, unknown>;
+        return mkResult(JSON.stringify({
+          verdict: 'no_contradiction',
+          severity: 'info',
+          axis: '',
+          confidence: 0.9,
+          resolution_kind: null,
+        }));
+      },
+    });
+    expect(observed?.reasoningEffort).toBe('high');
+  });
+
   test('fence-wrapped JSON: parseModelJSON 4-strategy fallback', async () => {
     const fenced = '```json\n' + JSON.stringify({
       verdict: 'no_contradiction',

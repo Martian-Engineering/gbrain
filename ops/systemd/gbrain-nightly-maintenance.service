@@ -1,0 +1,9 @@
+[Unit]
+Description=Submit the nightly GBrain maintenance root job
+After=network-online.target gbrain-minions.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/gbrain.env
+ExecStart=/usr/local/bin/gbrain jobs nightly-maintenance --budget-cents 1500 --max-page-mutations 10

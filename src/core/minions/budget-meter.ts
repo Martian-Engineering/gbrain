@@ -45,6 +45,8 @@ export interface ReserveOpts {
   model: string;
   provider: string;
   jobId?: number;
+  /** Reservation lifetime for long-running bounded jobs. Defaults to 10 minutes. */
+  ttlMs?: number;
 }
 
 export interface Reservation {
@@ -63,77 +65,79 @@ export interface Reservation {
  *   4. INSERT pending reservation row with TTL.
  *   5. Return reservation id.
  *
- * Lock auto-releases at transaction end (xact-scoped). The whole operation
- * is single round-trip (one transaction).
+ * Lock auto-releases at transaction end. Every statement runs in the same
+ * transaction, so no competing reservation can observe an intermediate sum.
  */
 export async function reserve(
   engine: BrainEngine,
   opts: ReserveOpts,
 ): Promise<Reservation> {
-  const sql = sqlQueryForEngine(engine);
   const reservationId = randomUUIDv7();
   const lockKey = clientLockKey(opts.clientId);
-  const expiresAt = new Date(Date.now() + RESERVATION_TTL_MS);
+  const ttlMs = opts.ttlMs ?? RESERVATION_TTL_MS;
+  if (!Number.isInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 2 * 60 * 60 * 1000) {
+    throw new Error('reservation ttlMs must be an integer from 60000 through 7200000');
+  }
+  const expiresAt = new Date(Date.now() + ttlMs);
   const todayStart = todayStartIso();
 
-  // The Postgres path runs everything inside a transaction with
-  // pg_advisory_xact_lock; PGLite is single-process so the lock isn't
-  // strictly needed but we use the same query for shape consistency.
-  // PGLite's pg_advisory_xact_lock is a no-op pre-v0.3.x, so the lock
-  // call is wrapped in a defensive fallback.
+  await engine.transaction(async (tx) => {
+    const sql = sqlQueryForEngine(tx);
+    await tx.executeRaw('SELECT pg_advisory_xact_lock($1::bigint)', [lockKey]);
 
-  // Step 1: sweep expired reservations for this client.
-  await sql`
-    UPDATE mcp_spend_reservations
-       SET status = 'expired', actual_cents = 0
-     WHERE client_id = ${opts.clientId}
-       AND status = 'pending'
-       AND expires_at < now()
-  `;
+    // Sweep, calculate committed capacity, and insert while holding the same
+    // client-scoped lock. Splitting these statements across transactions lets
+    // concurrent callers both observe the same pre-reservation balance.
+    await sql`
+      UPDATE mcp_spend_reservations
+         SET status = 'expired', actual_cents = 0
+       WHERE client_id = ${opts.clientId}
+         AND status = 'pending'
+         AND expires_at < now()
+    `;
 
-  // Step 2 + 3: SUM committed + pending, refuse if over cap.
-  const rows = await sql`
-    SELECT
-      COALESCE((
-        SELECT SUM(spend_cents)::text
-          FROM mcp_spend_log
-         WHERE client_id = ${opts.clientId}
-           AND created_at >= ${todayStart}
-      ), '0') AS committed_text,
-      COALESCE((
-        SELECT SUM(estimated_cents)::text
-          FROM mcp_spend_reservations
-         WHERE client_id = ${opts.clientId}
-           AND status = 'pending'
-           AND created_at >= ${todayStart}
-      ), '0') AS pending_text
-  `;
-  const committedCents = parseFloat(String(rows[0]?.committed_text ?? '0'));
-  const pendingCents = parseFloat(String(rows[0]?.pending_text ?? '0'));
-  const totalProjected = committedCents + pendingCents + opts.estimatedCents;
-  if (totalProjected > opts.capCents) {
-    throw new BudgetExceededError(
-      `budget exceeded for client ${opts.clientId}: ` +
-      `committed=${committedCents.toFixed(2)}¢, pending=${pendingCents.toFixed(2)}¢, ` +
-      `estimated=${opts.estimatedCents.toFixed(2)}¢, cap=${opts.capCents.toFixed(2)}¢`,
-      Math.round(committedCents + pendingCents),
-      Math.round(opts.capCents),
-    );
-  }
+    const rows = await sql`
+      SELECT
+        COALESCE((
+          SELECT SUM(spend_cents)::text
+            FROM mcp_spend_log
+           WHERE client_id = ${opts.clientId}
+             AND created_at >= ${todayStart}
+        ), '0') AS committed_text,
+        COALESCE((
+          SELECT SUM(estimated_cents)::text
+            FROM mcp_spend_reservations
+           WHERE client_id = ${opts.clientId}
+             AND status = 'pending'
+             AND created_at >= ${todayStart}
+        ), '0') AS pending_text
+    `;
+    const committedCents = parseFloat(String(rows[0]?.committed_text ?? '0'));
+    const pendingCents = parseFloat(String(rows[0]?.pending_text ?? '0'));
+    const totalProjected = committedCents + pendingCents + opts.estimatedCents;
+    if (totalProjected > opts.capCents) {
+      throw new BudgetExceededError(
+        `budget exceeded for client ${opts.clientId}: ` +
+        `committed=${committedCents.toFixed(2)}¢, pending=${pendingCents.toFixed(2)}¢, ` +
+        `estimated=${opts.estimatedCents.toFixed(2)}¢, cap=${opts.capCents.toFixed(2)}¢`,
+        Math.round(committedCents + pendingCents),
+        Math.round(opts.capCents),
+      );
+    }
 
-  // Step 4: INSERT reservation.
-  await sql`
-    INSERT INTO mcp_spend_reservations
-      (reservation_id, client_id, job_id, estimated_cents, model, provider, status, expires_at)
-    VALUES
-      (${reservationId}, ${opts.clientId}, ${opts.jobId ?? null},
-       ${opts.estimatedCents}, ${opts.model}, ${opts.provider}, 'pending', ${expiresAt})
-  `;
+    await sql`
+      INSERT INTO mcp_spend_reservations
+        (reservation_id, client_id, job_id, estimated_cents, model, provider, status, expires_at)
+      VALUES
+        (${reservationId}, ${opts.clientId}, ${opts.jobId ?? null},
+         ${opts.estimatedCents}, ${opts.model}, ${opts.provider}, 'pending', ${expiresAt})
+    `;
+  });
 
   return {
     reservationId,
     estimatedCents: opts.estimatedCents,
-    ttlMs: RESERVATION_TTL_MS,
+    ttlMs,
   };
 }
 
@@ -147,31 +151,59 @@ export async function settle(
   reservationId: string,
   actualCents: number,
   operation: string = 'subagent_loop',
+  options: { allowOverage?: boolean } = {},
 ): Promise<void> {
-  const sql = sqlQueryForEngine(engine);
-  // Single UPDATE with WHERE status='pending' to ensure idempotent settles.
-  const updated = await sql`
-    UPDATE mcp_spend_reservations
-       SET status = 'settled',
-           actual_cents = ${actualCents},
-           settled_at = now()
-     WHERE reservation_id = ${reservationId}
-       AND status = 'pending'
-    RETURNING client_id, model, provider
-  `;
-  if (updated.length === 0) {
-    // Already settled or expired; treat as no-op.
-    return;
+  if (!Number.isFinite(actualCents) || actualCents < 0) {
+    throw new Error(`actual spend must be a non-negative finite number, got ${actualCents}`);
   }
-  const row = updated[0];
-  // Mirror into mcp_spend_log so getTodaySpendCents/reserve sees it.
-  await sql`
-    INSERT INTO mcp_spend_log
-      (client_id, token_name, operation, spend_cents, provider, model)
-    VALUES
-      (${String(row.client_id)}, ${null}, ${operation}, ${actualCents},
-       ${String(row.provider)}, ${String(row.model)})
-  `;
+
+  const existing = await engine.executeRaw<{
+    client_id: string;
+    estimated_cents: string | number;
+    status: string;
+  }>(
+    `SELECT client_id, estimated_cents, status
+       FROM mcp_spend_reservations
+      WHERE reservation_id = $1`,
+    [reservationId],
+  );
+  if (existing.length === 0 || existing[0]!.status !== 'pending') return;
+
+  const estimatedCents = Number(existing[0]!.estimated_cents);
+  if (actualCents > estimatedCents && options.allowOverage !== true) {
+    throw new Error(`actual spend ${actualCents} exceeds reserved ${estimatedCents}`);
+  }
+
+  await engine.transaction(async (tx) => {
+    const sql = sqlQueryForEngine(tx);
+    await tx.executeRaw(
+      'SELECT pg_advisory_xact_lock($1::bigint)',
+      [clientLockKey(existing[0]!.client_id)],
+    );
+
+    // The reservation transition and committed-spend row become visible
+    // together. Otherwise a concurrent reserve can observe neither amount
+    // between the UPDATE and INSERT and admit work above the cap.
+    const updated = await sql`
+      UPDATE mcp_spend_reservations
+         SET status = 'settled',
+             actual_cents = ${actualCents},
+             settled_at = now()
+       WHERE reservation_id = ${reservationId}
+         AND status = 'pending'
+      RETURNING client_id, model, provider
+    `;
+    if (updated.length === 0) return;
+
+    const row = updated[0]!;
+    await sql`
+      INSERT INTO mcp_spend_log
+        (client_id, token_name, operation, spend_cents, provider, model)
+      VALUES
+        (${String(row.client_id)}, ${null}, ${operation}, ${actualCents},
+         ${String(row.provider)}, ${String(row.model)})
+    `;
+  });
 }
 
 /**

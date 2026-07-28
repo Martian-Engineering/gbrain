@@ -1,6 +1,11 @@
 export { MinionQueue } from './queue.ts';
 export { MinionWorker } from './worker.ts';
 export { calculateBackoff } from './backoff.ts';
+export {
+  parseNightlyMaintenanceInput,
+  submitNightlyMaintenance,
+  getNightlyBudgetSummary,
+} from './nightly-maintenance.ts';
 export { UnrecoverableError, rowToMinionJob, rowToInboxMessage } from './types.ts';
 export type {
   MinionJob, MinionJobInput, MinionJobStatus, MinionJobContext,

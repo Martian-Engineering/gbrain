@@ -52,6 +52,8 @@ import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts'
 import { toolLoop as gatewayToolLoop } from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
 import { classifyCapabilities } from '../../ai/capabilities.ts';
+import { isReasoningEffort } from '../../ai/types.ts';
+import { supportsReasoningEffort } from '../../ai/model-resolver.ts';
 import { randomUUIDv7 } from 'bun';
 
 // ── Defaults ────────────────────────────────────────────────
@@ -232,6 +234,19 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         configKey: 'models.subagent',
         fallback: TIER_DEFAULTS.subagent,
       });
+    if (data.reasoning_effort !== undefined && !isReasoningEffort(data.reasoning_effort)) {
+      throw new Error(
+        'subagent job rejected: data.reasoning_effort must be one of none, minimal, low, medium, high, xhigh.',
+      );
+    }
+    if (
+      data.reasoning_effort !== undefined
+      && !supportsReasoningEffort(model, data.reasoning_effort)
+    ) {
+      throw new Error(
+        `subagent job rejected: model "${model}" does not support reasoning_effort "${data.reasoning_effort}".`,
+      );
+    }
     const maxTurns = data.max_turns ?? DEFAULT_MAX_TURNS;
     // #2778: per-turn output cap — data.max_tokens → config → 8192 default.
     const maxOutputTokens = resolveMaxOutputTokens(
@@ -249,8 +264,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // provider in src/core/ai/recipes/). When OFF, route through the legacy
     // Anthropic-direct path AND refuse non-Anthropic models loudly.
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
-    const useGatewayLoop = typeof useGatewayLoopRaw === 'string' &&
-      (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1');
+    const useGatewayLoop = data.use_gateway_loop === true || (
+      typeof useGatewayLoopRaw === 'string'
+      && (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1')
+    );
     if (!useGatewayLoop && !isAnthropicProvider(model)) {
       throw new Error(
         `subagent job: resolved model "${model}" is non-Anthropic but agent.use_gateway_loop is not enabled. ` +
@@ -972,6 +989,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     maxTokens: maxOutputTokens,
     abortSignal: ctx.signal,
     cacheSystem,
+    reasoningEffort: data.reasoning_effort,
     // ALWAYS pass replayState (even on fresh runs) so the gateway loop's
     // messageIdx counter starts at `nextMessageIdx` (1 on fresh, after the
     // seed user write above). Without this, the loop defaults to messageIdx=0

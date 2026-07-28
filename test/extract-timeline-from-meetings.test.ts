@@ -97,6 +97,38 @@ filing_rules: []
 }
 
 describe('extractTimelineFromMeetings event widening', () => {
+  test('can write canonical timeline rows without reciprocal Markdown', async () => {
+    await engine.putPage('people/casey-example', {
+      type: 'person',
+      title: 'Casey Example',
+      compiled_truth: '# Casey Example',
+      timeline: '## Timeline',
+      frontmatter: {},
+    });
+    await engine.putPage('life/events/2026-07-26-planning', {
+      type: 'event',
+      title: 'Planning Session',
+      compiled_truth: 'Casey Example attended.',
+      timeline: '',
+      frontmatter: {},
+      effective_date: new Date('2026-07-26T18:00:00.000Z'),
+      effective_date_source: 'event_date',
+    });
+
+    const gazetteer = await buildGazetteer(engine, { activePack });
+    const result = await extractTimelineFromMeetings(engine, {
+      gazetteer,
+      activePack,
+      materializeBacklinks: false,
+    });
+
+    expect(result.entries_created).toBe(1);
+    expect(result.materialized_backlinks_written).toBe(0);
+    expect(await engine.getTimeline('people/casey-example', { sourceId: 'default' })).toHaveLength(1);
+    const page = await engine.getPage('people/casey-example', { sourceId: 'default' });
+    expect(page?.timeline).not.toContain('life/events/2026-07-26-planning');
+  });
+
   test('event pages update entity timelines through put_page and remain idempotent', async () => {
     await engine.putPage('people/alice-example', {
       type: 'person',

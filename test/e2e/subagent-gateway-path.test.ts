@@ -70,6 +70,7 @@ interface FakeJobOpts {
   prompt: string;
   model?: string;
   allowed_tools?: string[];
+  use_gateway_loop?: boolean;
 }
 
 async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: MinionJobContext; tokenSink: any[] }> {
@@ -78,7 +79,12 @@ async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: Min
     `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
      VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
      RETURNING id`,
-    [JSON.stringify({ prompt: opts.prompt, model: opts.model, allowed_tools: opts.allowed_tools })],
+    [JSON.stringify({
+      prompt: opts.prompt,
+      model: opts.model,
+      allowed_tools: opts.allowed_tools,
+      use_gateway_loop: opts.use_gateway_loop,
+    })],
   );
   const jobId = rows[0].id;
 
@@ -89,7 +95,12 @@ async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: Min
   const ctx: MinionJobContext = {
     id: jobId,
     name: 'subagent',
-    data: { prompt: opts.prompt, model: opts.model, allowed_tools: opts.allowed_tools },
+    data: {
+      prompt: opts.prompt,
+      model: opts.model,
+      allowed_tools: opts.allowed_tools,
+      use_gateway_loop: opts.use_gateway_loop,
+    },
     attempts_made: 0,
     signal: abortCtrl.signal,
     deadlineAtMs: null,
@@ -193,6 +204,29 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(messages[0].message_idx).toBe(0);
     expect(messages[1].role).toBe('assistant');
     expect(messages[1].message_idx).toBe(1);
+  });
+
+  it('trusted job data can require the gateway loop without the global flag', async () => {
+    await engine.setConfig('agent.use_gateway_loop', 'false');
+    __setChatTransportForTests(async () => ({
+      text: 'terra complete',
+      blocks: [{ type: 'text', text: 'terra complete' }] as ChatBlock[],
+      stopReason: 'end',
+      usage: { input_tokens: 12, output_tokens: 3, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'gpt-5.6-terra',
+      providerId: 'openai',
+    } satisfies ChatResult));
+
+    const handler = buildHandler([]);
+    const { ctx } = await makeFakeJob({
+      prompt: 'repair',
+      model: 'openai:gpt-5.6-terra',
+      use_gateway_loop: true,
+    });
+
+    const result = await handler(ctx);
+
+    expect(result.result).toBe('terra complete');
   });
 
   it('happy path 2-turn with tool: dispatches, persists v2 stable ID, returns final text', async () => {

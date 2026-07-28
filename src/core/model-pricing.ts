@@ -76,6 +76,8 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'openai:gpt-4o-mini':                   { input:  0.15, output:  0.60 },
   'openai:gpt-5':                         { input:  5.00, output: 20.00 },
   'openai:gpt-5.5':                       { input:  4.00, output: 16.00 },
+  // GPT-5.6 Terra standard rates, verified 2026-07-28.
+  'openai:gpt-5.6-terra':                 { input:  2.50, output: 15.00 },
 
   // ── Google ─────────────────────────────────────────────────────────────
   'google:gemini-1.5-pro':                { input:  1.25, output:  5.00 },

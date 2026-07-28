@@ -26,6 +26,8 @@ export interface ExtractNerOpts {
   dryRun?: boolean;
   /** Optional source-id filter on the WALK (gazetteer stays brain-wide). */
   sourceIdFilter?: string;
+  /** Optional slug-prefix filter on the source pages being scanned. */
+  prefixFilter?: string;
   /** Optional page-type filter on the WALK. */
   typeFilter?: string;
   /** Only scan pages with updated_at after this ISO date. */
@@ -102,9 +104,10 @@ export async function extractNerLinks(
   opts: ExtractNerOpts = {},
 ): Promise<ExtractNerResult> {
   const dryRun = opts.dryRun ?? false;
-  const allRefs = opts.sourceIdFilter
+  let allRefs = opts.sourceIdFilter
     ? (await engine.listAllPageRefs()).filter((r) => r.source_id === opts.sourceIdFilter)
     : await engine.listAllPageRefs();
+  if (opts.prefixFilter) allRefs = allRefs.filter(ref => ref.slug.startsWith(opts.prefixFilter!));
   const sourceIds = [...new Set(allRefs.map(ref => ref.source_id))];
 
   // Resolve inference policy per source. An unscoped federated walk may mix
