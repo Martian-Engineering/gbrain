@@ -19,6 +19,7 @@ import {
 import { hasScope } from '../src/core/scope.ts';
 import { InvalidTokenError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthInfo as CoreAuthInfo } from '../src/core/operations.ts';
+import { resolve } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Test setup: in-memory PGLite with OAuth tables
@@ -358,6 +359,55 @@ describe('admin client provisioning operations', () => {
     ]);
   });
 
+  test('provision_client derives agent bindings from a published skill', async () => {
+    await sql`
+      INSERT INTO sources (id, name)
+      VALUES (${'agent-source'}, ${'Agent Source'})
+      ON CONFLICT (id) DO NOTHING
+    `;
+    const ctx = operationContext();
+    ctx.config = {
+      mcp: {
+        publish_skills: true,
+        skills_dir: resolve(import.meta.dir, '../skills'),
+      },
+    } as any;
+
+    const result = await operationsByName.provision_client.handler(ctx, {
+      client_name: 'viewer-agent',
+      scopes: ['read', 'write', 'agent'],
+      source_id: 'agent-source',
+      federated_read: ['agent-source'],
+      bound_principal: 'people/alice-example',
+      agent_skill_name: 'knowledge-correction',
+      bound_max_concurrent: 1,
+      budget_usd_per_day: 5,
+    }) as any;
+
+    expect(result.agent_bindings).toMatchObject({
+      skill_name: 'knowledge-correction',
+      bound_source_id: 'agent-source',
+      bound_max_concurrent: 1,
+      budget_usd_per_day: 5,
+    });
+    expect(result.agent_bindings.bound_tools).toContain('put_page');
+    expect(result.agent_bindings.bound_slug_prefixes).toContain('people/');
+
+    const [row] = await sql`
+      SELECT bound_tools, bound_source_id, bound_slug_prefixes,
+             bound_max_concurrent, budget_usd_per_day::text AS budget
+        FROM oauth_clients
+       WHERE client_id = ${result.client_id}
+    `;
+    expect(row.bound_tools).toEqual(result.agent_bindings.bound_tools);
+    expect(row.bound_source_id).toBe('agent-source');
+    expect(row.bound_slug_prefixes).toEqual(
+      result.agent_bindings.bound_slug_prefixes,
+    );
+    expect(Number(row.bound_max_concurrent)).toBe(1);
+    expect(row.budget).toBe('5.00');
+  });
+
   test('provision_client rejects invalid scope and source grants', async () => {
     await expect(operationsByName.provision_client.handler(
       operationContext(),
@@ -407,6 +457,51 @@ describe('admin client provisioning operations', () => {
         source_id: 'default',
         federated_read: ['default'],
         bound_principal: '',
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'unbound-agent',
+        scopes: ['read', 'agent'],
+        source_id: 'default',
+        federated_read: ['default'],
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'skill-without-agent',
+        scopes: ['read'],
+        source_id: 'default',
+        federated_read: ['default'],
+        agent_skill_name: 'knowledge-correction',
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'bad-agent-cap',
+        scopes: ['read', 'agent'],
+        source_id: 'default',
+        federated_read: ['default'],
+        agent_skill_name: 'knowledge-correction',
+        bound_max_concurrent: 0,
+      },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+
+    await expect(operationsByName.provision_client.handler(
+      operationContext(),
+      {
+        client_name: 'bad-agent-budget',
+        scopes: ['read', 'agent'],
+        source_id: 'default',
+        federated_read: ['default'],
+        agent_skill_name: 'knowledge-correction',
+        budget_usd_per_day: -1,
       },
     )).rejects.toMatchObject({ code: 'invalid_params' });
   });
