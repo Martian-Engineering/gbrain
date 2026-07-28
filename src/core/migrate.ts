@@ -5907,6 +5907,16 @@ export const MIGRATIONS: Migration[] = [
         ALTER COLUMN write_intent DROP NOT NULL;
     `,
   },
+  {
+    version: 133,
+    name: 'mcp_request_log_token_keyset_index',
+    // Supports list_request_traces' stable client-specific keyset order.
+    idempotent: true,
+    sql: `
+      CREATE INDEX IF NOT EXISTS idx_mcp_log_token_time_id
+        ON mcp_request_log(token_name, created_at DESC, id DESC);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

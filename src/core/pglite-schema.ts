@@ -958,6 +958,8 @@ CREATE TABLE IF NOT EXISTS mcp_request_log (
 
 CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
 CREATE INDEX IF NOT EXISTS idx_mcp_log_agent_time ON mcp_request_log(agent_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_log_token_time_id
+  ON mcp_request_log(token_name, created_at DESC, id DESC);
 
 -- ============================================================
 -- OAuth 2.1: clients, tokens, authorization codes

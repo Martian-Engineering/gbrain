@@ -706,6 +706,8 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 -- Composite indexes for admin dashboard request log queries
 CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
 CREATE INDEX IF NOT EXISTS idx_mcp_log_agent_time ON mcp_request_log(agent_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mcp_log_token_time_id
+  ON mcp_request_log(token_name, created_at DESC, id DESC);
 
 -- ============================================================
 -- op_checkpoints: shared checkpoint table for long-running ops

@@ -91,6 +91,10 @@ import {
   PageTimelineNotFoundError,
   resolvePageTimelineEvents,
 } from './chronicle/page-timeline.ts';
+import {
+  listRequestTraces,
+  RequestTraceValidationError,
+} from './request-traces.ts';
 
 // --- Types ---
 
@@ -5721,6 +5725,60 @@ const revoke_client: Operation = {
   },
 };
 
+const list_request_traces: Operation = {
+  name: 'list_request_traces',
+  description:
+    'Admin-only, privacy-normalized request history for one OAuth client. ' +
+    'Returns newest-first entries with opaque older/newer keyset cursors.',
+  params: {
+    client_id: {
+      type: 'string',
+      required: true,
+      description: 'OAuth client id whose request history should be listed',
+      trace: { kind: 'client' },
+    },
+    outcome: {
+      type: 'string',
+      enum: ['all', 'success', 'failed'],
+      description: 'Outcome filter (default all)',
+      trace: { kind: 'filter' },
+    },
+    limit: {
+      type: 'number',
+      description: 'Page size (default 50, clamped to 1-100)',
+    },
+    before: {
+      type: 'string',
+      description: 'Opaque cursor for the next older page',
+    },
+    after: {
+      type: 'string',
+      description: 'Opaque cursor for the next newer page',
+    },
+  },
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    try {
+      return await listRequestTraces(
+        ctx.engine,
+        {
+          clientId: p.client_id as string,
+          outcome: p.outcome as 'all' | 'success' | 'failed' | undefined,
+          limit: p.limit as number | undefined,
+          before: p.before as string | undefined,
+          after: p.after as string | undefined,
+        },
+        operation => operationsByName[operation],
+      );
+    } catch (error) {
+      if (error instanceof RequestTraceValidationError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+};
+
 const whoami: Operation = {
   name: 'whoami',
   description:
@@ -7440,7 +7498,7 @@ export const operations: Operation[] = [
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
-  provision_client, revoke_client,
+  provision_client, revoke_client, list_request_traces,
   whoami, sources_add, sources_list, sources_remove, sources_status,
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,
