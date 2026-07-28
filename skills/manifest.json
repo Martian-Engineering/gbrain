@@ -268,6 +268,11 @@
       "name": "desk-resolution",
       "path": "desk-resolution/SKILL.md",
       "description": "Settle a Lore desk item as an agent: desk tags on the event group plus a principal-attributed attestation on the source page"
+    },
+    {
+      "name": "knowledge-correction",
+      "path": "knowledge-correction/SKILL.md",
+      "description": "Plan and apply freeform brain corrections, including compound page creation, identity, alias, link, and removal work"
     }
   ],
   "dependencies": {
