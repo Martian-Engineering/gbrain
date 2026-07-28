@@ -263,6 +263,51 @@ describe('nightly repair agent', () => {
     });
   });
 
+  test('rejects deleting the broken occurrence when replacement already existed', async () => {
+    const pageBefore = {
+      ...beforePage,
+      compiled_truth: 'Old [[people/alice]] and existing [[people/alicia]].',
+    };
+    const pageAfter = {
+      ...pageBefore,
+      compiled_truth: 'Existing [[people/alicia]].',
+    };
+    const countedManifest = {
+      ...manifest,
+      page_hash: semanticRepairPageHash(pageBefore),
+    };
+    const canonicalTarget = {
+      ...beforePage,
+      slug: 'people/alicia',
+      title: 'Alicia',
+    };
+    const result = await verifyRepair(
+      {
+        async getPage(slug: string) {
+          if (slug === pageAfter.slug) return pageAfter;
+          if (slug === canonicalTarget.slug) return canonicalTarget;
+          return null;
+        },
+        async resolveSlugWithAlias(slug: string) { return slug; },
+        async resolveSlugs() { return []; },
+        async getTags() { return []; },
+      } as unknown as BrainEngine,
+      countedManifest,
+      { page: pageBefore, markdown: '# Before', version_id: 9 },
+      {
+        result: JSON.stringify(decision()),
+        turns_count: 2,
+        stop_reason: 'end_turn',
+        tokens: { in: 100, out: 10, cache_read: 0, cache_create: 0 },
+      } as SubagentResult,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'replacement reference count did not increase',
+    });
+  });
+
   test('rolls back a mutation that fails deterministic verification', async () => {
     const { deps, calls } = dependencies({
       async verify() {

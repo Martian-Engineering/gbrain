@@ -6,6 +6,7 @@ import { canonicalLookup } from '../../model-pricing.ts';
 import { serializePageToMarkdown } from '../../markdown.ts';
 import { lintContent } from '../../../commands/lint.ts';
 import { validatePageReferences } from '../../link-validation.ts';
+import { extractEntityRefs } from '../../link-extraction.ts';
 import { loadConfigWithEngine } from '../../config.ts';
 import { operationsByName, type OperationContext } from '../../operations.ts';
 import { makeSubagentHandler } from './subagent.ts';
@@ -223,6 +224,13 @@ function buildAgentData(
   };
 }
 
+/** Count exact explicit page references without link validator deduplication. */
+function referenceCount(page: Page, target: string): number {
+  return extractEntityRefs(`${page.compiled_truth}\n${page.timeline}`)
+    .filter(reference => reference.slug === target)
+    .length;
+}
+
 /** Verify the resulting page against the manifest and deterministic validators. */
 export async function verifyRepair(
   engine: BrainEngine,
@@ -291,7 +299,35 @@ export async function verifyRepair(
   }
 
   if (manifest.finding.kind === 'link_reference') {
+    if (outcome.decision !== 'replace_reference') {
+      return {
+        ok: false,
+        after_hash: afterHash,
+        reason: 'link finding requires a replacement decision',
+        outcome,
+      };
+    }
     const target = manifest.finding.target;
+    const replacement = outcome.proposed_replacement;
+    const removedCount = referenceCount(before.page, target);
+    const replacementIncrease =
+      referenceCount(after, replacement) - referenceCount(before.page, replacement);
+    if (removedCount < 1 || referenceCount(after, target) !== 0) {
+      return {
+        ok: false,
+        after_hash: afterHash,
+        reason: 'broken reference occurrence was not removed',
+        outcome,
+      };
+    }
+    if (replacementIncrease < removedCount) {
+      return {
+        ok: false,
+        after_hash: afterHash,
+        reason: 'replacement reference count did not increase',
+        outcome,
+      };
+    }
     const findings = await validatePageReferences(
       engine,
       after,
@@ -308,7 +344,7 @@ export async function verifyRepair(
       };
     }
     const replacementResolved = findings.some(finding =>
-      finding.target === outcome.proposed_replacement && finding.status === 'resolved');
+      finding.target === replacement && finding.status === 'resolved');
     if (!replacementResolved) {
       return {
         ok: false,
