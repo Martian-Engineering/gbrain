@@ -41,6 +41,11 @@ the unresolved target, resolve the replacement, and pass frontmatter lint.
 The server independently performs those checks. Any failure restores the
 complete pre-write page snapshot.
 
+Explicit page references are also re-extracted into the graph during the
+deterministic repair phase. Residual graph-parity or other proposal-only
+findings stay visible in the report but are not sent to an agent, because the
+current agent contract cannot execute them.
+
 Provider-specific Gmail or Granola re-ingestion is not available to these
 agents yet. Such findings are retained as `recover_source`; they are not
 silently repointed to related material.

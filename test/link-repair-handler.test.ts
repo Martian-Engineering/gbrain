@@ -44,6 +44,10 @@ function makeDependencies(
       calls.push('ner');
       return { created: 1, pages: 3, pack_unavailable: false };
     },
+    async extractLinks() {
+      calls.push('links');
+      return { created: 4, pages: 3, unresolved: [] };
+    },
     async extractTimeline() {
       calls.push('timeline');
       return {
@@ -110,16 +114,24 @@ describe('link_repair handler', () => {
 
     const result = await handler(job);
 
-    expect(calls).toEqual(['gazetteer', 'mentions', 'ner', 'timeline', 'backlinks']);
-    expect(recorded.at(-1)).toEqual(['gazetteer', 'mentions', 'ner', 'timeline', 'backlinks']);
-    expect(progress).toHaveLength(6);
-    expect(progress.at(-1)).toMatchObject({ phase: 'completed', done: 5, total: 5 });
+    expect(calls).toEqual(['gazetteer', 'mentions', 'ner', 'links', 'timeline', 'backlinks']);
+    expect(recorded.at(-1)).toEqual([
+      'gazetteer',
+      'mentions',
+      'ner',
+      'links',
+      'timeline',
+      'backlinks',
+    ]);
+    expect(progress).toHaveLength(7);
+    expect(progress.at(-1)).toMatchObject({ phase: 'completed', done: 6, total: 6 });
     expect(result).toMatchObject({
       source_id: 'wiki',
       resumed: false,
       stages: {
         mentions: { created: 2 },
         ner: { created: 1 },
+        links: { created: 4 },
         timeline: { entries_created: 2 },
         backlinks: { mode: 'graph' },
       },
@@ -135,8 +147,15 @@ describe('link_repair handler', () => {
 
     const result = await makeLinkRepairHandler({} as BrainEngine, dependencies)(job);
 
-    expect(calls).toEqual(['gazetteer', 'ner', 'timeline', 'backlinks']);
-    expect(recorded.at(-1)).toEqual(['gazetteer', 'mentions', 'ner', 'timeline', 'backlinks']);
+    expect(calls).toEqual(['gazetteer', 'ner', 'links', 'timeline', 'backlinks']);
+    expect(recorded.at(-1)).toEqual([
+      'gazetteer',
+      'mentions',
+      'ner',
+      'links',
+      'timeline',
+      'backlinks',
+    ]);
     expect(result).toMatchObject({ resumed: true });
   });
 

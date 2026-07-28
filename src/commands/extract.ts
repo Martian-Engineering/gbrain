@@ -1395,16 +1395,25 @@ export async function extractTimelineForSlugs(
 // no local checkout (e.g. live MCP servers). Uses the typed link inference and
 // timeline parser from src/core/link-extraction.ts.
 
-async function extractLinksFromDB(
+export interface ExtractLinksFromDbOptions {
+  includeFrontmatter?: boolean;
+  sourceIdFilter?: string;
+  prefixFilter?: string;
+  stampWatermark?: boolean;
+}
+
+/** Reconcile explicit page references into graph links for one bounded DB scope. */
+export async function extractLinksFromDB(
   engine: BrainEngine,
   dryRun: boolean,
   jsonMode: boolean,
   typeFilter: PageType | undefined,
   since: string | undefined,
-  opts?: { includeFrontmatter?: boolean; sourceIdFilter?: string; stampWatermark?: boolean },
+  opts?: ExtractLinksFromDbOptions,
 ): Promise<{ created: number; pages: number; unresolved: UnresolvedFrontmatterRef[] }> {
   const includeFrontmatter = opts?.includeFrontmatter ?? false;
   const sourceIdFilter = opts?.sourceIdFilter;
+  const prefixFilter = opts?.prefixFilter;
   // C3 (D6): the links_extracted_at watermark covers links AND timeline, so a
   // links-ONLY run must NOT stamp it (that would hide timeline staleness for
   // `gbrain extract links --source db`). Only stamp when the caller ran BOTH
@@ -1438,12 +1447,13 @@ async function extractLinksFromDB(
   // cross-source wikilinks (qualified like `[[other-src:slug]]`) can
   // resolve — the filter is on WHICH pages we extract FROM, not what
   // we can resolve TO.
-  const allRefs = sourceIdFilter
-    ? (await engine.listAllPageRefs()).filter(r => r.source_id === sourceIdFilter)
-    : await engine.listAllPageRefs();
-  const fullRefsForResolver = sourceIdFilter
-    ? await engine.listAllPageRefs()
-    : allRefs;
+  const fullRefsForResolver = await engine.listAllPageRefs();
+  const sourceRefs = sourceIdFilter
+    ? fullRefsForResolver.filter(r => r.source_id === sourceIdFilter)
+    : fullRefsForResolver;
+  const allRefs = prefixFilter
+    ? sourceRefs.filter(ref => ref.slug.startsWith(prefixFilter))
+    : sourceRefs;
   // For backward-compat checks (`allSlugs.has(...)` calls below), we still
   // need a flat slug set. ALSO a per-slug → [sources] map for F10 resolution.
   //

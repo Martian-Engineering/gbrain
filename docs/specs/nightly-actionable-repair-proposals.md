@@ -209,7 +209,10 @@ The child is bound to the finding's source and exact affected page slug.
 Search and read results may inform the semantic choice; they do not permit
 writing another page.
 
-For ambiguous, blocked, or graph-parity manifests, `put_page` remains absent.
+The nightly root does not dispatch ambiguous, blocked, or graph-parity
+proposal manifests to an agent. Explicit graph links are reconciled
+deterministically before the audit; any residual non-executable findings remain
+visible in the audit and report without consuming model budget.
 
 The current slice does not add Gmail or Granola connector operations to the
 agent allowlist. Those cases are classified autonomously as `recover_source`;

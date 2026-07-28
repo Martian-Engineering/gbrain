@@ -251,6 +251,32 @@ describe('nightly maintenance root handler', () => {
     expect((result as any).mutation_receipts[0].outcome).toEqual(receipt.outcome);
   });
 
+  test('does not spend agent budget on non-executable proposal manifests', async () => {
+    let childCalls = 0;
+    const proposalManifest = {
+      ...manifest,
+      manifest_id: `${manifest.manifest_id}:proposal`,
+      manifest_hash: '8'.repeat(64),
+      disposition: 'proposal',
+      allowed_actions: [{
+        kind: 'create_proposal',
+        source_id: manifest.source_id,
+        page_slug: manifest.page_slug,
+      }],
+    } as SemanticRepairManifest;
+
+    const result = await makeNightlyMaintenanceHandler(engine, dependencies({
+      async buildManifests() { return [proposalManifest, manifest]; },
+      async runRepairChild() {
+        childCalls++;
+        return receipt;
+      },
+    }))(job([]));
+
+    expect(childCalls).toBe(1);
+    expect((result as any).mutation_receipts).toEqual([receipt]);
+  });
+
   test('does not charge a deferred outcome against the mutation ceiling', async () => {
     let childCalls = 0;
     const deferredReceipt = {

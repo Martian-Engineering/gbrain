@@ -10,7 +10,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runExtract } from '../src/commands/extract.ts';
+import { extractLinksFromDB, runExtract } from '../src/commands/extract.ts';
 import type { PageInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
@@ -141,6 +141,21 @@ describe('gbrain extract links --source db', () => {
     expect(bobLinks.length).toBe(1);
     const acmeLinks = await engine.getLinks('companies/acme');
     expect(acmeLinks.length).toBe(0);
+  });
+
+  test('library reconciliation honors a page-prefix boundary', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    await engine.putPage('people/bob', personPage('Bob', '[Acme](companies/acme) hired Bob.'));
+    await engine.putPage('companies/acme', companyPage('Acme', '[Alice](people/alice) joined.'));
+
+    await extractLinksFromDB(engine, false, false, undefined, undefined, {
+      prefixFilter: 'people/',
+    });
+
+    expect(await engine.getLinks('people/bob')).toMatchObject([{
+      to_slug: 'companies/acme',
+    }]);
+    expect(await engine.getLinks('companies/acme')).toHaveLength(0);
   });
 });
 

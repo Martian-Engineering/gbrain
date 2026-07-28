@@ -13,6 +13,7 @@ import {
   type OpCheckpointKey,
 } from '../../op-checkpoint.ts';
 import {
+  extractLinksFromDB,
   extractMentionsFromDb,
   type ExtractMentionsResult,
 } from '../../../commands/extract.ts';
@@ -22,7 +23,7 @@ import {
 } from '../../../commands/backlinks.ts';
 import type { MinionHandler } from '../types.ts';
 
-const STAGES = ['gazetteer', 'mentions', 'ner', 'timeline', 'backlinks'] as const;
+const STAGES = ['gazetteer', 'mentions', 'ner', 'links', 'timeline', 'backlinks'] as const;
 type LinkRepairStage = typeof STAGES[number];
 
 export interface LinkRepairInput {
@@ -47,6 +48,10 @@ export interface LinkRepairDependencies {
     input: LinkRepairInput,
     gazetteer: Gazetteer,
   ): Promise<ExtractNerResult>;
+  extractLinks(
+    engine: BrainEngine,
+    input: LinkRepairInput,
+  ): Promise<{ created: number; pages: number; unresolved: unknown[] }>;
   extractTimeline(
     engine: BrainEngine,
     input: LinkRepairInput,
@@ -162,6 +167,29 @@ const DEFAULT_DEPENDENCIES: LinkRepairDependencies = {
     }
     return total;
   },
+  async extractLinks(engine, input) {
+    const typeFilters = input.types && input.types.length > 0
+      ? input.types
+      : [undefined];
+    const total = { created: 0, pages: 0, unresolved: [] as unknown[] };
+    for (const typeFilter of typeFilters) {
+      const result = await extractLinksFromDB(
+        engine,
+        input.dry_run,
+        false,
+        typeFilter,
+        undefined,
+        {
+          sourceIdFilter: input.source_id,
+          prefixFilter: input.prefix,
+        },
+      );
+      total.created += result.created;
+      total.pages += result.pages;
+      total.unresolved.push(...result.unresolved);
+    }
+    return total;
+  },
   async extractTimeline(engine, input, gazetteer) {
     return extractTimelineFromMeetings(engine, {
       dryRun: input.dry_run,
@@ -220,6 +248,8 @@ export function makeLinkRepairHandler(
           results.mentions = await dependencies.extractMentions(engine, input, gazetteer);
         } else if (stage === 'ner') {
           results.ner = await dependencies.extractNer(engine, input, gazetteer);
+        } else if (stage === 'links') {
+          results.links = await dependencies.extractLinks(engine, input);
         } else if (stage === 'timeline') {
           results.timeline = await dependencies.extractTimeline(engine, input, gazetteer);
         } else {

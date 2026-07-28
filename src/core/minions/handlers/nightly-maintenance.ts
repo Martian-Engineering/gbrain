@@ -443,6 +443,7 @@ export function makeNightlyMaintenanceHandler(
         && receipt.before_hash !== receipt.after_hash
       ).length;
       for (const manifest of semantic.manifests) {
+        if (manifest.disposition !== 'repair') continue;
         if (completedManifestHashes.has(manifest.manifest_hash)) continue;
         if (appliedMutations >= input.max_page_mutations) {
           semantic.stopped_reason = 'mutation_limit';
@@ -485,6 +486,9 @@ export function makeNightlyMaintenanceHandler(
       }
       progress = await checkpoint(job, progress, 'semantic_repair', {
         manifest_count: semantic.manifests.length,
+        skipped_non_executable_count: semantic.manifests.filter(
+          manifest => manifest.disposition !== 'repair',
+        ).length,
         receipts,
         stopped_reason: semantic.stopped_reason,
       }, deps.now());
