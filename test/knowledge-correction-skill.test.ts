@@ -49,6 +49,13 @@ describe('knowledge-correction skill', () => {
     expect(skill).toContain('invent the date');
   });
 
+  test('is self-contained for remote agent dispatch', () => {
+    expect(skill).toContain('instructions are self-contained for remote agents');
+    expect(skill).not.toMatch(/Read `\.\.\//);
+    expect(skill).toContain('Apply a notability gate');
+    expect(skill).toContain('Every explicit reference must resolve');
+  });
+
   test('declared tools resolve to canonical GBrain operations', () => {
     const operationNames = new Set(operations.map(operation => operation.name));
     for (const tool of frontmatterList('tools')) {
