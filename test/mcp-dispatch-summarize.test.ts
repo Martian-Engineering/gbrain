@@ -18,6 +18,68 @@ import { describe, expect, test } from 'bun:test';
 import { summarizeMcpParams, type ParamSummary } from '../src/mcp/dispatch.ts';
 
 describe('summarizeMcpParams — declared-keys allow-list', () => {
+  test('emits only explicitly annotated display fields and trusted source scope', () => {
+    const summary = summarizeMcpParams(
+      'put_page',
+      {
+        slug: 'people/alice-example',
+        content: '# Private body',
+        source_uri: '/private/source/path.md',
+      },
+      { sourceIds: ['team-notes'] },
+    ) as ParamSummary;
+
+    expect(summary.version).toBe(2);
+    expect(summary.display_fields).toEqual([
+      { name: 'slug', kind: 'page', value: 'people/alice-example' },
+    ]);
+    expect(summary.source_scope).toEqual(['team-notes']);
+    expect(JSON.stringify(summary)).not.toContain('Private body');
+    expect(JSON.stringify(summary)).not.toContain('/private/source/path.md');
+  });
+
+  test('request params cannot forge authenticated source scope', () => {
+    const summary = summarizeMcpParams(
+      'put_page',
+      {
+        slug: 'projects/trace-example',
+        source_id: 'attacker-chosen-source',
+      },
+      { sourceIds: ['trusted-source', 'trusted-source'] },
+    ) as ParamSummary;
+
+    expect(summary.source_scope).toEqual(['trusted-source']);
+    expect(JSON.stringify(summary)).not.toContain('attacker-chosen-source');
+  });
+
+  test('annotated page and link identifiers are visible without free-text context', () => {
+    const summary = summarizeMcpParams('add_link', {
+      from: 'projects/source-example',
+      to: 'projects/target-example',
+      link_type: 'depends-on',
+      context: 'Private explanation of the relationship',
+    }) as ParamSummary;
+
+    expect(summary.display_fields).toEqual([
+      { name: 'from', kind: 'page', value: 'projects/source-example' },
+      { name: 'to', kind: 'page', value: 'projects/target-example' },
+      { name: 'link_type', kind: 'link_type', value: 'depends-on' },
+    ]);
+    expect(JSON.stringify(summary)).not.toContain('Private explanation');
+  });
+
+  test('non-scalar annotated values and oversized identifiers are omitted', () => {
+    const nonScalar = summarizeMcpParams('get_page', {
+      slug: ['projects/not-a-scalar'],
+    }) as ParamSummary;
+    expect(nonScalar.display_fields).toBeUndefined();
+
+    const oversized = summarizeMcpParams('get_page', {
+      slug: 'x'.repeat(256),
+    }) as ParamSummary;
+    expect(oversized.display_fields).toBeUndefined();
+  });
+
   test('declared keys are preserved alphabetically', () => {
     // put_page declares params: slug, content (and a few others). The summary
     // should list both, sorted, without any value bytes.

@@ -1740,7 +1740,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // cast, so reads return real objects and `params->>'op'` returns
       // 'tools/list'. Pre-existing string-shaped rows are normalized by
       // migration v41 in src/core/migrate.ts.
-      const safeParamsSummary = summarizeMcpParams(name, params);
+      const safeParamsSummary = summarizeMcpParams(name, params, {
+        sourceIds: authInfo.allowedSources?.length
+          ? authInfo.allowedSources
+          : authInfo.sourceId
+            ? [authInfo.sourceId]
+            : [],
+      });
       const logParamsObj: unknown = logFullParams
         ? (params || null)
         : (safeParamsSummary || null);
