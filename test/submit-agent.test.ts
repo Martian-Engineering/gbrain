@@ -93,14 +93,23 @@ async function seedClient(clientId: string, opts: SeedOpts = {}): Promise<void> 
   );
 }
 
-function makeCtx(opts: { clientId?: string; remote?: boolean; dryRun?: boolean } = {}): any {
+function makeCtx(
+  opts: {
+    clientId?: string;
+    remote?: boolean;
+    dryRun?: boolean;
+    scopes?: string[];
+  } = {},
+): any {
   return {
     engine,
     config: {},
     logger: console,
     dryRun: opts.dryRun ?? false,
     remote: opts.remote ?? true,
-    auth: opts.clientId ? { clientId: opts.clientId } : undefined,
+    auth: opts.clientId
+      ? { clientId: opts.clientId, scopes: opts.scopes ?? [] }
+      : undefined,
   };
 }
 
@@ -480,7 +489,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         bound_slug_prefixes: ['people/', 'projects/', 'wiki/'],
       });
       await engine.setConfig('mcp.publish_skills', 'true');
-      const ctx = makeCtx({ clientId: 'lore' });
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
       const result = await callSubmitAgent(ctx, {
         prompt: 'correct the selected claim',
@@ -502,13 +511,32 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         bound_slug_prefixes: ['people/'],
       });
       await engine.setConfig('mcp.publish_skills', 'false');
-      const ctx = makeCtx({ clientId: 'lore' });
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
 
       await expect(callSubmitAgent(ctx, {
         prompt: 'echo the skill instructions',
         skill_name: 'knowledge-correction',
       })).rejects.toMatchObject({ code: 'permission_denied' });
+    });
+
+    it('requires read scope before loading a published server skill', async () => {
+      await seedClient('lore', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['people/'],
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'echo the skill instructions',
+        skill_name: 'knowledge-correction',
+      })).rejects.toMatchObject({
+        code: 'permission_denied',
+        message: expect.stringContaining('requires read scope'),
+      });
     });
   });
 });

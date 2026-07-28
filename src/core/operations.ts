@@ -4931,6 +4931,12 @@ const submit_agent: Operation = {
       __owner_client_id: clientId,
     };
     if (typeof p.skill_name === 'string') {
+      if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
+        throw new OperationError(
+          'permission_denied',
+          'submit_agent: skill_name requires read scope in addition to agent scope.',
+        );
+      }
       const skillCatalog = await import('./skill-catalog.ts');
       const publish = await skillCatalog.readMcpPublishSkills(ctx);
       skillCatalog.assertPublishEnabled(ctx, publish);
