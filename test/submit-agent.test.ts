@@ -373,6 +373,20 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       })).rejects.toThrow(/reasoning_effort.*none.*xhigh/i);
     });
 
+    it('rejects an adapter effort unsupported by the selected model', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-5.6-terra',
+        reasoning_effort: 'minimal',
+      })).rejects.toThrow(/does not support reasoning_effort "minimal"/i);
+    });
+
     it('rejects reasoning effort for a non-OpenAI model', async () => {
       await seedClient('cursor', {
         bound_tools: ['search'],
