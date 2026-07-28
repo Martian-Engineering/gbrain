@@ -17,6 +17,12 @@ import {
 } from '../src/core/eval-contradictions/runner.ts';
 import type { JudgeOutput } from '../src/core/eval-contradictions/judge.ts';
 import type { SearchResult } from '../src/core/types.ts';
+import { BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
+import {
+  chat,
+  configureGateway,
+  resetGateway,
+} from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
@@ -335,6 +341,104 @@ describe('runContradictionProbe', () => {
     expect(out.report.judge_errors.total).toBe(1);
     expect(out.report.total_contradictions_flagged).toBe(0);
     expect(out.judgeErrorRows.length).toBe(1);
+  });
+
+  test('hard budget exhaustion escapes the judge-error collector', async () => {
+    const idA = await seedPage('a/1', 'A');
+    const idB = await seedPage('b/1', 'B');
+    await expect(runContradictionProbe({
+      engine,
+      queries: ['q'],
+      judgeFn: async () => {
+        throw new BudgetExhausted('nightly hard cap reached', {
+          reason: 'cost',
+          spent: 0.25,
+          cap: 0.25,
+          modelId: 'openai:gpt-5.6-terra',
+        });
+      },
+      searchFn: async () => [
+        mkResult('a/1', idA, 1, 'chunk a'),
+        mkResult('b/1', idB, 2, 'chunk b'),
+      ],
+      budgetUsd: 0.25,
+      hardBudget: true,
+      yesOverride: true,
+    })).rejects.toBeInstanceOf(BudgetExhausted);
+  });
+
+  test('hard budget exhaustion escapes a fail-open search path', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-5.6-terra',
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      expansion_model: 'openai:gpt-5.6-terra',
+      env: { OPENAI_API_KEY: 'stub' },
+    });
+    try {
+      await expect(runContradictionProbe({
+        engine,
+        queries: ['q'],
+        judgeModel: 'openai:gpt-5.6-terra',
+        searchFn: async () => {
+          try {
+            await chat({
+              model: 'openai:gpt-5.6-terra',
+              messages: [{ role: 'user', content: 'search expansion' }],
+              maxTokens: 4096,
+            });
+          } catch (error) {
+            if (!(error instanceof BudgetExhausted)) throw error;
+          }
+          return [];
+        },
+        budgetUsd: 0.000001,
+        hardBudget: true,
+        yesOverride: true,
+      })).rejects.toBeInstanceOf(BudgetExhausted);
+    } finally {
+      resetGateway();
+    }
+  });
+
+  test('hard budget exhaustion is checked after the final judge call', async () => {
+    const idA = await seedPage('a/1', 'A');
+    const idB = await seedPage('b/1', 'B');
+    configureGateway({
+      chat_model: 'openai:gpt-5.6-terra',
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      expansion_model: 'openai:gpt-5.6-terra',
+      env: { OPENAI_API_KEY: 'stub' },
+    });
+    try {
+      await expect(runContradictionProbe({
+        engine,
+        queries: ['q'],
+        judgeModel: 'openai:gpt-5.6-terra',
+        judgeFn: async () => {
+          try {
+            await chat({
+              model: 'openai:gpt-5.6-terra',
+              messages: [{ role: 'user', content: 'judge' }],
+              maxTokens: 4096,
+            });
+          } catch (error) {
+            if (!(error instanceof BudgetExhausted)) throw error;
+          }
+          return stubJudge({})({} as never);
+        },
+        searchFn: async () => [
+          mkResult('a/1', idA, 1, 'chunk a'),
+          mkResult('b/1', idB, 2, 'chunk b'),
+        ],
+        budgetUsd: 0.000001,
+        hardBudget: true,
+        yesOverride: true,
+      })).rejects.toBeInstanceOf(BudgetExhausted);
+    } finally {
+      resetGateway();
+    }
   });
 
   test('cost cap mid-run stop with partial report', async () => {

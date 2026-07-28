@@ -75,6 +75,19 @@ describe('BudgetTracker.reserve', () => {
     expect(audit[0].schema_version).toBe(1);
   });
 
+  test('prices GPT-5.6 Terra before a capped nightly call', () => {
+    const t = new BudgetTracker({ maxCostUsd: 1.0, label: 'nightly', auditPath });
+    expect(() =>
+      t.reserve({
+        modelId: 'openai:gpt-5.6-terra',
+        estimatedInputTokens: 10_000,
+        maxOutputTokens: 4_096,
+        kind: 'chat',
+      }),
+    ).not.toThrow();
+    expect(readAudit()[0]?.projected_cost_usd).toBeGreaterThan(0);
+  });
+
   test('throws BudgetExhausted (reason: cost) when projected > cap', () => {
     const t = new BudgetTracker({ maxCostUsd: 0.001, label: 'test', auditPath });
     let caught: unknown = null;

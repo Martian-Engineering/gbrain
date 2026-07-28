@@ -212,6 +212,27 @@ describe('minions/budget-meter (v0.38 Slice 2 — D3 reserve-then-settle)', () =
       );
       expect(rows[0]?.status).toBe('pending');
     });
+
+    it('records an explicitly allowed provider overage', async () => {
+      await seedClient('alice', 5.00);
+      const r = await reserve(engine, {
+        clientId: 'alice', estimatedCents: 100, capCents: 500,
+        model: 'm', provider: 'p',
+      });
+
+      await settle(engine, r.reservationId, 101, 'nightly-test', {
+        allowOverage: true,
+      });
+
+      const rows = await engine.executeRaw<Record<string, unknown>>(
+        `SELECT status, actual_cents::text AS a
+           FROM mcp_spend_reservations
+          WHERE reservation_id = $1`,
+        [r.reservationId],
+      );
+      expect(rows[0]?.status).toBe('settled');
+      expect(parseFloat(String(rows[0]?.a))).toBe(101);
+    });
   });
 
   describe('sweepExpiredReservations()', () => {

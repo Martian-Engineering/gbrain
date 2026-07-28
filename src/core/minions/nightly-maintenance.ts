@@ -44,6 +44,8 @@ export interface NightlyMaintenanceProgress {
   run_id: string;
   status: 'running' | 'budget_exhausted' | 'failed' | 'completed';
   checkpoints: Partial<Record<NightlyMaintenancePhase, NightlyMaintenanceCheckpoint>>;
+  /** Receipts persisted after each child so a root retry cannot lose a verified write. */
+  semantic_receipts?: NightlyMutationReceipt[];
 }
 
 export interface NightlyMutationReceipt {
@@ -141,10 +143,10 @@ export async function submitNightlyMaintenance(
 ): Promise<MinionJob> {
   return queue.add(
     'nightly-maintenance',
-    { ...input },
+    { ...input, nightly_phase: 'contradiction_probe' },
     {
       idempotency_key: input.run_id,
-      max_attempts: 1,
+      max_attempts: 2,
       max_stalled: 5,
       timeout_ms: NIGHTLY_MAINTENANCE_TIMEOUT_MS,
     },
@@ -231,7 +233,13 @@ export async function settleNightlyBudget(
   phase: NightlyMaintenancePhase,
   actualCents: number,
 ): Promise<void> {
-  await settle(engine, reservationId, actualCents, `nightly-maintenance:${phase}`);
+  await settle(
+    engine,
+    reservationId,
+    actualCents,
+    `nightly-maintenance:${phase}`,
+    { allowOverage: true },
+  );
 }
 
 /**

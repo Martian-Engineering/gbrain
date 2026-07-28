@@ -419,6 +419,8 @@ export interface SubagentHandlerData {
   model?: string;
   /** Native OpenAI reasoning level applied to every gateway-loop turn. */
   reasoning_effort?: ReasoningEffort;
+  /** Trusted internal override for jobs that require the provider-neutral gateway loop. */
+  use_gateway_loop?: boolean;
   /** Max assistant turns before the loop fails with stop_reason='max_turns'. */
   max_turns?: number;
   /**

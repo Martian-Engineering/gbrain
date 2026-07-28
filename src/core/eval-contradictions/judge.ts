@@ -20,6 +20,7 @@
  */
 
 import { chat, type ChatResult } from '../ai/gateway.ts';
+import type { ReasoningEffort } from '../ai/types.ts';
 import { parseSeverity, defaultSeverityForVerdict } from './severity-classify.ts';
 import type { JudgeVerdict, ResolutionKind, Verdict } from './types.ts';
 
@@ -110,6 +111,8 @@ export interface JudgeInput {
   };
   /** Provider:model id; routed through gateway.chat. */
   model: string;
+  /** Optional provider-native reasoning control for the judge call. */
+  reasoningEffort?: ReasoningEffort;
   /** UTF-8-safe truncation limit per pair member. C4 flag. */
   maxPairChars?: number;
   /** Test hook: pass a stubbed chat for hermetic tests. Production passes undefined → real gateway. */
@@ -423,6 +426,7 @@ export async function judgeContradiction(input: JudgeInput): Promise<JudgeOutput
   const callFn = input.chatFn ?? chat;
   const result = await callFn({
     model: input.model,
+    reasoningEffort: input.reasoningEffort,
     messages: [{ role: 'user', content: prompt }],
     maxTokens: 200,
     abortSignal: input.abortSignal,

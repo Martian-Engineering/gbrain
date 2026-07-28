@@ -31,6 +31,8 @@ import {
 } from '../nightly-maintenance.ts';
 import type { Reservation } from '../budget-meter.ts';
 import { MinionQueue as Queue } from '../queue.ts';
+import { BudgetExhausted, BudgetTracker } from '../../budget/budget-tracker.ts';
+import { withBudgetTracker } from '../../ai/gateway.ts';
 
 const AGENT_MAX_TURNS = 6;
 const AGENT_MAX_OUTPUT_TOKENS = 4096;
@@ -220,6 +222,7 @@ function buildAgentData(
     system_no_tool_preamble: false,
     model: input.nightly.model,
     reasoning_effort: input.nightly.reasoning_effort,
+    use_gateway_loop: true,
     max_turns: AGENT_MAX_TURNS,
     max_tokens: AGENT_MAX_OUTPUT_TOKENS,
     allowed_tools: input.manifest.disposition === 'repair'
@@ -369,18 +372,51 @@ export function makeNightlyRepairAgentHandler(
     });
     let agentResult: SubagentResult | null = null;
     let actualCents = 0;
+    let tracker: BudgetTracker | null = null;
 
     try {
       const agentData = buildAgentData(input, dependencies.loadSystemPrompt());
-      agentResult = await dependencies.runAgent(
-        { ...job, data: agentData as unknown as Record<string, unknown> },
-        agentData,
-      );
+      tracker = new BudgetTracker({
+        label: 'nightly-maintenance:semantic_repair',
+        maxCostUsd: input.reservation_cents / 100,
+        maxRuntimeMs: RESERVATION_TTL_MS,
+      });
+      agentResult = await withBudgetTracker(tracker, () =>
+        dependencies.runAgent(
+          { ...job, data: agentData as unknown as Record<string, unknown> },
+          agentData,
+        ));
+      const budget = tracker.snapshot();
+      if (
+        budget.maxCostUsd !== undefined
+        && budget.cumulativeCostUsd > budget.maxCostUsd
+      ) {
+        throw new BudgetExhausted(
+          'nightly-maintenance:semantic_repair exceeded its reservation on the final turn',
+          {
+            reason: 'cost',
+            spent: budget.cumulativeCostUsd,
+            cap: budget.maxCostUsd,
+            modelId: input.nightly.model,
+          },
+        );
+      }
       actualCents = nightlyAgentCostCents(input.nightly.model, {
         input: agentResult.tokens.in,
         output: agentResult.tokens.out,
         cache_read: agentResult.tokens.cache_read,
       });
+      if (actualCents > input.reservation_cents) {
+        throw new BudgetExhausted(
+          'nightly-maintenance:semantic_repair actual cost exceeded its reservation',
+          {
+            reason: 'cost',
+            spent: actualCents / 100,
+            cap: input.reservation_cents / 100,
+            modelId: input.nightly.model,
+          },
+        );
+      }
       const verification = await dependencies.verify(
         engine,
         input.manifest,
@@ -415,8 +451,28 @@ export function makeNightlyRepairAgentHandler(
           }
         : await dependencies.readJobTokens(engine, job.id);
       actualCents = nightlyAgentCostCents(input.nightly.model, tokens);
+      if (error instanceof BudgetExhausted && error.reason === 'cost') {
+        actualCents = Math.max(actualCents, Math.ceil(error.spent * 100 * 100) / 100);
+      }
       await dependencies.rollback(engine, input.manifest, snapshot);
       await dependencies.settle(engine, reservation.reservationId, actualCents);
+      if (error instanceof BudgetExhausted) {
+        return {
+          source_id: input.manifest.source_id,
+          slug: input.manifest.page_slug,
+          before_hash: input.manifest.page_hash,
+          after_hash: input.manifest.page_hash,
+          manifest_hash: input.manifest.manifest_hash,
+          disposition: input.manifest.disposition,
+          validation_status: 'failed_rolled_back',
+          agent: {
+            turns_count: agentResult?.turns_count ?? 0,
+            stop_reason: 'error',
+            cost_cents: actualCents,
+          },
+          verification_reason: 'budget_exhausted',
+        } satisfies NightlyRepairAgentResult;
+      }
       throw error;
     }
   };

@@ -9,6 +9,7 @@ import type { MinionJobContext, SubagentResult } from '../src/core/minions/types
 import type { MinionQueue } from '../src/core/minions/queue.ts';
 import type { SemanticRepairManifest } from '../src/core/minions/semantic-repair-manifest.ts';
 import type { Page } from '../src/core/types.ts';
+import { BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
 
 const beforePage = {
   id: 1,
@@ -98,6 +99,7 @@ function dependencies(overrides: Partial<NightlyRepairAgentDependencies> = {}) {
       expect(data).toMatchObject({
         model: 'openai:gpt-5.6-terra',
         reasoning_effort: 'high',
+        use_gateway_loop: true,
         max_turns: 6,
         max_tokens: 4096,
         allowed_slug_prefixes: ['notes/example'],
@@ -173,6 +175,66 @@ describe('nightly repair agent', () => {
     ).rejects.toThrow('provider timeout');
     expect(calls).toContain('rollback');
     expect(calls).toContain('settle');
+  });
+
+  test('returns a rolled-back receipt when the provider hard cap is reached', async () => {
+    const { deps, calls } = dependencies({
+      async runAgent() {
+        calls.push('agent');
+        throw new BudgetExhausted('nightly cap reached', {
+          reason: 'cost',
+          spent: 0,
+          cap: 15,
+          modelId: nightly.model,
+        });
+      },
+    });
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());
+
+    expect(calls).toContain('rollback');
+    expect(calls).toContain('settle');
+    expect(result).toMatchObject({
+      before_hash: manifest.page_hash,
+      after_hash: manifest.page_hash,
+      validation_status: 'failed_rolled_back',
+      verification_reason: 'budget_exhausted',
+      agent: { stop_reason: 'error', cost_cents: 0 },
+    });
+  });
+
+  test('rolls back and records a final-turn overage as budget exhaustion', async () => {
+    const { deps, calls, settled } = dependencies({
+      async runAgent() {
+        calls.push('agent');
+        return {
+          result: '{}',
+          turns_count: 1,
+          stop_reason: 'end_turn',
+          tokens: {
+            in: 10_000_000,
+            out: 1_000_000,
+            cache_read: 0,
+            cache_create: 0,
+          },
+        } as SubagentResult;
+      },
+    });
+    const tinyReservation = job();
+    tinyReservation.data.reservation_cents = 1;
+
+    const result = await makeNightlyRepairAgentHandler(
+      {} as BrainEngine,
+      deps,
+    )(tinyReservation);
+
+    expect(calls).toContain('rollback');
+    expect(calls).not.toContain('verify');
+    expect(settled[0]).toBeGreaterThan(1);
+    expect(result).toMatchObject({
+      validation_status: 'failed_rolled_back',
+      verification_reason: 'budget_exhausted',
+    });
   });
 
   test('budget refusal happens before the model call', async () => {

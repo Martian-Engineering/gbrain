@@ -151,6 +151,7 @@ export async function settle(
   reservationId: string,
   actualCents: number,
   operation: string = 'subagent_loop',
+  options: { allowOverage?: boolean } = {},
 ): Promise<void> {
   if (!Number.isFinite(actualCents) || actualCents < 0) {
     throw new Error(`actual spend must be a non-negative finite number, got ${actualCents}`);
@@ -169,7 +170,7 @@ export async function settle(
   if (existing.length === 0 || existing[0]!.status !== 'pending') return;
 
   const estimatedCents = Number(existing[0]!.estimated_cents);
-  if (actualCents > estimatedCents) {
+  if (actualCents > estimatedCents && options.allowOverage !== true) {
     throw new Error(`actual spend ${actualCents} exceeds reserved ${estimatedCents}`);
   }
 

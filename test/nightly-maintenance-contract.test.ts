@@ -73,6 +73,7 @@ describe('nightly maintenance contract', () => {
     expect(second.id).toBe(first.id);
     expect(first.name).toBe('nightly-maintenance');
     expect(first.data.run_id).toBe(input.run_id);
+    expect(first.data.nightly_phase).toBe('contradiction_probe');
     expect(first.timeout_ms).toBe(2 * 60 * 60 * 1000);
   });
 
@@ -135,5 +136,26 @@ describe('nightly maintenance contract', () => {
       settled_cents: 0,
       pending_reserved_cents: 700,
     });
+  });
+
+  test('records an unavoidable provider overage for nightly accounting', async () => {
+    const input = parseNightlyMaintenanceInput({
+      scheduled_for: '2026-07-28T10:00:00.000Z',
+      source_ids: ['martian'],
+    });
+    const repairJob = await queue.add('test-repair-overage', {
+      nightly_phase: 'semantic_repair',
+    });
+    const reservation = await reserveNightlyBudget(engine, input, {
+      phase: 'semantic_repair',
+      job_id: repairJob.id,
+      estimated_cents: 100,
+    });
+
+    await settleNightlyBudget(engine, reservation.reservationId, 'semantic_repair', 101);
+
+    const summary = await getNightlyBudgetSummary(engine, input);
+    expect(summary.settled_cents).toBe(101);
+    expect(summary.remaining_cents).toBe(1399);
   });
 });

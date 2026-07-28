@@ -34,6 +34,7 @@ import { CostTracker, estimateUpperBoundCost } from './cost-tracker.ts';
 import { buildSourceTierBreakdown, classifySlugTier } from './cross-source.ts';
 import { shouldSkipForDateMismatch } from './date-filter.ts';
 import { withBudgetTracker } from '../ai/gateway.ts';
+import type { ReasoningEffort } from '../ai/types.ts';
 import { BudgetTracker, BudgetExhausted } from '../budget/budget-tracker.ts';
 import {
   guardNegationArtifact,
@@ -68,11 +69,15 @@ export interface RunnerOpts {
   engine: BrainEngine;
   queries: string[];
   judgeModel?: string;
+  /** Optional provider-native reasoning control for every judge call. */
+  reasoningEffort?: ReasoningEffort;
   topK?: number;
   /** Pair-sampling policy (A3). 'deterministic' uses combined_score DESC. */
   sampling?: 'deterministic' | 'score-first';
   /** USD cap for the run. Soft ceiling enforced pre-flight + mid-run. */
   budgetUsd?: number;
+  /** Enforce budgetUsd in the gateway before every provider call. */
+  hardBudget?: boolean;
   /** True iff user passed --yes; allows over-budget pre-flight to proceed. */
   yesOverride?: boolean;
   /** UTF-8-safe per-pair truncation (C4). */
@@ -253,13 +258,30 @@ export async function runContradictionProbe(opts: RunnerOpts): Promise<RunnerRes
   // is byte-identical.
   const _outerBudgetUsd = opts.budgetUsd ?? 5.0;
   const _runnerTracker = new BudgetTracker({
-    // Set the cap only when callers passed --budget-usd explicitly; this
-    // keeps the existing soft-ceiling semantics from CostTracker as the
-    // primary enforcement and uses the new tracker for telemetry only.
+    ...(opts.hardBudget ? { maxCostUsd: _outerBudgetUsd } : {}),
     label: 'eval.suspected-contradictions',
   });
+  let swallowedBudgetExhaustion = false;
+  _runnerTracker.onExhausted(() => {
+    swallowedBudgetExhaustion = true;
+  });
+  const assertBudgetAvailable = () => {
+    if (!swallowedBudgetExhaustion) return;
+    const snapshot = _runnerTracker.snapshot();
+    throw new BudgetExhausted(
+      'eval.suspected-contradictions: hard budget exhausted inside a fail-open provider path',
+      {
+        reason: 'cost',
+        spent: snapshot.cumulativeCostUsd,
+        cap: snapshot.maxCostUsd ?? _outerBudgetUsd,
+      },
+    );
+  };
   try {
-    return await withBudgetTracker(_runnerTracker, () => _runContradictionProbeInner(opts));
+    return await withBudgetTracker(
+      _runnerTracker,
+      () => _runContradictionProbeInner(opts, assertBudgetAvailable),
+    );
   } catch (err) {
     // BudgetExhausted from the gateway path should bubble cleanly. With no
     // cap set, the tracker only records; it doesn't throw, so this path
@@ -271,7 +293,10 @@ export async function runContradictionProbe(opts: RunnerOpts): Promise<RunnerRes
   }
 }
 
-async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResult> {
+async function _runContradictionProbeInner(
+  opts: RunnerOpts,
+  assertBudgetAvailable: () => void,
+): Promise<RunnerResult> {
   const startedAt = Date.now();
   const judgeModel = opts.judgeModel ?? DEFAULT_JUDGE_MODEL;
   const topK = Math.max(1, opts.topK ?? DEFAULT_TOP_K);
@@ -333,6 +358,7 @@ async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResu
 
     // Search.
     const results = await searchFn(opts.engine, query, { limit: topK });
+    assertBudgetAvailable();
 
     // Pairs.
     const cross = generateCrossSlugPairs(results);
@@ -406,9 +432,11 @@ async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResu
             effective_date: pair.b.effective_date,
           },
           model: judgeModel,
+          reasoningEffort: opts.reasoningEffort,
           maxPairChars,
           abortSignal: opts.abortSignal,
         });
+        assertBudgetAvailable();
         tracker.recordJudgeCall(judgeModel, out.usage);
         await cache.store(pair.a.text, pair.b.text, out.verdict);
         const guarded = guardNegationArtifact(out.verdict, { query, a: pair.a, b: pair.b });
@@ -419,6 +447,7 @@ async function _runContradictionProbeInner(opts: RunnerOpts): Promise<RunnerResu
           findings.push(pairToFinding(pair, guarded));
         }
       } catch (err) {
+        if (err instanceof BudgetExhausted) throw err;
         errs.record(pairId(pair), err);
       }
     }

@@ -264,8 +264,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // provider in src/core/ai/recipes/). When OFF, route through the legacy
     // Anthropic-direct path AND refuse non-Anthropic models loudly.
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
-    const useGatewayLoop = typeof useGatewayLoopRaw === 'string' &&
-      (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1');
+    const useGatewayLoop = data.use_gateway_loop === true || (
+      typeof useGatewayLoopRaw === 'string'
+      && (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1')
+    );
     if (!useGatewayLoop && !isAnthropicProvider(model)) {
       throw new Error(
         `subagent job: resolved model "${model}" is non-Anthropic but agent.use_gateway_loop is not enabled. ` +

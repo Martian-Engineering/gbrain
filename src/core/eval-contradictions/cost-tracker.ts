@@ -22,14 +22,12 @@
 import type { CostBreakdown } from './types.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { ANTHROPIC_PRICING } from '../anthropic-pricing.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 
 /**
- * Chat prices come from the canonical table via the bare-keyed
- * `ANTHROPIC_PRICING` view (`src/core/anthropic-pricing.ts` → `model-pricing.ts`).
- * This site used to carry its own duplicate (TODOS.md #3); folding it in closes
- * that consolidation. `pricingFor` still routes through `splitProviderModelId`
- * so colon/slash forms hit, and keeps the legacy silent-Haiku fallback for
- * genuinely-unknown models (pinned by test/eval-contradictions/cost-tracker-slash.test.ts).
+ * Chat prices come from the canonical multi-provider table. The legacy
+ * Anthropic view still supports historical bare IDs, while genuinely unknown
+ * models keep the existing silent-Haiku fallback.
  */
 
 /** OpenAI text-embedding-3-large: ~$0.13/Mtok (current as of 2026-05). */
@@ -52,6 +50,8 @@ function pricingFor(modelId: string): { input: number; output: number } {
   // consolidation that would tighten this to warn-once.
   const direct = ANTHROPIC_PRICING[modelId];
   if (direct) return direct;
+  const canonical = canonicalLookup(modelId);
+  if (canonical) return canonical;
   const { model: tail } = splitProviderModelId(modelId);
   if (tail) {
     const tailHit = ANTHROPIC_PRICING[tail];
