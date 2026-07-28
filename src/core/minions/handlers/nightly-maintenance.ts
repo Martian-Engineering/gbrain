@@ -43,6 +43,7 @@ import { canonicalJson } from '../../remediation-step.ts';
 
 const RESOLVER_PATH = join(import.meta.dir, '../../../../skills/RESOLVER.md');
 const MIN_REPAIR_RESERVATION_CENTS = 50;
+const MAX_SEMANTIC_MANIFESTS = 100;
 const PROBE_MAX_QUERIES = 20;
 const PROBE_TOP_K = 3;
 const CHILD_WAIT_MS = 35 * 60 * 1000;
@@ -162,7 +163,7 @@ async function buildRunManifests(
   return manifests.sort((a, b) => {
     if (a.disposition !== b.disposition) return a.disposition === 'repair' ? -1 : 1;
     return a.manifest_id.localeCompare(b.manifest_id);
-  }).slice(0, input.max_page_mutations);
+  }).slice(0, MAX_SEMANTIC_MANIFESTS);
 }
 
 /** Extract a bounded, stable contradiction query set from unresolved targets. */
