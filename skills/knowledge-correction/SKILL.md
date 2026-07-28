@@ -58,10 +58,9 @@ writes_to:
 
 # Knowledge Correction
 
-Use one freeform comment to plan or apply every kind of brain correction. Read
-`../brain-ops/SKILL.md` and `../_brain-filing-rules.md` before applying a plan.
-Read `../enrich/SKILL.md` when the correction may need a new person or company
-page.
+Use one freeform comment to plan or apply every kind of brain correction. These
+instructions are self-contained for remote agents; do not attempt to read other
+skill files from the server filesystem.
 
 ## Contract
 
@@ -83,6 +82,25 @@ page.
   changed page snapshot.
 - Return the receipt defined in Output Format. Never report a mutation that was
   not verified by reading it back.
+
+## Filing and Page Creation
+
+- File by primary subject: people in `people/`, companies in `companies/`,
+  meetings in `meetings/`, projects in `projects/`, and reusable mental models
+  in `concepts/`. Do not file subject knowledge under a source-format directory.
+- Apply a notability gate before creating a page. A person or company must be
+  substantively relevant to the user's work or likely to matter again.
+- Never create an empty or speculative stub. A new page needs a clear title,
+  meaningful current context grounded in the correction or existing brain
+  evidence, inline citations, and explicit references to related pages.
+- The user's direct correction is the highest-authority source. Cite each new
+  fact inline as `[Source: User correction, <correction_date>]`.
+- Every explicit reference must resolve and appear through the target's
+  `get_backlinks` view. Use Markdown references for ordinary mentions and
+  `add_link` only for a typed relationship that prose cannot represent.
+- Do not perform external enrichment: this skill has brain tools only. Ask for
+  clarification when the correction and existing brain evidence are not enough
+  to create meaningful content.
 
 ## Input
 
