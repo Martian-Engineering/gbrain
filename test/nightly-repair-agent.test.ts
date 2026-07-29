@@ -14,6 +14,7 @@ import {
   StaleSemanticRepairManifestError,
 } from '../src/core/minions/semantic-repair-manifest.ts';
 import type { NightlyRepairDecision } from '../src/core/minions/nightly-repair-decision.ts';
+import { RateLeaseUnavailableError } from '../src/core/minions/handlers/subagent.ts';
 import type { Page } from '../src/core/types.ts';
 import { BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
 
@@ -370,6 +371,48 @@ describe('nightly repair agent', () => {
     ).rejects.toThrow('provider timeout');
     expect(calls).toContain('rollback');
     expect(calls).toContain('settle');
+  });
+
+  test('contains a safely rolled-back agent error on the final attempt', async () => {
+    const { deps, calls } = dependencies({
+      async runAgent() {
+        calls.push('agent');
+        throw new SyntaxError('JSON Parse error: Unterminated string');
+      },
+      async readJobTokens() { return { input: 400, output: 20, cache_read: 0 }; },
+    });
+    const finalAttempt = job();
+    finalAttempt.attempts_made = 1;
+
+    const result = await makeNightlyRepairAgentHandler(
+      {} as BrainEngine,
+      deps,
+    )(finalAttempt);
+
+    expect(calls).toContain('rollback');
+    expect(calls).toContain('settle');
+    expect(result).toMatchObject({
+      before_hash: manifest.page_hash,
+      after_hash: manifest.page_hash,
+      validation_status: 'failed_rolled_back',
+      outcome: null,
+      verification_reason: 'JSON Parse error: Unterminated string',
+      agent: { stop_reason: 'error' },
+    });
+  });
+
+  test('preserves rate-lease backpressure on the final attempt', async () => {
+    const { deps } = dependencies({
+      async runAgent() {
+        throw new RateLeaseUnavailableError('openai:gpt-5.6-terra', 1, 1);
+      },
+    });
+    const finalAttempt = job();
+    finalAttempt.attempts_made = 1;
+
+    await expect(
+      makeNightlyRepairAgentHandler({} as BrainEngine, deps)(finalAttempt),
+    ).rejects.toBeInstanceOf(RateLeaseUnavailableError);
   });
 
   test('returns a rolled-back receipt when the provider hard cap is reached', async () => {

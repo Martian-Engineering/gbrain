@@ -9,7 +9,7 @@ import { validatePageReferences } from '../../link-validation.ts';
 import { extractEntityRefs } from '../../link-extraction.ts';
 import { loadConfigWithEngine } from '../../config.ts';
 import { operationsByName, type OperationContext } from '../../operations.ts';
-import { makeSubagentHandler } from './subagent.ts';
+import { makeSubagentHandler, RateLeaseUnavailableError } from './subagent.ts';
 import type {
   MinionHandler,
   MinionJob,
@@ -594,6 +594,26 @@ export function makeNightlyRepairAgentHandler(
             cost_cents: actualCents,
           },
           verification_reason: 'budget_exhausted',
+        } satisfies NightlyRepairAgentResult;
+      }
+      if (error instanceof RateLeaseUnavailableError) throw error;
+      if (job.attempts_made >= 1) {
+        return {
+          source_id: input.manifest.source_id,
+          slug: input.manifest.page_slug,
+          before_hash: input.manifest.page_hash,
+          after_hash: input.manifest.page_hash,
+          finding_hash: input.manifest.finding_hash,
+          manifest_hash: input.manifest.manifest_hash,
+          disposition: input.manifest.disposition,
+          validation_status: 'failed_rolled_back',
+          outcome: null,
+          agent: {
+            turns_count: agentResult?.turns_count ?? 0,
+            stop_reason: 'error',
+            cost_cents: actualCents,
+          },
+          verification_reason: error instanceof Error ? error.message : String(error),
         } satisfies NightlyRepairAgentResult;
       }
       throw error;
