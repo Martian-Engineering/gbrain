@@ -44,7 +44,7 @@ import { CJK_SLUG_CHARS } from './cjk.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
-import { assertAllowedScopes, hasScope } from './scope.ts';
+import { assertAllowedScopes, hasScope, type Scope } from './scope.ts';
 import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
 import { operationIdentityForContext } from './operation-identity.ts';
 export {
@@ -816,14 +816,12 @@ export interface Operation {
   /**
    * Capability scope required to invoke this op over an authenticated
    * transport. v0.28 added `sources_admin` (manage federated sources) and
-   * `users_admin` (reserved). The hierarchy lives in src/core/scope.ts —
-   * `admin` implies all, `write` implies `read`, the two `*_admin` scopes
-   * are siblings (different axes; neither implies the other).
+   * `users_admin` (reserved). The hierarchy lives in src/core/scope.ts.
    *
    * Local CLI callers (ctx.remote === false) bypass scope enforcement
    * because the trust boundary there is the OS, not OAuth scopes.
    */
-  scope?: 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin';
+  scope?: Scope;
   localOnly?: boolean;
   cliHints?: {
     name?: string;
@@ -5720,6 +5718,153 @@ const get_recent_transcripts: Operation = {
 
 // --- v0.28: whoami + sources management ---
 
+const provision_agent_client: Operation = {
+  name: 'provision_agent_client',
+  description:
+    'Provision a principal-bound agent client whose read and write grants are ' +
+    'a subset of the calling OAuth client. Returns the plaintext secret once.',
+  params: {
+    client_name: {
+      type: 'string',
+      required: true,
+      description: 'Human-readable agent client name',
+    },
+    federated_read: {
+      type: 'array',
+      required: true,
+      description: 'Non-empty subset of the caller read allow-list',
+      items: { type: 'string' },
+    },
+    write_source_id: {
+      type: 'string',
+      description: 'Optional caller-owned write source for the agent',
+    },
+  },
+  mutating: true,
+  scope: 'agents_admin',
+  handler: async (ctx, p) => {
+    const auth = ctx.auth;
+    if (!auth?.boundPrincipal) {
+      throw new OperationError(
+        'permission_denied',
+        'provision_agent_client requires a principal-bound OAuth client.',
+      );
+    }
+    const clientName = (p.client_name as string).trim();
+    if (!clientName) {
+      throw new OperationError('invalid_params', 'client_name must be non-empty.');
+    }
+    const requestedReads = p.federated_read as string[];
+    if (requestedReads.length === 0 || new Set(requestedReads).size !== requestedReads.length) {
+      throw new OperationError(
+        'invalid_params',
+        'federated_read must be a non-empty list without duplicates.',
+      );
+    }
+    const allowedReads = auth.allowedSources;
+    if (!allowedReads?.length || requestedReads.some(source => !allowedReads.includes(source))) {
+      throw new OperationError(
+        'permission_denied',
+        'The requested agent read grants exceed the caller grant.',
+      );
+    }
+
+    // A child may write only through the exact write authority carried by the
+    // caller. Read-only callers cannot turn a scalar source hint into a write.
+    const writeSourceId = p.write_source_id as string | undefined;
+    if (
+      writeSourceId !== undefined
+      && (
+        writeSourceId !== auth.sourceId
+        || !hasScope(auth.scopes, 'write')
+        || !allowedReads.includes(writeSourceId)
+      )
+    ) {
+      throw new OperationError(
+        'permission_denied',
+        'The requested agent write grant exceeds the caller grant.',
+      );
+    }
+    const federatedRead = writeSourceId && !requestedReads.includes(writeSourceId)
+      ? [...requestedReads, writeSourceId]
+      : requestedReads;
+    const sourceId = writeSourceId ?? federatedRead[0]!;
+    const scopes = writeSourceId ? ['read', 'write'] : ['read'];
+
+    const { sqlQueryForEngine } = await import('./sql-query.ts');
+    const { GBrainOAuthProvider } = await import('./oauth-provider.ts');
+    const sql = sqlQueryForEngine(ctx.engine);
+    const provider = new GBrainOAuthProvider({ sql });
+    const { clientId, clientSecret } = await provider.registerClientManual(
+      clientName,
+      ['client_credentials'],
+      scopes.join(' '),
+      [],
+      sourceId,
+      federatedRead,
+      'client_secret_post',
+      undefined,
+      auth.boundPrincipal,
+    );
+    if (!clientSecret) {
+      throw new OperationError(
+        'internal',
+        'Confidential client registration did not issue a secret.',
+      );
+    }
+
+    // Refuse disclosure unless the authoritative row retained every delegated
+    // boundary. This also fails closed against a pre-migration OAuth schema.
+    let stored:
+      | {
+          source_id?: unknown;
+          federated_read?: unknown;
+          bound_principal?: unknown;
+        }
+      | undefined;
+    try {
+      const rows = await sql`
+        SELECT source_id, federated_read, bound_principal
+          FROM oauth_clients
+         WHERE client_id = ${clientId}
+      `;
+      stored = rows[0] as typeof stored;
+    } catch (error) {
+      if (
+        !isUndefinedColumnError(error, 'source_id')
+        && !isUndefinedColumnError(error, 'federated_read')
+        && !isUndefinedColumnError(error, 'bound_principal')
+      ) {
+        throw error;
+      }
+    }
+    const storedReads = Array.isArray(stored?.federated_read)
+      ? [...stored.federated_read].sort()
+      : undefined;
+    if (
+      stored?.source_id !== sourceId
+      || stored?.bound_principal !== auth.boundPrincipal
+      || storedReads?.join('\n') !== [...federatedRead].sort().join('\n')
+    ) {
+      await sql`DELETE FROM oauth_clients WHERE client_id = ${clientId}`;
+      throw new OperationError(
+        'migration_required',
+        'provision_agent_client requires the source and principal OAuth schema.',
+      );
+    }
+
+    return {
+      client_id: clientId,
+      client_secret: clientSecret,
+      client_name: clientName,
+      scopes,
+      source_id: sourceId,
+      federated_read: federatedRead,
+      bound_principal: auth.boundPrincipal,
+    };
+  },
+};
+
 const provision_client: Operation = {
   name: 'provision_client',
   description:
@@ -7771,7 +7916,7 @@ export const operations: Operation[] = [
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,
   // v0.28: whoami + scoped sources management
-  provision_client, revoke_client, list_request_traces,
+  provision_agent_client, provision_client, revoke_client, list_request_traces,
   whoami, sources_add, sources_list, sources_remove, sources_status,
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,

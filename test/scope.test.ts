@@ -19,6 +19,7 @@ describe('hasScope — admin implies all (escape hatch)', () => {
     'read',
     'write',
     'admin',
+    'agents_admin',
     'source_admin',
     'sources_admin',
     'users_admin',

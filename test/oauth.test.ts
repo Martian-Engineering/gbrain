@@ -54,6 +54,30 @@ function operationContext(clientId = 'gbrain_cl_admin'): OperationContext {
   };
 }
 
+function memberOperationContext(input: {
+  clientId?: string;
+  scopes?: string[];
+  sourceId?: string;
+  allowedSources?: string[];
+  boundPrincipal?: string;
+} = {}): OperationContext {
+  return {
+    ...operationContext(input.clientId ?? 'gbrain_cl_member'),
+    sourceId: input.sourceId ?? 'member-private',
+    auth: {
+      token: 'test-member-token',
+      clientId: input.clientId ?? 'gbrain_cl_member',
+      scopes: input.scopes ?? ['read', 'write', 'agents_admin'],
+      sourceId: input.sourceId ?? 'member-private',
+      allowedSources: input.allowedSources ?? [
+        'member-private',
+        'member-shared',
+      ],
+      boundPrincipal: input.boundPrincipal ?? 'people/alice-example',
+    },
+  };
+}
+
 beforeAll(async () => {
   db = new PGlite({ extensions: { vector, pg_trgm } });
   await db.exec(PGLITE_SCHEMA_SQL);
@@ -656,6 +680,124 @@ describe('admin client provisioning operations', () => {
 
 });
 
+describe('principal-bound agent client provisioning', () => {
+  test('provisions only a subset of the caller grants for the caller principal', async () => {
+    for (const [id, name] of [
+      ['member-private', 'Member Private'],
+      ['member-shared', 'Member Shared'],
+    ]) {
+      await sql`
+        INSERT INTO sources (id, name)
+        VALUES (${id}, ${name})
+        ON CONFLICT (id) DO NOTHING
+      `;
+    }
+
+    const result = await operationsByName.provision_agent_client.handler(
+      memberOperationContext(),
+      {
+        client_name: 'alice-research-agent',
+        federated_read: ['member-shared'],
+      },
+    ) as any;
+
+    expect(result.client_id).toStartWith('gbrain_cl_');
+    expect(result.client_secret).toStartWith('gbrain_cs_');
+    expect(result).toMatchObject({
+      client_name: 'alice-research-agent',
+      scopes: ['read'],
+      source_id: 'member-shared',
+      federated_read: ['member-shared'],
+      bound_principal: 'people/alice-example',
+    });
+
+    const [row] = await sql`
+      SELECT client_secret_hash, scope, source_id, federated_read,
+             bound_principal
+        FROM oauth_clients
+       WHERE client_id = ${result.client_id}
+    `;
+    expect(row).toMatchObject({
+      client_secret_hash: hashToken(result.client_secret),
+      scope: 'read',
+      source_id: 'member-shared',
+      federated_read: ['member-shared'],
+      bound_principal: 'people/alice-example',
+    });
+  });
+
+  test('allows the caller write source and folds it into the child read grant', async () => {
+    const result = await operationsByName.provision_agent_client.handler(
+      memberOperationContext(),
+      {
+        client_name: 'alice-writing-agent',
+        federated_read: ['member-shared'],
+        write_source_id: 'member-private',
+      },
+    ) as any;
+
+    expect(result).toMatchObject({
+      scopes: ['read', 'write'],
+      source_id: 'member-private',
+      federated_read: ['member-shared', 'member-private'],
+      bound_principal: 'people/alice-example',
+    });
+  });
+
+  test('rejects missing authority and every attempted grant expansion', async () => {
+    const operation = operationsByName.provision_agent_client;
+    const input = {
+      client_name: 'unsafe-agent',
+      federated_read: ['member-shared'],
+    };
+
+    expect(operation.scope).toBe('agents_admin');
+    expect(operation.localOnly).toBeFalsy();
+    expect(hasScope(['read', 'write'], operation.scope!)).toBe(false);
+    expect(hasScope(['agents_admin'], operation.scope!)).toBe(true);
+
+    await expect(operation.handler(
+      memberOperationContext({ boundPrincipal: '' }),
+      input,
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      { ...memberOperationContext(), auth: undefined },
+      input,
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext(),
+      { ...input, federated_read: ['member-shared', 'not-granted'] },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext(),
+      { ...input, write_source_id: 'member-shared' },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext({ scopes: ['read', 'agents_admin'] }),
+      { ...input, write_source_id: 'member-private' },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext({ allowedSources: ['member-shared'] }),
+      { ...input, write_source_id: 'member-private' },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext({ allowedSources: [] }),
+      input,
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await expect(operation.handler(
+      memberOperationContext(),
+      { ...input, federated_read: [] },
+    )).rejects.toMatchObject({ code: 'invalid_params' });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Client Credentials Exchange
 // ---------------------------------------------------------------------------
@@ -1155,12 +1297,13 @@ describe('operation scope annotations', () => {
       // v0.28 added sources_admin and users_admin to the union.
       // v0.38 added 'agent' for submit_agent (D13).
       expect([
-        'read', 'write', 'admin', 'sources_admin', 'users_admin', 'agent',
+        'read', 'write', 'admin', 'agents_admin', 'sources_admin',
+        'users_admin', 'agent',
       ]).toContain(op.scope);
     }
   });
 
-  test('mutating operations are write/admin/sources_admin/users_admin/agent scoped', () => {
+  test('mutating operations use an explicit write or delegated-admin scope', () => {
     const { operations } = require('../src/core/operations.ts');
     for (const op of operations) {
       if (op.mutating) {
@@ -1169,7 +1312,14 @@ describe('operation scope annotations', () => {
         // any mutating op. v0.38: 'agent' is a mutating-axis scope for
         // submit_agent (creates jobs, spends money, but contained by bindings).
         expect(
-          ['write', 'admin', 'sources_admin', 'users_admin', 'agent'],
+          [
+            'write',
+            'admin',
+            'agents_admin',
+            'sources_admin',
+            'users_admin',
+            'agent',
+          ],
           `${op.name} is mutating but not a write-axis scope`,
         ).toContain(op.scope);
       }
