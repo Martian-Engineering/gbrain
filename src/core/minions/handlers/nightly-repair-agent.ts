@@ -200,7 +200,7 @@ export function nightlyAgentCostCents(
   return Math.ceil(rawCents * 100) / 100;
 }
 
-/** Isolate the current attempt's usage from cumulative durable job counters. */
+/** Isolate the current attempt's usage from cumulative durable transcript totals. */
 function tokenDelta(total: NightlyTokenUsage, prior: NightlyTokenUsage): NightlyTokenUsage {
   return {
     input: Math.max(0, total.input - prior.input),
