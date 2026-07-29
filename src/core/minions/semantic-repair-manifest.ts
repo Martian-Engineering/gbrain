@@ -81,6 +81,14 @@ export interface SemanticRepairManifest {
   manifest_hash: string;
 }
 
+/** Signal that a valid manifest was superseded by a newer page version. */
+export class StaleSemanticRepairManifestError extends Error {
+  constructor() {
+    super('semantic repair manifest: stale page hash');
+    this.name = 'StaleSemanticRepairManifestError';
+  }
+}
+
 export interface BuildSemanticRepairManifestsOptions {
   /** Hard output bound applied after stable source/page/finding ordering. */
   limit: number;
@@ -301,7 +309,7 @@ export async function assertFreshSemanticRepairManifest(
     throw new Error('semantic repair manifest: source page no longer exists');
   }
   if (semanticRepairPageHash(page) !== manifest.page_hash) {
-    throw new Error('semantic repair manifest: stale page hash');
+    throw new StaleSemanticRepairManifestError();
   }
   return page;
 }

@@ -46,6 +46,7 @@ import { canonicalJson } from '../../remediation-step.ts';
 const RESOLVER_PATH = join(import.meta.dir, '../../../../skills/RESOLVER.md');
 const MIN_REPAIR_RESERVATION_CENTS = 50;
 const MAX_SEMANTIC_MANIFESTS = 100;
+const MAX_SEMANTIC_REFRESHES = 20;
 const PROBE_MAX_QUERIES = 20;
 const PROBE_TOP_K = 3;
 const CHILD_WAIT_MS = 35 * 60 * 1000;
@@ -61,7 +62,22 @@ interface SourceSnapshot {
 interface SemanticPhaseResult {
   manifests: SemanticRepairManifest[];
   receipts: NightlyRepairAgentResult[];
-  stopped_reason: 'budget_exhausted' | 'mutation_limit' | null;
+  stopped_reason: 'budget_exhausted' | 'mutation_limit' | 'stale_refresh_limit' | null;
+}
+
+/** Replace one source's queued manifests after its page state changes. */
+function replaceSourceManifests(
+  current: SemanticRepairManifest[],
+  sourceId: string,
+  refreshed: SemanticRepairManifest[],
+): SemanticRepairManifest[] {
+  return [
+    ...current.filter(manifest => manifest.source_id !== sourceId),
+    ...refreshed,
+  ].sort((a, b) => {
+    if (a.disposition !== b.disposition) return a.disposition === 'repair' ? -1 : 1;
+    return a.manifest_id.localeCompare(b.manifest_id);
+  });
 }
 
 /** Count every unresolved reference class exposed by the deterministic audit. */
@@ -452,15 +468,22 @@ export function makeNightlyMaintenanceHandler(
     };
     if (!isNightlyPhaseComplete(progress, 'semantic_repair')) {
       semantic.manifests = await deps.buildManifests(engine, input, audits);
-      const completedManifestHashes = new Set(receipts.map(receipt => receipt.manifest_hash));
+      const completedFindingHashes = new Set(receipts.map(receipt => receipt.finding_hash));
+      const observedManifests = new Map(
+        semantic.manifests.map(manifest => [manifest.manifest_hash, manifest]),
+      );
       let appliedMutations = receipts.filter(receipt =>
         receipt.disposition === 'repair'
         && receipt.validation_status === 'passed'
         && receipt.before_hash !== receipt.after_hash
       ).length;
-      for (const manifest of semantic.manifests) {
-        if (manifest.disposition !== 'repair') continue;
-        if (completedManifestHashes.has(manifest.manifest_hash)) continue;
+      let refreshes = 0;
+      let staleManifests = 0;
+      while (true) {
+        const manifest = semantic.manifests.find(candidate =>
+          candidate.disposition === 'repair'
+          && !completedFindingHashes.has(candidate.finding_hash));
+        if (!manifest) break;
         if (appliedMutations >= input.max_page_mutations) {
           semantic.stopped_reason = 'mutation_limit';
           break;
@@ -478,7 +501,30 @@ export function makeNightlyMaintenanceHandler(
             reservationCents,
             job.signal,
           );
+          if (receipt.validation_status === 'stale') {
+            staleManifests++;
+            refreshes++;
+            if (refreshes > MAX_SEMANTIC_REFRESHES) {
+              semantic.stopped_reason = 'stale_refresh_limit';
+              break;
+            }
+            const audit = await deps.auditSource(engine, manifest.source_id);
+            audits.set(manifest.source_id, audit);
+            const refreshed = await deps.buildManifests(
+              engine,
+              input,
+              new Map([[manifest.source_id, audit]]),
+            );
+            refreshed.forEach(item => observedManifests.set(item.manifest_hash, item));
+            semantic.manifests = replaceSourceManifests(
+              semantic.manifests,
+              manifest.source_id,
+              refreshed,
+            );
+            continue;
+          }
           receipts.push(receipt);
+          completedFindingHashes.add(receipt.finding_hash);
           progress = { ...progress, semantic_receipts: receipts };
           await job.updateProgress(progress as unknown as Record<string, unknown>);
           if (receipt.verification_reason === 'budget_exhausted') {
@@ -491,6 +537,20 @@ export function makeNightlyMaintenanceHandler(
             && receipt.before_hash !== receipt.after_hash
           ) {
             appliedMutations++;
+            refreshes++;
+            const audit = await deps.auditSource(engine, manifest.source_id);
+            audits.set(manifest.source_id, audit);
+            const refreshed = await deps.buildManifests(
+              engine,
+              input,
+              new Map([[manifest.source_id, audit]]),
+            );
+            refreshed.forEach(item => observedManifests.set(item.manifest_hash, item));
+            semantic.manifests = replaceSourceManifests(
+              semantic.manifests,
+              manifest.source_id,
+              refreshed,
+            );
           }
         } catch (error) {
           if (error instanceof BudgetExceededError) {
@@ -501,10 +561,12 @@ export function makeNightlyMaintenanceHandler(
         }
       }
       progress = await checkpoint(job, progress, 'semantic_repair', {
-        manifest_count: semantic.manifests.length,
-        skipped_non_executable_count: semantic.manifests.filter(
+        manifest_count: observedManifests.size,
+        skipped_non_executable_count: [...observedManifests.values()].filter(
           manifest => manifest.disposition !== 'repair',
         ).length,
+        refresh_count: refreshes,
+        stale_manifest_count: staleManifests,
         receipts,
         stopped_reason: semantic.stopped_reason,
       }, deps.now());

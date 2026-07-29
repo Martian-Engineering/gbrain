@@ -54,8 +54,9 @@ export interface NightlyMutationReceipt {
   slug: string;
   before_hash: string;
   after_hash: string;
+  finding_hash: string;
   manifest_hash: string;
-  validation_status: 'passed' | 'failed_rolled_back';
+  validation_status: 'passed' | 'failed_rolled_back' | 'stale';
   /** Validated agent decision, or null when execution ended before one was accepted. */
   outcome: NightlyRepairDecision | null;
 }

@@ -9,7 +9,10 @@ import {
 import type { MinionJobContext, SubagentResult } from '../src/core/minions/types.ts';
 import type { MinionQueue } from '../src/core/minions/queue.ts';
 import type { SemanticRepairManifest } from '../src/core/minions/semantic-repair-manifest.ts';
-import { semanticRepairPageHash } from '../src/core/minions/semantic-repair-manifest.ts';
+import {
+  semanticRepairPageHash,
+  StaleSemanticRepairManifestError,
+} from '../src/core/minions/semantic-repair-manifest.ts';
 import type { NightlyRepairDecision } from '../src/core/minions/nightly-repair-decision.ts';
 import type { Page } from '../src/core/types.ts';
 import { BudgetExhausted } from '../src/core/budget/budget-tracker.ts';
@@ -212,12 +215,38 @@ describe('nightly repair agent', () => {
       slug: 'notes/example',
       before_hash: manifest.page_hash,
       after_hash: 'f'.repeat(64),
+      finding_hash: manifest.finding_hash,
       manifest_hash: manifest.manifest_hash,
       outcome: {
         status: 'applied',
         decision: 'replace_reference',
         proposed_replacement: 'people/alicia',
       },
+    });
+  });
+
+  test('returns a no-cost stale receipt before snapshot or reservation', async () => {
+    const { deps, calls } = dependencies({
+      async assertFresh() {
+        calls.push('fresh');
+        throw new StaleSemanticRepairManifestError();
+      },
+    });
+
+    const result = await makeNightlyRepairAgentHandler({} as BrainEngine, deps)(job());
+
+    expect(calls).toEqual(['fresh']);
+    expect(result).toMatchObject({
+      source_id: manifest.source_id,
+      slug: manifest.page_slug,
+      before_hash: manifest.page_hash,
+      after_hash: manifest.page_hash,
+      finding_hash: manifest.finding_hash,
+      manifest_hash: manifest.manifest_hash,
+      validation_status: 'stale',
+      verification_reason: 'stale_manifest',
+      outcome: null,
+      agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
     });
   });
 

@@ -21,6 +21,7 @@ import type { MinionQueue } from '../queue.ts';
 import {
   assertFreshSemanticRepairManifest,
   semanticRepairPageHash,
+  StaleSemanticRepairManifestError,
   type SemanticRepairManifest,
 } from '../semantic-repair-manifest.ts';
 import {
@@ -450,7 +451,25 @@ export function makeNightlyRepairAgentHandler(
 ): MinionHandler {
   return async job => {
     const input = parseNightlyRepairAgentInput(job.data);
-    const beforePage = await dependencies.assertFresh(engine, input.manifest);
+    let beforePage: Page;
+    try {
+      beforePage = await dependencies.assertFresh(engine, input.manifest);
+    } catch (error) {
+      if (!(error instanceof StaleSemanticRepairManifestError)) throw error;
+      return {
+        source_id: input.manifest.source_id,
+        slug: input.manifest.page_slug,
+        before_hash: input.manifest.page_hash,
+        after_hash: input.manifest.page_hash,
+        finding_hash: input.manifest.finding_hash,
+        manifest_hash: input.manifest.manifest_hash,
+        disposition: input.manifest.disposition,
+        validation_status: 'stale',
+        outcome: null,
+        agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
+        verification_reason: 'stale_manifest',
+      } satisfies NightlyRepairAgentResult;
+    }
     const snapshot = await dependencies.createSnapshot(engine, input.manifest, beforePage);
     const reservationCents = await dependencies.availableReservationCents(
       engine,
@@ -463,6 +482,7 @@ export function makeNightlyRepairAgentHandler(
         slug: input.manifest.page_slug,
         before_hash: input.manifest.page_hash,
         after_hash: input.manifest.page_hash,
+        finding_hash: input.manifest.finding_hash,
         manifest_hash: input.manifest.manifest_hash,
         disposition: input.manifest.disposition,
         validation_status: 'failed_rolled_back',
@@ -539,6 +559,7 @@ export function makeNightlyRepairAgentHandler(
         slug: input.manifest.page_slug,
         before_hash: input.manifest.page_hash,
         after_hash: verification.after_hash,
+        finding_hash: input.manifest.finding_hash,
         manifest_hash: input.manifest.manifest_hash,
         disposition: input.manifest.disposition,
         validation_status: verification.ok ? 'passed' : 'failed_rolled_back',
@@ -570,6 +591,7 @@ export function makeNightlyRepairAgentHandler(
           slug: input.manifest.page_slug,
           before_hash: input.manifest.page_hash,
           after_hash: input.manifest.page_hash,
+          finding_hash: input.manifest.finding_hash,
           manifest_hash: input.manifest.manifest_hash,
           disposition: input.manifest.disposition,
           validation_status: 'failed_rolled_back',

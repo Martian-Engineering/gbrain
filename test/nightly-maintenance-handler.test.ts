@@ -71,6 +71,7 @@ const receipt = {
   slug: 'notes/example',
   before_hash: 'a'.repeat(64),
   after_hash: 'f'.repeat(64),
+  finding_hash: manifest.finding_hash,
   manifest_hash: 'e'.repeat(64),
   validation_status: 'passed',
   disposition: 'repair',
@@ -296,9 +297,24 @@ describe('nightly maintenance root handler', () => {
     } as NightlyRepairAgentResult;
     const secondManifest = {
       ...manifest,
+      finding_hash: '7'.repeat(64),
+      finding: {
+        ...manifest.finding,
+        target: 'people/bob',
+      },
       manifest_id: `${manifest.manifest_id}:second`,
       manifest_hash: '9'.repeat(64),
     };
+    const secondReceipt = {
+      ...receipt,
+      finding_hash: secondManifest.finding_hash,
+      manifest_hash: secondManifest.manifest_hash,
+      outcome: {
+        ...receipt.outcome,
+        manifest_hash: secondManifest.manifest_hash,
+        broken_reference: 'people/bob',
+      },
+    } as NightlyRepairAgentResult;
     const constrainedJob = job([]);
     constrainedJob.data.max_page_mutations = 1;
 
@@ -306,7 +322,7 @@ describe('nightly maintenance root handler', () => {
       async buildManifests() { return [manifest, secondManifest]; },
       async runRepairChild() {
         childCalls++;
-        return childCalls === 1 ? deferredReceipt : receipt;
+        return childCalls === 1 ? deferredReceipt : secondReceipt;
       },
     }))(constrainedJob);
 
@@ -335,6 +351,70 @@ describe('nightly maintenance root handler', () => {
 
     expect(childCalls).toBe(0);
     expect((result as any).mutation_receipts).toEqual([receipt]);
+  });
+
+  test('rebuilds same-page manifests after each applied mutation', async () => {
+    const secondFindingHash = '1'.repeat(64);
+    const staleSecondManifest = {
+      ...manifest,
+      finding_hash: secondFindingHash,
+      finding: {
+        ...manifest.finding,
+        target: 'people/bob',
+      },
+      manifest_id: `${manifest.manifest_id}:second`,
+      manifest_hash: '2'.repeat(64),
+    } as SemanticRepairManifest;
+    const refreshedSecondManifest = {
+      ...staleSecondManifest,
+      page_hash: receipt.after_hash,
+      manifest_hash: '3'.repeat(64),
+    } as SemanticRepairManifest;
+    const secondReceipt = {
+      ...receipt,
+      before_hash: receipt.after_hash,
+      after_hash: '4'.repeat(64),
+      finding_hash: secondFindingHash,
+      manifest_hash: refreshedSecondManifest.manifest_hash,
+      outcome: {
+        ...receipt.outcome,
+        manifest_hash: refreshedSecondManifest.manifest_hash,
+        broken_reference: 'people/bob',
+      },
+    } as NightlyRepairAgentResult;
+    let buildCalls = 0;
+    let auditCalls = 0;
+    const dispatched: string[] = [];
+
+    const result = await makeNightlyMaintenanceHandler(engine, dependencies({
+      async buildManifests() {
+        buildCalls++;
+        if (buildCalls === 1) return [manifest, staleSecondManifest];
+        if (buildCalls === 2) return [refreshedSecondManifest];
+        return [];
+      },
+      async auditSource() {
+        auditCalls++;
+        return cleanAudit;
+      },
+      async runRepairChild(_input, childManifest) {
+        dispatched.push(childManifest.manifest_hash);
+        if (childManifest.manifest_hash === staleSecondManifest.manifest_hash) {
+          throw new Error('stale manifest was dispatched');
+        }
+        return childManifest.manifest_hash === manifest.manifest_hash
+          ? receipt
+          : secondReceipt;
+      },
+    }))(job([]));
+
+    expect(dispatched).toEqual([
+      manifest.manifest_hash,
+      refreshedSecondManifest.manifest_hash,
+    ]);
+    expect(buildCalls).toBe(3);
+    expect(auditCalls).toBeGreaterThanOrEqual(2);
+    expect((result as any).mutation_receipts).toEqual([receipt, secondReceipt]);
   });
 
   test('stops semantic work after a child reports the provider hard cap', async () => {
