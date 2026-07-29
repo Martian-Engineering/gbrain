@@ -1,7 +1,7 @@
 /**
  * gbrain OAuth scope hierarchy + allowlist (v0.28).
  *
- * Single source of truth for the 7 scope strings. Used by:
+ * Single source of truth for the 8 scope strings. Used by:
  *  - src/commands/serve-http.ts (scopesSupported, request-time hasScope)
  *  - src/core/oauth-provider.ts (F3 refresh, token issuance, registration)
  *  - src/commands/auth.ts (CLI register-client validation)
@@ -12,9 +12,9 @@
  *
  *                         admin
  *                           │
- *      ┌──────────┬─────────┼──────────┐
- *      ▼          ▼         ▼          ▼
- *   sources_admin  users_admin  source_admin  write
+ *      ┌──────────┬─────────┼──────────────┬──────────┐
+ *      ▼          ▼         ▼              ▼          ▼
+ *   sources_admin  users_admin  agents_admin  source_admin  write
  *                                  │          │
  *                                  └────┬─────┘
  *                                       ▼
@@ -29,6 +29,7 @@ export type Scope =
   | 'read'
   | 'write'
   | 'admin'
+  | 'agents_admin'
   | 'source_admin'
   | 'sources_admin'
   | 'users_admin'
@@ -38,6 +39,7 @@ export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'read',
   'write',
   'admin',
+  'agents_admin',
   'source_admin',
   'sources_admin',
   'users_admin',
@@ -51,6 +53,7 @@ export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
 export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
   'admin',
   'agent',
+  'agents_admin',
   'read',
   'source_admin',
   'sources_admin',
@@ -72,6 +75,7 @@ export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
 const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
   admin: new Set([
     'admin',
+    'agents_admin',
     'source_admin',
     'sources_admin',
     'users_admin',
@@ -80,6 +84,7 @@ const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
   ]),
   source_admin: new Set(['source_admin', 'write', 'read']),
   write: new Set(['write', 'read']),
+  agents_admin: new Set(['agents_admin']),
   sources_admin: new Set(['sources_admin']),
   users_admin: new Set(['users_admin']),
   read: new Set(['read']),

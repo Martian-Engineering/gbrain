@@ -14,6 +14,7 @@ export type Scope =
   | 'read'
   | 'write'
   | 'admin'
+  | 'agents_admin'
   | 'source_admin'
   | 'sources_admin'
   | 'users_admin'
@@ -25,6 +26,7 @@ export type Scope =
 export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = [
   'admin',
   'agent',
+  'agents_admin',
   'read',
   'source_admin',
   'sources_admin',

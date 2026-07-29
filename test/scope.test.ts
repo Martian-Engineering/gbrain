@@ -49,6 +49,13 @@ describe('hasScope — write implies read but not admin variants', () => {
 });
 
 describe('hasScope — sibling non-implication for *_admin scopes', () => {
+  test('agents_admin → agents_admin only', () => {
+    expect(hasScope(['agents_admin'], 'agents_admin')).toBe(true);
+    expect(hasScope(['agents_admin'], 'users_admin')).toBe(false);
+    expect(hasScope(['agents_admin'], 'write')).toBe(false);
+    expect(hasScope(['agents_admin'], 'read')).toBe(false);
+    expect(hasScope(['agents_admin'], 'admin')).toBe(false);
+  });
   test('source_admin → source-local read and write only', () => {
     expect(hasScope(['source_admin'], 'source_admin')).toBe(true);
     expect(hasScope(['source_admin'], 'write')).toBe(true);
@@ -144,8 +151,8 @@ describe('F3 refresh-token subset semantics under hasScope', () => {
 // ---------------------------------------------------------------------------
 
 describe('ALLOWED_SCOPES — exact list pinned', () => {
-  test('contains the 7 canonical scopes', () => {
-    expect(ALLOWED_SCOPES.size).toBe(7);
+  test('contains the 8 canonical scopes', () => {
+    expect(ALLOWED_SCOPES.size).toBe(8);
     expect(ALLOWED_SCOPES.has('read')).toBe(true);
     expect(ALLOWED_SCOPES.has('write')).toBe(true);
     expect(ALLOWED_SCOPES.has('admin')).toBe(true);
@@ -153,11 +160,13 @@ describe('ALLOWED_SCOPES — exact list pinned', () => {
     expect(ALLOWED_SCOPES.has('sources_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('users_admin')).toBe(true);
     expect(ALLOWED_SCOPES.has('agent')).toBe(true);
+    expect(ALLOWED_SCOPES.has('agents_admin')).toBe(true);
   });
   test('list is sorted alphabetically (deterministic for wire/drift check)', () => {
     expect([...ALLOWED_SCOPES_LIST]).toEqual([
       'admin',
       'agent',
+      'agents_admin',
       'read',
       'source_admin',
       'sources_admin',
