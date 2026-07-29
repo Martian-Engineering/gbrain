@@ -271,14 +271,6 @@ export async function verifyRepair(
       outcome,
     };
   }
-  if (outcome.status === 'failed') {
-    return {
-      ok: false,
-      after_hash: afterHash,
-      reason: 'agent reported an execution failure',
-      outcome,
-    };
-  }
   if (
     manifest.disposition !== 'repair'
     || !manifest.allowed_actions.some(action => action.kind === outcome.decision)

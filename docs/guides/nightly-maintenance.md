@@ -33,13 +33,21 @@ operations, and verification claims.
   unavailable or un-ingested, so the page was intentionally left unchanged.
 - `deferred + leave_unresolved` means the evidence could not support a unique
   correction or a concrete recovery path.
-- `failed + leave_unresolved` is reserved for an execution failure.
 
 The 0.90 score is only one condition. An applied repair must also bind its
 replacement to retained candidate evidence, change the diagnosed page, remove
 the unresolved target, resolve the replacement, and pass frontmatter lint.
 The server independently performs those checks. Any failure restores the
 complete pre-write page snapshot.
+
+Agent output never represents provider or tool execution failure as a semantic
+decision. The server records those failures on the root or child job instead.
+Before spending on a child, it rejects a stale page manifest at zero model cost.
+After every verified page mutation or stale rejection, the root re-audits that
+source and rebuilds its remaining manifests so a second finding on the same
+page is bound to the current content. A bounded stream of concurrent changes
+ends the report with `status: failed` and `stopped_reason:
+stale_refresh_limit`.
 
 Explicit page references are also re-extracted into the graph during the
 deterministic repair phase. Residual graph-parity or other proposal-only
@@ -86,7 +94,9 @@ gbrain jobs get JOB_ID
 Review the report, every changed slug and before/after hash, complete autonomous
 outcomes, rolled-back receipts, remaining findings, and settled spend. Confirm
 that `applied` receipts contain a validated replacement and that `deferred`
-receipts have identical before/after hashes. If the result is acceptable:
+receipts have identical before/after hashes. A queue-level root error persists
+`status: failed` together with the active phase, message, and timestamp in job
+progress before it is retried. If the result is acceptable:
 
 ```sh
 sudo systemctl enable --now gbrain-nightly-maintenance.timer

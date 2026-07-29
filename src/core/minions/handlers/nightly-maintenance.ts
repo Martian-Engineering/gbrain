@@ -25,6 +25,7 @@ import {
   settleNightlyBudget,
   wholeCentReservation,
   type NightlyMaintenanceInput,
+  type NightlyMaintenancePhase,
   type NightlyMaintenanceProgress,
   type NightlyMaintenanceReport,
   type NightlyMutationReceipt,
@@ -125,6 +126,23 @@ export interface NightlyMaintenanceDependencies {
     job: MinionJobContext,
   ): Promise<RunnerResult>;
   now(): string;
+}
+
+/** Re-audit one changed source and replace only its queued semantic work. */
+async function refreshSemanticSource(
+  engine: BrainEngine,
+  deps: NightlyMaintenanceDependencies,
+  input: NightlyMaintenanceInput,
+  sourceId: string,
+  audits: Map<string, BacklinksResult>,
+  observed: Map<string, SemanticRepairManifest>,
+  current: SemanticRepairManifest[],
+): Promise<SemanticRepairManifest[]> {
+  const audit = await deps.auditSource(engine, sourceId);
+  audits.set(sourceId, audit);
+  const refreshed = await deps.buildManifests(engine, input, new Map([[sourceId, audit]]));
+  refreshed.forEach(item => observed.set(item.manifest_hash, item));
+  return replaceSourceManifests(current, sourceId, refreshed);
 }
 
 /** Return a full SHA-256 reference for the source's active schema identity. */
@@ -386,6 +404,11 @@ export function makeNightlyMaintenanceHandler(
   return async job => {
     const input = parseNightlyMaintenanceInput(job.data);
     let progress = await deps.loadProgress(job.id, input);
+    let activePhase: NightlyMaintenancePhase = 'snapshot';
+    if (progress.status === 'failed') {
+      progress = { ...progress, status: 'running', failure: undefined };
+      await job.updateProgress(progress as unknown as Record<string, unknown>);
+    }
     const snapshots = new Map<string, SourceSnapshot>();
     const audits = new Map<string, BacklinksResult>();
     const persistedReceipts = progress.semantic_receipts
@@ -394,6 +417,7 @@ export function makeNightlyMaintenanceHandler(
       ? persistedReceipts as NightlyRepairAgentResult[]
       : [];
 
+    try {
     if (!isNightlyPhaseComplete(progress, 'snapshot')) {
       for (const sourceId of input.source_ids) {
         const snapshot = await deps.snapshotSource(engine, sourceId);
@@ -418,6 +442,7 @@ export function makeNightlyMaintenanceHandler(
       }
     }
 
+    activePhase = 'dream';
     if (!isNightlyPhaseComplete(progress, 'dream')) {
       const reports = [];
       for (const sourceId of input.source_ids) {
@@ -432,6 +457,7 @@ export function makeNightlyMaintenanceHandler(
       }, deps.now());
     }
 
+    activePhase = 'deterministic_repair';
     if (!isNightlyPhaseComplete(progress, 'deterministic_repair')) {
       const results = [];
       for (const sourceId of input.source_ids) {
@@ -457,18 +483,24 @@ export function makeNightlyMaintenanceHandler(
       }
     }
 
+    activePhase = 'semantic_repair';
     let semantic: SemanticPhaseResult = {
       manifests: [],
       receipts,
       stopped_reason:
         progress.checkpoints.semantic_repair?.summary.stopped_reason === 'budget_exhausted'
         || progress.checkpoints.semantic_repair?.summary.stopped_reason === 'mutation_limit'
+        || progress.checkpoints.semantic_repair?.summary.stopped_reason === 'stale_refresh_limit'
           ? progress.checkpoints.semantic_repair.summary.stopped_reason
           : null,
     };
     if (!isNightlyPhaseComplete(progress, 'semantic_repair')) {
       semantic.manifests = await deps.buildManifests(engine, input, audits);
-      const completedFindingHashes = new Set(receipts.map(receipt => receipt.finding_hash));
+      const completedFindingHashes = new Set(
+        receipts
+          .filter(receipt => receipt.validation_status !== 'stale')
+          .map(receipt => receipt.finding_hash),
+      );
       const observedManifests = new Map(
         semantic.manifests.map(manifest => [manifest.manifest_hash, manifest]),
       );
@@ -502,26 +534,25 @@ export function makeNightlyMaintenanceHandler(
             job.signal,
           );
           if (receipt.validation_status === 'stale') {
+            receipts.push(receipt);
+            progress = { ...progress, semantic_receipts: receipts };
+            await job.updateProgress(progress as unknown as Record<string, unknown>);
             staleManifests++;
             refreshes++;
             if (refreshes > MAX_SEMANTIC_REFRESHES) {
               semantic.stopped_reason = 'stale_refresh_limit';
               break;
             }
-            const audit = await deps.auditSource(engine, manifest.source_id);
-            audits.set(manifest.source_id, audit);
-            const refreshed = await deps.buildManifests(
-              engine,
-              input,
-              new Map([[manifest.source_id, audit]]),
-            );
-            refreshed.forEach(item => observedManifests.set(item.manifest_hash, item));
-            semantic.manifests = replaceSourceManifests(
-              semantic.manifests,
-              manifest.source_id,
-              refreshed,
-            );
-            continue;
+          semantic.manifests = await refreshSemanticSource(
+            engine,
+            deps,
+            input,
+            manifest.source_id,
+            audits,
+            observedManifests,
+            semantic.manifests,
+          );
+          continue;
           }
           receipts.push(receipt);
           completedFindingHashes.add(receipt.finding_hash);
@@ -538,19 +569,15 @@ export function makeNightlyMaintenanceHandler(
           ) {
             appliedMutations++;
             refreshes++;
-            const audit = await deps.auditSource(engine, manifest.source_id);
-            audits.set(manifest.source_id, audit);
-            const refreshed = await deps.buildManifests(
-              engine,
-              input,
-              new Map([[manifest.source_id, audit]]),
-            );
-            refreshed.forEach(item => observedManifests.set(item.manifest_hash, item));
-            semantic.manifests = replaceSourceManifests(
-              semantic.manifests,
-              manifest.source_id,
-              refreshed,
-            );
+          semantic.manifests = await refreshSemanticSource(
+            engine,
+            deps,
+            input,
+            manifest.source_id,
+            audits,
+            observedManifests,
+            semantic.manifests,
+          );
           }
         } catch (error) {
           if (error instanceof BudgetExceededError) {
@@ -572,6 +599,7 @@ export function makeNightlyMaintenanceHandler(
       }, deps.now());
     }
 
+    activePhase = 'verification';
     const verifiedAudits = new Map<string, BacklinksResult>();
     if (!isNightlyPhaseComplete(progress, 'verification')) {
       for (const sourceId of input.source_ids) {
@@ -590,6 +618,7 @@ export function makeNightlyMaintenanceHandler(
       }
     }
 
+    activePhase = 'contradiction_probe';
     if (!isNightlyPhaseComplete(progress, 'contradiction_probe')) {
       const queries = await deps.loadProbeQueries(engine, verifiedAudits);
       const budget = await getNightlyBudgetSummary(engine, input);
@@ -658,12 +687,15 @@ export function makeNightlyMaintenanceHandler(
       progress = await checkpoint(job, progress, 'contradiction_probe', summary, deps.now());
     }
 
+    activePhase = 'report';
     const budget = await getNightlyBudgetSummary(engine, input);
     const probeBudgetExhausted =
       progress.checkpoints.contradiction_probe?.summary.stopped_reason === 'budget_exhausted';
-    const status = semantic.stopped_reason === 'budget_exhausted' || probeBudgetExhausted
-      ? 'budget_exhausted'
-      : 'completed';
+    const status = semantic.stopped_reason === 'stale_refresh_limit'
+      ? 'failed'
+      : semantic.stopped_reason === 'budget_exhausted' || probeBudgetExhausted
+        ? 'budget_exhausted'
+        : 'completed';
     progress = { ...progress, status };
     progress = await checkpoint(job, progress, 'report', {
       status,
@@ -682,5 +714,18 @@ export function makeNightlyMaintenanceHandler(
       checkpoints: progress.checkpoints,
       mutation_receipts: receipts as NightlyMutationReceipt[],
     } satisfies NightlyMaintenanceReport;
+    } catch (error) {
+      progress = {
+        ...progress,
+        status: 'failed',
+        failure: {
+          phase: activePhase,
+          message: error instanceof Error ? error.message : String(error),
+          failed_at: deps.now(),
+        },
+      };
+      await job.updateProgress(progress as unknown as Record<string, unknown>);
+      throw error;
+    }
   };
 }

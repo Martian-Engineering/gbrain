@@ -14,6 +14,32 @@ tools:
   - put_page
 mutating: true
 writes_pages: true
+writes_to:
+  - people/
+  - companies/
+  - deals/
+  - meetings/
+  - partners/
+  - life/
+  - concepts/
+  - projects/
+  - analysis/
+  - civic/
+  - writing/
+  - guides/
+  - tech/
+  - finance/
+  - personal/
+  - ideas/
+  - research/
+  - originals/
+  - voice-notes/
+  - openclaw/
+  - media/books/
+  - media/articles/
+  - daily/
+  - media/
+  - conversations/
 ---
 
 # Nightly Semantic Repair
@@ -80,7 +106,7 @@ These are autonomous maintenance outcomes, not requests for human approval.
 
 ```json
 {
-  "status": "applied | deferred | failed",
+  "status": "applied | deferred",
   "decision": "replace_reference | recover_source | leave_unresolved | update_frontmatter",
   "source_id": "immutable source id",
   "page_slug": "exact authorized page",
@@ -110,8 +136,7 @@ These are autonomous maintenance outcomes, not requests for human approval.
 
 Use `applied` only with `replace_reference` or `update_frontmatter`. Use
 `deferred` only with `recover_source` or `leave_unresolved`, with
-`proposed_replacement: null`, and without calling `put_page`. Use `failed` only
-for an execution failure, pair it with `leave_unresolved`, and do not call
-`put_page`. List operations by their canonical names shown in the example;
-the server also accepts the tool loop's `brain_`-prefixed names. Do not claim
-an operation that was not actually called.
+`proposed_replacement: null`, and without calling `put_page`. Never return `failed`.
+Provider and tool failures are recorded by the server. List operations by their
+canonical names shown in the example; the server also accepts the tool loop's
+`brain_`-prefixed names. Do not claim an operation that was not actually called.

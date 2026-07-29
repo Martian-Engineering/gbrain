@@ -14,6 +14,8 @@ test('nightly semantic repair skill authorizes bounded autonomous repair', () =>
   expect(skill).toContain('write the correction immediately');
   expect(skill).toContain('`recover_source`');
   expect(skill).toContain('`leave_unresolved`');
+  expect(skill).toContain('Never return `failed`');
+  expect(skill).toContain('"status": "applied | deferred"');
   expect(skill).toContain('Do not compare `page_hash`');
   expect(skill).toContain('Return one JSON object');
   expect(skill).not.toContain('proposal receipt');

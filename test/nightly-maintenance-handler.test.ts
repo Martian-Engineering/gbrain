@@ -233,6 +233,25 @@ describe('nightly maintenance root handler', () => {
     expect(updates.length).toBeGreaterThanOrEqual(7);
   });
 
+  test('persists the active phase when an unexpected root error escapes', async () => {
+    const updates: Record<string, unknown>[] = [];
+    const failingHandler = makeNightlyMaintenanceHandler(engine, dependencies({
+      async runDreamMaintenance() {
+        throw new Error('dream exploded');
+      },
+    }));
+
+    await expect(failingHandler(job(updates))).rejects.toThrow('dream exploded');
+    expect(updates.at(-1)).toMatchObject({
+      status: 'failed',
+      failure: {
+        phase: 'dream',
+        message: 'dream exploded',
+        failed_at: '2026-07-28T10:01:00.000Z',
+      },
+    });
+  });
+
   test('runs manifest children serially and reports verified page hashes', async () => {
     const updates: Record<string, unknown>[] = [];
     let activeChildren = 0;
@@ -441,6 +460,35 @@ describe('nightly maintenance root handler', () => {
 
     expect(childCalls).toBe(1);
     expect(result).toMatchObject({ status: 'budget_exhausted' });
+  });
+
+  test('reports failure when continuously stale manifests exhaust the refresh bound', async () => {
+    let childCalls = 0;
+    const updates: Record<string, unknown>[] = [];
+    const staleReceipt = {
+      ...receipt,
+      after_hash: receipt.before_hash,
+      validation_status: 'stale',
+      outcome: null,
+      agent: { turns_count: 0, stop_reason: 'error', cost_cents: 0 },
+      verification_reason: 'stale_manifest',
+    } as NightlyRepairAgentResult;
+    const result = await makeNightlyMaintenanceHandler(engine, dependencies({
+      async buildManifests() { return [manifest]; },
+      async runRepairChild() {
+        childCalls++;
+        return staleReceipt;
+      },
+    }))(job(updates));
+
+    expect(childCalls).toBe(21);
+    expect(result).toMatchObject({ status: 'failed' });
+    expect((result as any).mutation_receipts).toHaveLength(21);
+    expect((updates.at(-2) as any).semantic_receipts).toHaveLength(21);
+    expect((result as any).checkpoints.semantic_repair.summary).toMatchObject({
+      stopped_reason: 'stale_refresh_limit',
+      stale_manifest_count: 21,
+    });
   });
 
   test('re-audits after a resumed deterministic repair omits completed stages', async () => {

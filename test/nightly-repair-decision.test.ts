@@ -102,6 +102,24 @@ describe('nightly repair decision', () => {
     });
   });
 
+  test('rejects failed as an agent-authored terminal status', () => {
+    expect(() => parseNightlyRepairDecision(
+      JSON.stringify(replacement({
+        status: 'failed',
+        decision: 'leave_unresolved',
+        candidates: [],
+        proposed_replacement: null,
+        operations: ['get_page'],
+        verification: {
+          page_reread: true,
+          links_validated: false,
+        },
+      })),
+      'end_turn',
+      manifest,
+    )).toThrow('unsupported status or decision');
+  });
+
   test('normalizes the tool names surfaced by the subagent loop', () => {
     const decision = parseNightlyRepairDecision(
       JSON.stringify(replacement({

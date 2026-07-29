@@ -47,6 +47,12 @@ export interface NightlyMaintenanceProgress {
   checkpoints: Partial<Record<NightlyMaintenancePhase, NightlyMaintenanceCheckpoint>>;
   /** Receipts persisted after each child so a root retry cannot lose a verified write. */
   semantic_receipts?: NightlyMutationReceipt[];
+  /** Last unexpected root failure, retained when the queue exhausts retries. */
+  failure?: {
+    phase: NightlyMaintenancePhase;
+    message: string;
+    failed_at: string;
+  };
 }
 
 export interface NightlyMutationReceipt {

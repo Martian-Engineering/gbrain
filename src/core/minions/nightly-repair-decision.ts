@@ -65,11 +65,6 @@ export type NightlyRepairDecision =
       status: 'deferred';
       decision: 'recover_source' | 'leave_unresolved';
       proposed_replacement: null;
-    })
-  | (NightlyRepairDecisionBase & {
-      status: 'failed';
-      decision: 'leave_unresolved';
-      proposed_replacement: null;
     });
 
 /** Require a plain JSON object at a decision-contract boundary. */
@@ -143,8 +138,8 @@ function candidateList(value: unknown): NightlyRepairCandidate[] {
  * Parse and bind one model decision to its immutable semantic-repair manifest.
  *
  * The returned discriminated union contains only combinations the server can
- * safely verify: high-confidence applied writes, no-write semantic deferrals,
- * or an explicit execution failure.
+ * safely verify: high-confidence applied writes or no-write semantic deferrals.
+ * Provider and tool failures are represented by the server, never model output.
  */
 export function parseNightlyRepairDecision(
   output: string,
@@ -174,7 +169,7 @@ export function parseNightlyRepairDecision(
 
   const status = String(raw.status);
   const decision = String(raw.decision);
-  if (!['applied', 'deferred', 'failed'].includes(status) || !DECISIONS.includes(
+  if (!['applied', 'deferred'].includes(status) || !DECISIONS.includes(
     decision as typeof DECISIONS[number],
   )) {
     throw new Error('nightly-repair-agent: unsupported status or decision');
@@ -288,17 +283,5 @@ export function parseNightlyRepairDecision(
     return { ...base, status, decision, proposed_replacement: null };
   }
 
-  if (
-    decision !== 'leave_unresolved'
-    || raw.proposed_replacement !== null
-    || operations.includes('put_page')
-  ) {
-    throw new Error('nightly-repair-agent: failed status must be a no-write outcome');
-  }
-  return {
-    ...base,
-    status: 'failed',
-    decision: 'leave_unresolved',
-    proposed_replacement: null,
-  };
+  throw new Error('nightly-repair-agent: unsupported status or decision');
 }
