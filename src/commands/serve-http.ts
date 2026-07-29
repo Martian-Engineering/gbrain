@@ -1686,7 +1686,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
       // Scope enforcement (v0.28: hasScope replaces exact-string-match so
       // admin tokens satisfy any scope, write satisfies read, and the new
-      // sources_admin / users_admin scopes resolve through the same
+      // agents_admin / sources_admin / users_admin scopes resolve through the same
       // hierarchy. Plain string includes() at this site would have made
       // sources_admin tokens look like they couldn't even read.)
       const requiredScope = op.scope || 'read';

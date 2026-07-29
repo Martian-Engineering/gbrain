@@ -131,8 +131,9 @@ describe('normalizeScopesInput — determinism', () => {
       .toBe(normalizeScopesInput('read admin write'));
   });
 
-  test('hierarchy-aware scopes (sources_admin, users_admin, agent) accepted', () => {
+  test('hierarchy-aware scopes and isolated agent axes are accepted', () => {
     expect(normalizeScopesInput(['sources_admin', 'users_admin'])).toBe('sources_admin users_admin');
     expect(normalizeScopesInput('agent')).toBe('agent');
+    expect(normalizeScopesInput('agents_admin')).toBe('agents_admin');
   });
 });

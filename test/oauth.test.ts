@@ -16,7 +16,7 @@ import {
   operationsByName,
   type OperationContext,
 } from '../src/core/operations.ts';
-import { hasScope } from '../src/core/scope.ts';
+import { ALLOWED_SCOPES_LIST, hasScope } from '../src/core/scope.ts';
 import { InvalidTokenError, InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthInfo as CoreAuthInfo } from '../src/core/operations.ts';
 import { resolve } from 'node:path';
@@ -1666,7 +1666,7 @@ describe('v0.28 ALLOWED_SCOPES allowlist', () => {
   });
 
   test('registerClientManual accepts every canonical scope', async () => {
-    for (const scope of ['read', 'write', 'admin', 'sources_admin', 'users_admin']) {
+    for (const scope of ALLOWED_SCOPES_LIST) {
       const { clientId } = await provider.registerClientManual(
         `accept-${scope}`, ['client_credentials'], scope,
       );
