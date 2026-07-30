@@ -60,9 +60,11 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('Do not read another source');
   });
 
-  test('requires exact source identity and raw evidence verification', () => {
-    expect(skill).toContain("Read the source's `resolver` page before any other content lookup");
-    expect(skill).toContain("returned `source_id` exactly equals the prompt's `sourceId`");
+  test('uses the source-bound credential and frozen resolver without inventing a page', () => {
+    expect(skill).toContain('credential binds every tool call to the prompt');
+    expect(skill).toContain('exact prompt-supplied resolver text and revision');
+    expect(skill).not.toContain('exact `resolver` slug');
+    expect(skill).not.toContain("source's `resolver` page");
     expect(skill).toContain('Read the source page back with `get_page`');
     expect(skill).toContain('raw artifact source-page read-back');
     expect(skill).toContain('complete supplied fields');
