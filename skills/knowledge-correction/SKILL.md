@@ -20,6 +20,7 @@ tools:
   - list_pages
   - get_backlinks
   - resolve_slugs
+  - replace_page_text
   - put_page
   - add_timeline_entry
   - rename_page
@@ -77,9 +78,13 @@ skill files from the server filesystem.
   invent the date.
 - Make the smallest complete set of changes. A correction may touch zero, one,
   or several pages.
+- Prefer `replace_page_text` for edits to existing prose. It preserves every
+  other page region and rejects stale or ambiguous replacements. Use
+  `put_page` only when creating a page or when the approved effect cannot be
+  expressed as exact replacements.
 - Use explicit Markdown references in page content for ordinary graph links.
-  `put_page` reconciles those references automatically. Use `add_link` only
-  when the relationship is typed or cannot be expressed honestly in prose.
+  Use `add_link` only when the relationship is typed or cannot be expressed
+  honestly in prose.
 - Fail closed on ambiguous identity, conflicting evidence, missing tools, or a
   changed page snapshot.
 - Return the receipt defined in Output Format. Never report a mutation that was
@@ -151,7 +156,7 @@ Use this decision table. Compound comments may require several effects.
 
 | Effect | Use when | Canonical operation |
 |---|---|---|
-| `fix` | The selected claim was never true, is misattributed, or has a typo | Rewrite the containing page with `put_page` |
+| `fix` | The selected claim was never true, is misattributed, or has a typo | Exact authored-body edit with `replace_page_text` |
 | `changed` | The old claim was true and later became stale | Update current state and append dated history with `add_timeline_entry` |
 | `rename` | One page has the wrong title or slug and the destination is unoccupied | `rename_page` with complete preserved content |
 | `same_thing` | Two existing pages represent one identity | Choose a survivor, merge non-conflicting evidence, then `add_slug_alias` with `soft_delete_old: true` |
@@ -189,12 +194,15 @@ In apply mode:
 1. Require `approval_state: accepted` and an `approved_plan`.
 2. Re-read all affected pages and compare the proposal snapshot when present.
 3. Apply independent creates before pages that reference them.
-4. Preserve all unrelated page content and citations.
-5. Add explicit references needed for automatic graph reconciliation.
-6. Apply destructive or identity-changing operations last. A merge uses
+4. For existing prose, call `replace_page_text` with the current page
+   `content_hash` and the exact editable match count. Do not reconstruct the
+   full page with `put_page`.
+5. Preserve all unrelated page content and citations.
+6. Add explicit references needed for graph reconciliation.
+7. Apply destructive or identity-changing operations last. A merge uses
    `add_slug_alias` with `soft_delete_old: true`; a rename uses `rename_page`
    only when the destination does not already exist.
-7. Stop after the first failed write. Report completed changes and the exact
+8. Stop after the first failed write. Report completed changes and the exact
    unapplied remainder; never claim atomicity across pages.
 
 ### 5. Verify

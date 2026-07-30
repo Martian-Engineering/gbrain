@@ -6,7 +6,7 @@
 import { lstatSync, realpathSync } from 'fs';
 import { resolve, relative, sep } from 'path';
 import type { BrainEngine, PageWriteContext } from './engine.ts';
-import { clampSearchLimit } from './engine.ts';
+import { clampSearchLimit, StalePageError } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import { isReasoningEffort, REASONING_EFFORTS } from './ai/types.ts';
 import { supportsReasoningEffort } from './ai/model-resolver.ts';
@@ -24,7 +24,11 @@ import { validateAllLinks, validateLinks } from './link-validation.ts';
 import { isFactsBackstopEligible } from './facts/eligibility.ts';
 import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
-import { parseMarkdown } from './markdown.ts';
+import { parseMarkdown, serializeMarkdown } from './markdown.ts';
+import {
+  PageTextReplaceError,
+  replaceAuthoredPageText,
+} from './page-text-replace.ts';
 import {
   findSuppressedClaimMatches,
   listSuppressedClaims,
@@ -130,6 +134,7 @@ export class OperationError extends Error {
     message: string,
     public suggestion?: string,
     public docs?: string,
+    public details?: unknown,
   ) {
     super(message);
     this.name = 'OperationError';
@@ -141,6 +146,7 @@ export class OperationError extends Error {
       message: this.message,
       suggestion: this.suggestion,
       docs: this.docs,
+      ...(this.details === undefined ? {} : { details: this.details }),
     };
   }
 }
@@ -961,6 +967,196 @@ const validate_links: Operation = {
   },
   scope: 'read',
   cliHints: { name: 'validate-links', positional: ['slug'] },
+};
+
+interface ReplacePageTextParams {
+  slug: string;
+  oldText: string;
+  newText: string;
+  expectedContentHash: string;
+  expectedMatches: number;
+}
+
+/** Validate and normalize the public replace_page_text request. */
+function parseReplacePageTextParams(
+  params: Record<string, unknown>,
+): ReplacePageTextParams {
+  const slug = typeof params.slug === 'string' ? params.slug : '';
+  validatePageSlug(slug);
+  const oldText = typeof params.old_text === 'string' ? params.old_text : '';
+  const newText = typeof params.new_text === 'string' ? params.new_text : '';
+  const expectedContentHash = typeof params.expected_content_hash === 'string'
+    ? params.expected_content_hash
+    : '';
+  const expectedMatches = params.expected_matches;
+  const section = params.section ?? 'body';
+
+  if (oldText.length === 0) {
+    throw new OperationError('invalid_params', 'old_text must be non-empty.');
+  }
+  if (oldText === newText) {
+    throw new OperationError('invalid_params', 'old_text and new_text must differ.');
+  }
+  if (oldText.length > 100_000 || newText.length > 100_000) {
+    throw new OperationError('invalid_params', 'old_text and new_text must be at most 100,000 characters.');
+  }
+  if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) {
+    throw new OperationError('invalid_params', 'expected_content_hash must be a 64-character lowercase hex hash.');
+  }
+  if (!Number.isSafeInteger(expectedMatches) || Number(expectedMatches) < 1 || Number(expectedMatches) > 10_000) {
+    throw new OperationError('invalid_params', 'expected_matches must be an integer from 1 to 10,000.');
+  }
+  if (section !== 'body') {
+    throw new OperationError('invalid_params', 'section must be "body".');
+  }
+  return {
+    slug,
+    oldText,
+    newText,
+    expectedContentHash,
+    expectedMatches: Number(expectedMatches),
+  };
+}
+
+/** Convert pure replacement and concurrency failures to the MCP error contract. */
+function replacePageTextOperationError(error: unknown): OperationError {
+  if (error instanceof PageTextReplaceError) {
+    return new OperationError(error.code, error.message, undefined, undefined, error.details);
+  }
+  if (error instanceof StalePageError) {
+    return new OperationError(
+      error.code,
+      error.message,
+      'Read the current page and retry the intended edit against its new content hash.',
+      undefined,
+      {
+        expected_content_hash: error.expectedContentHash,
+        current_content_hash: error.currentContentHash,
+      },
+    );
+  }
+  throw error;
+}
+
+const replace_page_text: Operation = {
+  name: 'replace_page_text',
+  description: 'Replace an exact literal in the authored body of one existing page. Preserves frontmatter, tags, timeline content, and GBrain-managed regions. Requires the current get_page content_hash and an exact expected match count; stale or ambiguous edits fail without mutation.',
+  params: {
+    slug: { type: 'string', required: true, description: 'Existing page slug', trace: { kind: 'page' } },
+    old_text: { type: 'string', required: true, description: 'Exact case-sensitive literal to replace in authored body text' },
+    new_text: { type: 'string', required: true, description: 'Replacement text; may be empty' },
+    expected_content_hash: { type: 'string', required: true, description: 'Opaque content_hash from the page read used to plan this edit' },
+    expected_matches: { type: 'number', required: true, description: 'Exact number of authored matches that must be replaced' },
+    section: { type: 'string', required: false, default: 'body', enum: ['body'], description: 'Editable page region; v1 supports body only' },
+  },
+  mutating: true,
+  scope: 'write',
+  handler: async (ctx, rawParams) => {
+    const params = parseReplacePageTextParams(rawParams);
+    enforceSubagentSlugFence(ctx, params.slug, 'replace_page_text');
+    const sourceId = ctx.sourceId ?? 'default';
+    const page = await ctx.engine.getPage(params.slug, {
+      sourceId,
+      includeDeleted: true,
+    });
+    if (!page) {
+      throw new OperationError('page_not_found', `Page not found: ${params.slug}`);
+    }
+    if (page.deleted_at) {
+      throw new OperationError(
+        'page_deleted',
+        `Page is soft-deleted: ${params.slug}`,
+        'Call restore_page for this slug before updating it.',
+      );
+    }
+    if (page.content_hash !== params.expectedContentHash) {
+      throw replacePageTextOperationError(
+        new StalePageError(params.expectedContentHash, page.content_hash ?? null),
+      );
+    }
+
+    let replacement;
+    try {
+      replacement = replaceAuthoredPageText(
+        page.compiled_truth,
+        params.oldText,
+        params.newText,
+        params.expectedMatches,
+      );
+    } catch (error) {
+      throw replacePageTextOperationError(error);
+    }
+    if (ctx.dryRun) {
+      return {
+        dry_run: true,
+        action: 'replace_page_text',
+        slug: params.slug,
+        content_hash: page.content_hash,
+        replaced: replacement.replaced,
+        protected_matches: replacement.protectedMatches,
+      };
+    }
+
+    const tags = await ctx.engine.getTags(params.slug, { sourceId });
+    const content = serializeMarkdown(
+      page.frontmatter,
+      replacement.content,
+      page.timeline ?? '',
+      { type: page.type, title: page.title, tags },
+    );
+    const { isAvailable } = await import('./ai/gateway.ts');
+    let activePack;
+    try {
+      const { loadActivePackBestEffort } = await import('./schema-pack/best-effort.ts');
+      const resolved = await loadActivePackBestEffort(ctx);
+      activePack = resolved
+        ? { page_types: resolved.manifest.page_types }
+        : undefined;
+    } catch {
+      activePack = undefined;
+    }
+
+    let imported;
+    try {
+      imported = await importFromContent(ctx.engine, params.slug, content, {
+        noEmbed: !isAvailable('embedding'),
+        sourceId,
+        expectedContentHash: params.expectedContentHash,
+        writeContext: pageWriteContextForOperation(ctx),
+        ...(activePack ? { activePack } : {}),
+      });
+    } catch (error) {
+      throw replacePageTextOperationError(error);
+    }
+    if (imported.status !== 'imported') {
+      throw new OperationError(
+        'database_error',
+        `replace_page_text did not import the changed page (status: ${imported.status}).`,
+      );
+    }
+    const current = await ctx.engine.getPage(params.slug, { sourceId });
+    if (!current?.content_hash) {
+      throw new OperationError(
+        'page_not_found_after_write',
+        `Page could not be read after replacement: ${params.slug}`,
+      );
+    }
+    const writeThrough = await writePageThrough(ctx.engine, params.slug, {
+      sourceId,
+      logger: ctx.logger,
+    });
+    return {
+      status: 'applied',
+      slug: params.slug,
+      source_id: sourceId,
+      previous_content_hash: params.expectedContentHash,
+      content_hash: current.content_hash,
+      replaced: replacement.replaced,
+      protected_matches: replacement.protectedMatches,
+      write_through: writeThrough,
+    };
+  },
+  cliHints: { name: 'replace-page-text', positional: ['slug'] },
 };
 
 const put_page: Operation = {
@@ -7864,7 +8060,7 @@ const chronicle_backfill: Operation = {
 
 export const operations: Operation[] = [
   // Page CRUD
-  get_page, validate_links, put_page, put_historical_page, delete_page,
+  get_page, validate_links, replace_page_text, put_page, put_historical_page, delete_page,
   rename_page, list_pages,
   // Page-owned durable prose refutations
   suppress_claim, unsuppress_claim, list_suppressed_claims,

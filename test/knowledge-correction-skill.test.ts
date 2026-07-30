@@ -74,6 +74,10 @@ describe('knowledge-correction skill', () => {
     for (const tool of frontmatterList('tools')) {
       expect(operationNames.has(tool)).toBe(true);
     }
+    expect(frontmatterList('tools')).toContain('replace_page_text');
+    expect(skill).toContain('Prefer `replace_page_text` for edits to existing prose.');
+    expect(skill).toContain('Do not reconstruct the');
+    expect(skill).toContain('full page with `put_page`.');
   });
 
   test('can correct source-derived partner and life pages', () => {
