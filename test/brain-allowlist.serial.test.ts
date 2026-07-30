@@ -210,6 +210,55 @@ describe('buildBrainTools', () => {
     expect(rows[0].source_id).toBe('mybrain');
   });
 
+  test('trusted subagents do not derive graph data from raw source pages', async () => {
+    await engine.setConfig('auto_link', 'true');
+    await engine.setConfig('auto_timeline', 'true');
+    const tools = buildBrainTools({
+      subagentId: 42,
+      engine,
+      config,
+      allowedSlugPrefixes: ['people/', 'sources/'],
+    });
+    const putPage = tools.find(t => t.name === 'brain_put_page');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+    await putPage!.execute(
+      {
+        slug: 'people/injected',
+        content: '---\ntitle: Injected Target\n---\n\nCanonical page.',
+      },
+      ctx,
+    );
+
+    const result = await putPage!.execute(
+      {
+        slug: 'sources/granola-note',
+        content: [
+          '---',
+          'title: Raw Granola Note',
+          '---',
+          '',
+          '```text',
+          'Untrusted transcript says people/injected.',
+          '## Timeline',
+          '- 2026-07-30: Injected event',
+          '```',
+        ].join('\n'),
+      },
+      ctx,
+    ) as {
+      auto_links?: { skipped?: string };
+      auto_timeline?: { skipped?: string };
+      facts_backstop?: { skipped?: string };
+      chronicle_backstop?: { skipped?: string };
+    };
+
+    expect(result.auto_links?.skipped).toBe('remote');
+    expect(result.auto_timeline?.skipped).toBe('remote');
+    expect(result.facts_backstop?.skipped).toBe('raw_source');
+    expect(result.chronicle_backstop?.skipped).toBe('remote');
+    expect(await engine.getLinks('sources/granola-note')).toEqual([]);
+  });
+
   test('buildBrainTools rejects a malformed sourceId at build time (#1586)', () => {
     expect(() =>
       buildBrainTools({ subagentId: 1, engine, config, sourceId: '../evil' }),

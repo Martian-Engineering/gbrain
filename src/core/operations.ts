@@ -1403,14 +1403,15 @@ const put_page: Operation = {
     let autoTimeline: { created: number } | { error: string } | { skipped: 'remote' } | undefined;
     // Trusted-workspace path (v0.23 dream cycle) re-enables auto-link/timeline
     // even though ctx.remote=true, because the allow-list bounds the slug and
-    // the synthesis prompt is itself the trusted dispatcher. Without this,
-    // the cycle's `extract` phase would have to recompute every edge, and
-    // patterns (which runs after extract) would still see the right graph
-    // but auto_timeline would never fire on synth output.
+    // the synthesis prompt is itself the trusted dispatcher. Raw `sources/`
+    // pages are the exception: their prompt-supplied payload stays searchable,
+    // but untrusted text must not create graph, timeline, fact, or Chronicle
+    // side effects.
     const trustedWorkspace = ctx.viaSubagent === true
       && Array.isArray(ctx.allowedSlugPrefixes)
       && ctx.allowedSlugPrefixes.length > 0;
-    if (ctx.remote !== false && !trustedWorkspace) {
+    const rawSourceArtifact = trustedWorkspace && slug.startsWith('sources/');
+    if (ctx.remote !== false && (!trustedWorkspace || rawSourceArtifact)) {
       autoLinks = { skipped: 'remote' };
       autoTimeline = { skipped: 'remote' };
     } else if (result.parsedPage) {
@@ -1467,37 +1468,41 @@ const put_page: Operation = {
     // (MEDIUM facts wait for the dream cycle but DO land via put_page,
     // matching the pre-fix behavior on this surface).
     let factsQueued: { queued: boolean } | { skipped: string } | undefined;
-    try {
-      const { runFactsBackstop } = await import('./facts/backstop.ts');
-      const r = await runFactsBackstop(
-        {
-          slug,
-          type: result.parsedPage!.type,
-          compiled_truth: result.parsedPage!.compiled_truth,
-          frontmatter: result.parsedPage!.frontmatter,
-        },
-        {
-          engine: ctx.engine,
-          sourceId: ctx.sourceId ?? 'default',
-          sessionId: (ctx as { source_session?: string }).source_session ?? null,
-          source: 'mcp:put_page',
-          mode: 'queue',
-        },
-      );
-      if (r.mode === 'queue' && r.enqueued) {
-        factsQueued = { queued: true };
-      } else if (r.mode === 'queue' && r.skipped) {
-        // Preserve the pre-v0.31.2 response shape for MCP clients:
-        // 'kind:guide' / 'too_short' / 'subagent_namespace' / 'dream_generated'
-        // (bare reasons), not the helper's namespaced 'eligibility_failed:...'
-        // discriminator. Map back here.
-        const bare = r.skipped.startsWith('eligibility_failed:')
-          ? r.skipped.slice('eligibility_failed:'.length)
-          : r.skipped;
-        factsQueued = { skipped: bare };
+    if (rawSourceArtifact) {
+      factsQueued = { skipped: 'raw_source' };
+    } else {
+      try {
+        const { runFactsBackstop } = await import('./facts/backstop.ts');
+        const r = await runFactsBackstop(
+          {
+            slug,
+            type: result.parsedPage!.type,
+            compiled_truth: result.parsedPage!.compiled_truth,
+            frontmatter: result.parsedPage!.frontmatter,
+          },
+          {
+            engine: ctx.engine,
+            sourceId: ctx.sourceId ?? 'default',
+            sessionId: (ctx as { source_session?: string }).source_session ?? null,
+            source: 'mcp:put_page',
+            mode: 'queue',
+          },
+        );
+        if (r.mode === 'queue' && r.enqueued) {
+          factsQueued = { queued: true };
+        } else if (r.mode === 'queue' && r.skipped) {
+          // Preserve the pre-v0.31.2 response shape for MCP clients:
+          // 'kind:guide' / 'too_short' / 'subagent_namespace' / 'dream_generated'
+          // (bare reasons), not the helper's namespaced 'eligibility_failed:...'
+          // discriminator. Map back here.
+          const bare = r.skipped.startsWith('eligibility_failed:')
+            ? r.skipped.slice('eligibility_failed:'.length)
+            : r.skipped;
+          factsQueued = { skipped: bare };
+        }
+      } catch {
+        factsQueued = { skipped: 'backstop_error' };
       }
-    } catch {
-      factsQueued = { skipped: 'backstop_error' };
     }
 
     // v0.42.x (#2390): Life Chronicle backstop. ONLY on a real import
@@ -1508,7 +1513,7 @@ const put_page: Operation = {
     let chronicleQueued: { queued: boolean } | { skipped: string } | undefined;
     if (result.status !== 'imported') {
       chronicleQueued = { skipped: 'not_imported' };
-    } else if (ctx.remote !== false && !trustedWorkspace) {
+    } else if (ctx.remote !== false && (!trustedWorkspace || rawSourceArtifact)) {
       chronicleQueued = { skipped: 'remote' };
     } else if (result.parsedPage) {
       try {
