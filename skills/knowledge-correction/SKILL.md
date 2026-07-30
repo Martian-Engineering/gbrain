@@ -113,7 +113,7 @@ mode: propose | apply
 approval_state: pending | accepted
 source_id: <immutable source id>
 page_slug: <selected page>
-anchor_quote: <exact selected text>
+anchor_quote: <optional selected text for context>
 comment: <operator's freeform correction>
 correction_date: <caller-supplied YYYY-MM-DD>
 available_apply_tools:
@@ -123,7 +123,8 @@ approved_plan: <required in apply mode>
 ```
 
 If `mode` is absent, use `propose`. In apply mode, stop if the approved plan,
-source, page, or anchor does not match the current task.
+source, or page does not match the current task. An anchor is contextual
+evidence, not write authorization, and does not have to remain byte-identical.
 If `correction_date` is absent or invalid, return `needs_clarification` without
 planning dated evidence.
 
@@ -132,12 +133,17 @@ planning dated evidence.
 ### 1. Ground the correction
 
 1. Read `page_slug` from `source_id`.
-2. Confirm `anchor_quote` occurs exactly once. If it is missing or repeated,
-   return `needs_clarification`.
+2. When `anchor_quote` is non-empty, use it to locate relevant page context.
+   A missing, repeated, or stale anchor alone is not ambiguity and must not
+   prevent a page-level correction. Ground intended scope from the operator's
+   comment, the complete selected page, and same-source evidence.
 3. Search the same source for every named entity or possible duplicate.
 4. Read exact candidate pages and relevant backlinks.
 5. Separate user-provided facts from your inference. Do not invent biography,
    dates, relationships, aliases, or citations.
+6. Return `needs_clarification` only when the intended target or effect remains
+   genuinely ambiguous after grounding, not merely because anchor text is
+   absent, repeated, or changed.
 
 ### 2. Choose one or more effects
 
@@ -203,6 +209,7 @@ In apply mode:
 ## Anti-Patterns
 
 - Mutating while the task is still in propose mode.
+- Treating an anchor as approval, authorization, or a mandatory locator.
 - Treating a correction as exactly one menu action.
 - Creating an empty or speculative entity stub.
 - Picking among multiple same-name candidates without clarification.

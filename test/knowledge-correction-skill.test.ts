@@ -55,6 +55,13 @@ describe('knowledge-correction skill', () => {
     expect(skill).toContain('invent the date');
   });
 
+  test('treats an anchor as optional context rather than write authorization', () => {
+    expect(skill).toContain('anchor_quote: <optional selected text for context>');
+    expect(skill).toContain('A missing, repeated, or stale anchor alone is not ambiguity');
+    expect(skill).not.toContain('If it is missing or repeated');
+    expect(skill).not.toContain('source, page, or anchor does not match');
+  });
+
   test('is self-contained for remote agent dispatch', () => {
     expect(skill).toContain('instructions are self-contained for remote agents');
     expect(skill).not.toMatch(/Read `\.\.\//);
