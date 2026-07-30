@@ -31,10 +31,25 @@ export interface PageWriteContext {
   reason?: string;
 }
 
+/** A page changed after a caller read it, so a conditional write was refused. */
+export class StalePageError extends Error {
+  readonly code = 'stale_page';
+
+  constructor(
+    public readonly expectedContentHash: string,
+    public readonly currentContentHash: string | null,
+  ) {
+    super('Page changed after it was read; fetch the current page before editing it.');
+    this.name = 'StalePageError';
+  }
+}
+
 /** Options shared by page upserts. */
 export interface PutPageOptions {
   sourceId?: string;
   writeContext?: PageWriteContext;
+  /** Opaque optimistic-concurrency token obtained from the prior page read. */
+  expectedContentHash?: string;
 }
 
 /**

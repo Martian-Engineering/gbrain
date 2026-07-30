@@ -17,6 +17,7 @@ import type {
   SourceRow,
   PageWriteContext, PutPageOptions,
 } from './engine.ts';
+import { StalePageError } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
@@ -1044,14 +1045,24 @@ export class PGLiteEngine implements BrainEngine {
     const sourceId = opts?.sourceId ?? 'default';
     // PGLite serializes write transactions. Read the old semantic body before
     // the upsert so its hash and the mutation receipt describe one revision.
-    const previousRows = await this.executeRaw<{ compiled_truth: string }>(
-      `SELECT compiled_truth
+    const previousRows = await this.executeRaw<{
+      compiled_truth: string;
+      content_hash: string;
+    }>(
+      `SELECT compiled_truth, content_hash
          FROM pages
         WHERE source_id = $1 AND slug = $2
         FOR UPDATE`,
       [sourceId, slug],
     );
     const previousCompiledTruth = previousRows[0]?.compiled_truth ?? null;
+    const currentContentHash = previousRows[0]?.content_hash ?? null;
+    if (
+      opts?.expectedContentHash !== undefined
+      && currentContentHash !== opts.expectedContentHash
+    ) {
+      throw new StalePageError(opts.expectedContentHash, currentContentHash);
+    }
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
     // source callers land on the intended (source_id, slug) row. Omitting it

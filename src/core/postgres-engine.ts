@@ -14,6 +14,7 @@ import type {
   SourceRow,
   PageWriteContext, PutPageOptions,
 } from './engine.ts';
+import { StalePageError } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import type {
@@ -1107,14 +1108,24 @@ export class PostgresEngine implements BrainEngine {
     await sql`
       SELECT pg_advisory_xact_lock(hashtext(${sourceId}), hashtext(${slug}))
     `;
-    const previousRows = await sql<{ compiled_truth: string }[]>`
-      SELECT compiled_truth
+    const previousRows = await sql<{
+      compiled_truth: string;
+      content_hash: string;
+    }[]>`
+      SELECT compiled_truth, content_hash
         FROM pages
        WHERE source_id = ${sourceId}
          AND slug = ${slug}
        FOR UPDATE
     `;
     const previousCompiledTruth = previousRows[0]?.compiled_truth ?? null;
+    const currentContentHash = previousRows[0]?.content_hash ?? null;
+    if (
+      opts?.expectedContentHash !== undefined
+      && currentContentHash !== opts.expectedContentHash
+    ) {
+      throw new StalePageError(opts.expectedContentHash, currentContentHash);
+    }
 
     // v0.18.0 Step 5+: source_id is now in the INSERT column list so multi-
     // source callers actually land on the (source_id, slug) row they intend.

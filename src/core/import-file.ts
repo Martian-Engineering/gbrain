@@ -7,6 +7,7 @@ import type {
   FileSpec,
   PageWriteContext,
 } from './engine.ts';
+import { StalePageError } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
@@ -239,6 +240,8 @@ export async function importFromContent(
   opts: {
     noEmbed?: boolean;
     sourceId?: string;
+    /** Opaque page hash that must still be current when the transaction writes. */
+    expectedContentHash?: string;
     /** Server-owned attribution forwarded atomically with the page mutation. */
     writeContext?: PageWriteContext;
     /**
@@ -582,6 +585,15 @@ export async function importFromContent(
   };
 
   const existing = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
+  if (
+    opts.expectedContentHash !== undefined
+    && existing?.content_hash !== opts.expectedContentHash
+  ) {
+    throw new StalePageError(
+      opts.expectedContentHash,
+      existing?.content_hash ?? null,
+    );
+  }
   if (existing?.content_hash === hash && !opts.forceRechunk) {
     return { slug, status: 'skipped', chunks: 0, parsedPage };
   }
@@ -759,6 +771,9 @@ export async function importFromContent(
   const txOpts = {
     ...(sourceId ? { sourceId } : {}),
     ...(opts.writeContext ? { writeContext: opts.writeContext } : {}),
+    ...(opts.expectedContentHash
+      ? { expectedContentHash: opts.expectedContentHash }
+      : {}),
   };
   const persistImport = async (tx: BrainEngine): Promise<void> => {
     if (existing) await tx.createVersion(slug, txOpts);
