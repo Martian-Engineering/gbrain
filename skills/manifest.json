@@ -80,6 +80,11 @@
       "description": "Ingest meeting transcripts with attendee enrichment, entity propagation, and timeline merge."
     },
     {
+      "name": "granola-meeting-ingestion",
+      "path": "granola-meeting-ingestion/SKILL.md",
+      "description": "Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source."
+    },
+    {
       "name": "citation-fixer",
       "path": "citation-fixer/SKILL.md",
       "description": "Audit and fix citation formatting across brain pages."

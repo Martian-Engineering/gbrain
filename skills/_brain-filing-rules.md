@@ -19,6 +19,7 @@ not the source, not the skill that's running.
 | Analysis of a topic -> `sources/` | -> appropriate subject directory | sources/ is for raw data only |
 | Article about a person -> `sources/` | -> `people/` | Primary subject is a person |
 | Meeting-derived company info -> `meetings/` only | -> ALSO update `companies/` | Entity propagation is mandatory |
+| Durable decision buried in meeting notes | -> `decisions/` | Decisions need a stable canonical page when they matter beyond one meeting |
 | Research about a company -> `sources/` | -> `companies/` | Primary subject is a company |
 | Reusable framework/thesis -> `sources/` | -> `concepts/` | It's a mental model |
 | Tweet thread about policy -> `media/` | -> `civic/` or `concepts/` | media/ is for content ops |

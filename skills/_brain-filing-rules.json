@@ -52,6 +52,12 @@
       "description": "A multi-session piece of work with its own arc."
     },
     {
+      "kind": "decision",
+      "directory": "decisions/",
+      "examples": ["durable choices", "approved directions", "rejected alternatives"],
+      "description": "A durable decision with its context, rationale, and consequences."
+    },
+    {
       "kind": "analysis",
       "directory": "analysis/",
       "examples": ["deep dives", "comparative studies"],
