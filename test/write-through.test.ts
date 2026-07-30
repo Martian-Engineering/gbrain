@@ -172,6 +172,59 @@ describe('writePageThrough', () => {
     expect(walkFiles(globalDir).some((f) => f.endsWith('.md'))).toBe(false);
   });
 
+  test('prefers the recorded source_path over a slug-derived filename', async () => {
+    const alphaDir = path.join(tmpRoot, 'alpha-repo');
+    fs.mkdirSync(alphaDir, { recursive: true });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ('alpha', 'Alpha', $1, '{}'::jsonb)`,
+      [alphaDir],
+    );
+    const slug = 'people/alice-example';
+    const sourcePath = 'directory/custom-name.md';
+    await importFromContent(engine, slug, `---
+title: Alice
+type: person
+---
+
+# Alice
+`, {
+      noEmbed: true,
+      sourceId: 'alpha',
+      sourcePath,
+    });
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'alpha' });
+
+    expect(res).toMatchObject({
+      written: true,
+      path: path.join(alphaDir, sourcePath),
+    });
+    expect(fs.existsSync(path.join(alphaDir, sourcePath))).toBe(true);
+    expect(fs.existsSync(path.join(alphaDir, `${slug}.md`))).toBe(false);
+  });
+
+  test('falls back to the slug-derived path when source_path is absent', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'notes/db-created';
+    await importFromContent(engine, slug, `---
+title: DB created
+type: note
+---
+
+# DB created
+`, {
+      noEmbed: true,
+      sourceId: 'default',
+    });
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'default' });
+
+    expect(res).toMatchObject({
+      written: true,
+      path: resolvePageFilePath(brainDir, slug, 'default'),
+    });
+  });
+
   test('[REGRESSION] mkdir ENOTDIR (parent is a file) → error, no partial .md, no .tmp', async () => {
     await engine.setConfig('sync.repo_path', brainDir);
     // Block the `wiki/` directory by putting a FILE named "wiki" under the repo,

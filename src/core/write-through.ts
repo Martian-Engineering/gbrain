@@ -70,6 +70,28 @@ export interface WritePageThroughOpts {
 }
 
 /**
+ * Resolve the existing source file when known, with the canonical slug layout
+ * as the fallback for pages created directly through an operation.
+ */
+function resolveWriteThroughPath(
+  repoPath: string,
+  slug: string,
+  sourceId: string,
+  sourcePath: string | null,
+  hasDedicatedSourceRoot: boolean,
+): string {
+  if (!sourcePath) {
+    return hasDedicatedSourceRoot
+      ? join(repoPath, `${slug}.md`)
+      : resolvePageFilePath(repoPath, slug, sourceId);
+  }
+  if (hasDedicatedSourceRoot || sourceId === 'default') {
+    return join(repoPath, sourcePath);
+  }
+  return join(repoPath, '.sources', sourceId, sourcePath);
+}
+
+/**
  * Render the DB row for `slug` to markdown and atomically write it under
  * `sync.repo_path`. Never throws — failures are reported via the result's
  * `skipped` / `error` fields (the DB write is the durable sink; the file is
@@ -82,6 +104,17 @@ export async function writePageThrough(
 ): Promise<WriteThroughResult> {
   const sourceId = opts.sourceId ?? 'default';
   try {
+    const pageRows = await engine.executeRaw<{ source_path: string | null }>(
+      `SELECT source_path
+         FROM pages
+        WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL`,
+      [sourceId, slug],
+    );
+    if (pageRows.length === 0) {
+      return { written: false, skipped: 'page_not_found_after_write' };
+    }
+    const sourcePath = pageRows[0]?.source_path ?? null;
+
     // #2018: pick the disk target so a page is NEVER written into a different
     // source's working tree. Two legitimate topologies, plus the leak guard:
     //   1. The assigned source has its OWN `local_path` (a separate working
@@ -104,7 +137,13 @@ export async function writePageThrough(
       if (!existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
         return { written: false, skipped: 'repo_not_found' };
       }
-      filePath = join(sourceLocalPath, `${slug}.md`);
+      filePath = resolveWriteThroughPath(
+        sourceLocalPath,
+        slug,
+        sourceId,
+        sourcePath,
+        true,
+      );
       writeRoot = sourceLocalPath;
     } else {
       const repoPath = await engine.getConfig('sync.repo_path');
@@ -123,7 +162,13 @@ export async function writePageThrough(
       if (collide.length > 0) {
         return { written: false, skipped: 'source_repo_belongs_to_other_source' };
       }
-      filePath = resolvePageFilePath(repoPath, slug, sourceId);
+      filePath = resolveWriteThroughPath(
+        repoPath,
+        slug,
+        sourceId,
+        sourcePath,
+        false,
+      );
       writeRoot = repoPath;
     }
 
@@ -137,9 +182,7 @@ export async function writePageThrough(
     }
 
     const writtenPage = await engine.getPage(slug, { sourceId });
-    if (!writtenPage) {
-      return { written: false, skipped: 'page_not_found_after_write' };
-    }
+    if (!writtenPage) return { written: false, skipped: 'page_not_found_after_write' };
 
     const tags = await engine.getTags(slug, { sourceId });
     const md = serializePageToMarkdown(writtenPage, tags, {
