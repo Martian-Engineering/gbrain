@@ -80,6 +80,19 @@ describe('replace_page_text operation', () => {
     expect(operation.params.section.enum).toEqual(['body']);
   });
 
+  test('rejects an omitted replacement instead of treating it as deletion', async () => {
+    await expect(operationsByName.replace_page_text.handler(context(), {
+      slug: 'people/alice-example',
+      old_text: 'Alice',
+      expected_content_hash: 'a'.repeat(64),
+      expected_matches: 1,
+      section: 'body',
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+      message: 'new_text must be a string.',
+    });
+  });
+
   test('updates authored body text while preserving page-owned state', async () => {
     await importFromContent(engine, 'people/alice-example', fixture, {
       noEmbed: true,

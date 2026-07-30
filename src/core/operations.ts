@@ -984,7 +984,10 @@ function parseReplacePageTextParams(
   const slug = typeof params.slug === 'string' ? params.slug : '';
   validatePageSlug(slug);
   const oldText = typeof params.old_text === 'string' ? params.old_text : '';
-  const newText = typeof params.new_text === 'string' ? params.new_text : '';
+  if (typeof params.new_text !== 'string') {
+    throw new OperationError('invalid_params', 'new_text must be a string.');
+  }
+  const newText = params.new_text;
   const expectedContentHash = typeof params.expected_content_hash === 'string'
     ? params.expected_content_hash
     : '';
