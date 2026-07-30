@@ -53,8 +53,8 @@ These instructions are self-contained for a source-bound remote Minion.
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
   visible from its target through `get_backlinks`.
-- Read back every created or updated page. Report success only after raw-data
-  retrieval, link validation, and page verification pass.
+- Read back every created or updated page. Report success only after
+  raw artifact source-page read-back, link validation, and page verification pass.
 - Return exactly the JSON receipt in Output Format and no surrounding prose.
 
 This skill does not acquire data from Granola, inspect local files, choose

@@ -64,7 +64,9 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain("Read the source's `resolver` page before any other content lookup");
     expect(skill).toContain("returned `source_id` exactly equals the prompt's `sourceId`");
     expect(skill).toContain('Read the source page back with `get_page`');
+    expect(skill).toContain('raw artifact source-page read-back');
     expect(skill).toContain('complete supplied fields');
+    expect(skill).not.toContain('raw-data retrieval');
   });
 
   test('returns the Lore ingestion receipt without deterministic effects', () => {
