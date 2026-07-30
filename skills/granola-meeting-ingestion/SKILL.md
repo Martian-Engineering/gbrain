@@ -59,6 +59,9 @@ These instructions are self-contained for a source-bound remote Minion.
   visible from its target through `get_backlinks`.
 - Read back every created or updated page. Report success only after the
   artifact source-record read-back, link validation, and page verification pass.
+- In the receipt, qualify every page as `<sourceId>:<slug>` even when the page
+  tools accept a bare slug. Never return a bare `sources/...`, `meetings/...`,
+  or entity slug.
 - Return exactly the JSON receipt in Output Format and no surrounding prose.
 
 This skill does not acquire data from Granola, inspect local files, choose
@@ -227,9 +230,9 @@ Return exactly one JSON object:
   "artifactId": "copied exactly from the prompt",
   "sourceId": "verified source id",
   "summary": "compact source-grounded outcome",
-  "createdPages": ["source-qualified slugs created"],
-  "updatedPages": ["source-qualified slugs updated"],
-  "verifiedPages": ["source-qualified slugs read back and verified"],
+  "createdPages": ["<sourceId>:<slug> created"],
+  "updatedPages": ["<sourceId>:<slug> updated"],
+  "verifiedPages": ["<sourceId>:<slug> read back and verified"],
   "unresolved": ["specific unresolved identities or completion defects"]
 }
 ```
