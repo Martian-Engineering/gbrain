@@ -65,9 +65,11 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('exact prompt-supplied resolver text and revision');
     expect(skill).not.toContain('exact `resolver` slug');
     expect(skill).not.toContain("source's `resolver` page");
+    expect(skill).toContain("Lore's local Markdown mirror");
     expect(skill).toContain('Read the source page back with `get_page`');
-    expect(skill).toContain('raw artifact source-page read-back');
-    expect(skill).toContain('complete supplied fields');
+    expect(skill).toContain('artifact source-record read-back');
+    expect(skill).toContain('local-mirror provenance statement');
+    expect(skill).not.toContain('the complete transcript Markdown');
     expect(skill).not.toContain('raw-data retrieval');
   });
 

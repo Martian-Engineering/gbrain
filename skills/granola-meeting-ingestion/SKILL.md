@@ -47,15 +47,18 @@ These instructions are self-contained for a source-bound remote Minion.
 - Independently confirm that the complete artifact satisfies the supplied
   resolver text and revision before writing. Return `needs_attention` without
   mutation when it does not match or the decision is ambiguous.
-- Preserve the complete supplied artifact before relying on derived analysis.
+- Treat Lore's local Markdown mirror as the complete source of record. Write a
+  durable GBrain source record that identifies that artifact before relying on
+  derived analysis; do not attempt to duplicate an arbitrarily large transcript
+  into one page.
 - Search and read before creating or updating pages. Never invent an identity
   or create an empty entity stub.
 - Cite every meeting-derived fact inline as
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
   visible from its target through `get_backlinks`.
-- Read back every created or updated page. Report success only after
-  raw artifact source-page read-back, link validation, and page verification pass.
+- Read back every created or updated page. Report success only after the
+  artifact source-record read-back, link validation, and page verification pass.
 - Return exactly the JSON receipt in Output Format and no surrounding prose.
 
 This skill does not acquire data from Granola, inspect local files, choose
@@ -127,19 +130,26 @@ retry, inspect pages named in `priorAttempt` first.
   through `search`, `query`, `resolve_slugs`, and `get_page`.
 - Leave ambiguous identities as plain text and add them to `unresolved`.
 
-### 4. Preserve the raw artifact
+### 4. Record the source artifact
 
-Create or update one page under `sources/` for the complete prompt-supplied
+Lore's local `manifest.json`, `content.md`, and `transcript.md` package is the
+complete immutable source of record. The prompt supplies its complete contents
+so this Minion can analyze them, but GBrain page writes are not a second blob
+store and may not be able to round-trip an arbitrarily large transcript.
+
+Create or update one traceable page under `sources/` for the prompt-supplied
 artifact. The page must include:
 
 - provider, artifact ID, Granola external ID, title, occurrence date, source
   URL, participants, resolver revision, and historical flag;
-- the complete manifest in a fenced `json` block;
-- the complete notes Markdown;
-- the complete transcript Markdown.
+- the manifest metadata needed to identify and audit the local artifact;
+- a concise source-grounded account of the notes and transcript;
+- an explicit statement that Lore's local Markdown artifact is the complete
+  verbatim record and this page is its brain-facing provenance record.
 
-Read the source page back with `get_page` and verify its artifact ID, complete
-manifest, notes, transcript, and resolver revision before continuing.
+Read the source page back with `get_page` and verify its artifact ID, Granola
+external ID, occurrence date, local-mirror provenance statement, and resolver
+revision before continuing.
 
 ### 5. Write the analyzed meeting
 
@@ -186,8 +196,8 @@ boundary.
    forward references in the source pages returned by `get_page`.
 4. Run `validate_links` on the meeting page and repair every missing canonical
    reference. Keep ambiguous identities as plain text.
-5. Confirm the raw source page still contains the exact artifact ID and
-   complete supplied fields.
+5. Confirm the source record still contains the exact artifact ID, external ID,
+   occurrence date, resolver revision, and local-mirror provenance statement.
 
 Return `succeeded` only when every required write and verification passes.
 Return `needs_attention` for resolver ambiguity or unresolved conditions that
@@ -200,7 +210,7 @@ continue without duplication.
 - Acquiring a Granola note or reading a Lore filesystem path.
 - Choosing, comparing, or writing more than one source.
 - Treating `partners/` as a permission boundary.
-- Creating a meeting page without preserving the complete raw artifact.
+- Creating a meeting page without first writing its traceable source record.
 - Creating attendee stubs or guessing among same-name identities.
 - Adding routine attendance to every entity timeline.
 - Advancing Lore checkpoints or making Review-eligibility decisions.
