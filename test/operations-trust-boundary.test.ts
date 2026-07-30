@@ -84,6 +84,7 @@ describe('operations contract — every op has scope + correct mutability shape'
       'admin',
       'sources_admin',
       'users_admin',
+      'agents_admin',
       'agent',
     ]);
     for (const op of operations) {
@@ -103,6 +104,7 @@ describe('operations contract — every op has scope + correct mutability shape'
       'admin',
       'sources_admin',
       'users_admin',
+      'agents_admin',
       'agent',
     ]);
     for (const op of operations) {
