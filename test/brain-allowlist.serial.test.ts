@@ -53,7 +53,9 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // Reviewed graph reads and namespace-fenced writes remain explicit here.
     // #2778 added add_timeline_entry (write, fenced like put_page via
     // operations.ts:enforceSubagentSlugFence).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(27);
+    // lore-cd8 added replace_page_text (write, fenced like put_page and
+    // CAS-guarded by expected_content_hash).
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(28);
     expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);
@@ -61,6 +63,7 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     expect(BRAIN_TOOL_ALLOWLIST.has('list_pages')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_links')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('put_page')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('replace_page_text')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('suppress_claim')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('unsuppress_claim')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_recent_salience')).toBe(true);
@@ -174,6 +177,13 @@ describe('buildBrainTools', () => {
       ['brain_remove_link', { from: 'projects/outside', to: 'people/new' }],
       ['brain_forget_fact', { id: 1, slug: 'projects/outside' }],
       ['brain_supersede_take', { slug: 'projects/outside', take_id: 1, replacement: 'x' }],
+      ['brain_replace_page_text', {
+        slug: 'projects/outside',
+        old_text: 'x',
+        new_text: 'y',
+        expected_content_hash: 'a'.repeat(64),
+        expected_matches: 1,
+      }],
     ];
     for (const [name, input] of cases) {
       const tool = tools.find(candidate => candidate.name === name);
