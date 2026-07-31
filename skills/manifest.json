@@ -85,6 +85,11 @@
       "description": "Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source."
     },
     {
+      "name": "github-project-ingestion",
+      "path": "github-project-ingestion/SKILL.md",
+      "description": "Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source."
+    },
+    {
       "name": "citation-fixer",
       "path": "citation-fixer/SKILL.md",
       "description": "Audit and fix citation formatting across brain pages."
