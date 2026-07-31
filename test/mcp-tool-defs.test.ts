@@ -70,6 +70,31 @@ describe('buildToolDefs', () => {
     expect(buildToolDefs(operations).length).toBe(operations.length);
   });
 
+  test('includes the assign_take_proposal contract after resolution', () => {
+    const defs = buildToolDefs(operations);
+    const assignIndex = defs.findIndex(def => def.name === 'assign_take_proposal');
+    const resolveIndex = defs.findIndex(def => def.name === 'resolve_take_proposal');
+    expect(assignIndex).toBe(resolveIndex + 1);
+    expect(defs[assignIndex]?.inputSchema).toEqual({
+      type: 'object',
+      properties: {
+        id: {
+          type: 'number',
+          description: 'Take proposal id',
+        },
+        review_owner: {
+          type: 'string',
+          description: 'Reviewer person page slug; omit to clear',
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'Preview without changing the assignment',
+        },
+      },
+      required: ['id'],
+    });
+  });
+
   test('accepts an arbitrary Operation subset (for subagent tool registry)', () => {
     const subset = operations.slice(0, 3);
     const defs = buildToolDefs(subset);

@@ -5917,6 +5917,16 @@ export const MIGRATIONS: Migration[] = [
         ON mcp_request_log(token_name, created_at DESC, id DESC);
     `,
   },
+  {
+    version: 134,
+    name: 'take_proposals_review_owner',
+    // Nullable so pending proposals remain unassigned until a reviewer is
+    // explicitly selected. Existing rows require no backfill.
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS review_owner TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -91,6 +91,7 @@ async function seedProposal(opts: {
   claimText: string;
   status?: 'pending' | 'accepted' | 'rejected' | 'superseded';
   holder?: string;
+  reviewOwner?: string | null;
   kind?: 'fact' | 'take' | 'bet' | 'hunch';
   weight?: number;
   runId?: string;
@@ -103,11 +104,11 @@ async function seedProposal(opts: {
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO take_proposals (
        source_id, page_slug, content_hash, prompt_version, proposal_run_id,
-       status, claim_text, claim_hash, kind, holder, weight, domain,
+       status, claim_text, claim_hash, kind, holder, review_owner, weight, domain,
        dedup_against_fence_rows, model_id, proposed_at
      ) VALUES (
-       $1, $2, $3, 'prompt-v1', $4, $5, $6, $7, $8, $9, $10,
-       'strategy', '[]'::jsonb, 'test-model', $11::timestamptz
+       $1, $2, $3, 'prompt-v1', $4, $5, $6, $7, $8, $9, $10, $11,
+       'strategy', '[]'::jsonb, 'test-model', $12::timestamptz
      )
      RETURNING id`,
     [
@@ -120,11 +121,26 @@ async function seedProposal(opts: {
       claimHash,
       opts.kind ?? 'take',
       opts.holder ?? 'world',
+      opts.reviewOwner ?? null,
       opts.weight ?? 0.6,
       opts.proposedAt,
     ],
   );
   return rows[0]!.id;
+}
+
+async function seedSimpleProposal(
+  claimText: string,
+  opts: {
+    sourceId?: string; pageSlug?: string;
+    status?: 'pending' | 'accepted' | 'rejected' | 'superseded';
+    reviewOwner?: string | null;
+  } = {},
+): Promise<number> {
+  return seedProposal({
+    ...opts, pageSlug: opts.pageSlug ?? 'proposal-page', claimText,
+    proposedAt: '2026-07-20T10:00:00Z',
+  });
 }
 
 async function seedProposalPage(
@@ -170,6 +186,16 @@ async function resolveProposal(
   );
 }
 
+async function assignProposal(
+  operationCtx: OperationContext,
+  params: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return operationsByName.assign_take_proposal.handler(
+    operationCtx,
+    params,
+  ) as Promise<Record<string, unknown>>;
+}
+
 type ProposalListResult = {
   proposals: Array<{
     id: number;
@@ -177,6 +203,7 @@ type ProposalListResult = {
     page_slug: string;
     claim_text: string;
     holder: string;
+    review_owner: string | null;
     status: string;
     resolution_note: string | null;
   }>;
@@ -209,6 +236,13 @@ describe('take proposal operation registration', () => {
     expect(resolveOp.mutating).toBe(true);
     expect(resolveOp.localOnly).not.toBe(true);
     expect(resolveOp.params).toHaveProperty('dry_run');
+
+    const assignOp = operationsByName.assign_take_proposal;
+    expect(assignOp).toBeDefined();
+    expect(assignOp.scope).toBe('write');
+    expect(assignOp.mutating).toBe(true);
+    expect(assignOp.localOnly).not.toBe(true);
+    expect(assignOp.params).toHaveProperty('dry_run');
   });
 });
 
@@ -365,6 +399,152 @@ describe('list_take_proposals', () => {
       'brain',
       'world',
     ]);
+  });
+
+  test('filters unassigned proposals', async () => {
+    const unassignedId = await seedSimpleProposal(
+      'Unassigned claim',
+      { pageSlug: 'writing/unassigned' },
+    );
+    await seedSimpleProposal('Assigned claim', {
+      pageSlug: 'writing/assigned',
+      reviewOwner: 'people/alice-example',
+    });
+
+    const result = await list(ctx(), { review_owner: 'unassigned' });
+    expect(result.total).toBe(1);
+    expect(result.proposals[0]).toMatchObject({ id: unassignedId, review_owner: null });
+  });
+
+  test('filters proposals assigned to one review owner', async () => {
+    const assignedId = await seedSimpleProposal('Alice claim', {
+      pageSlug: 'writing/alice',
+      reviewOwner: 'people/alice-example',
+    });
+    await seedSimpleProposal('Bob claim', {
+      pageSlug: 'writing/bob',
+      reviewOwner: 'people/bob-example',
+    });
+
+    const result = await list(ctx(), { review_owner: 'people/alice-example' });
+    expect(result.total).toBe(1);
+    expect(result.proposals[0]).toMatchObject({
+      id: assignedId, review_owner: 'people/alice-example',
+    });
+  });
+
+  test('combines review owner and status filters', async () => {
+    const acceptedId = await seedSimpleProposal('Accepted Alice claim', {
+      pageSlug: 'writing/accepted',
+      status: 'accepted',
+      reviewOwner: 'people/alice-example',
+    });
+    await seedSimpleProposal('Pending Alice claim', {
+      pageSlug: 'writing/pending',
+      reviewOwner: 'people/alice-example',
+    });
+
+    const result = await list(ctx(), {
+      status: 'accepted', review_owner: 'people/alice-example',
+    });
+
+    expect(result.total).toBe(1);
+    expect(result.proposals.map(row => row.id)).toEqual([acceptedId]);
+  });
+
+  test('rejects invalid review owner filters', async () => {
+    await expect(list(ctx(), { review_owner: 'teams/reviewers' }))
+      .rejects.toMatchObject({ code: 'invalid_params' });
+  });
+});
+
+describe('assign_take_proposal', () => {
+  test('assigns a pending proposal without stamping resolution audit fields', async () => {
+    const id = await seedSimpleProposal('Assign this claim');
+
+    const result = await assignProposal(
+      ctx(),
+      { id, review_owner: 'people/alice-example' },
+    );
+
+    expect(result).toEqual({
+      id, source_id: 'default', status: 'pending', review_owner: 'people/alice-example',
+    });
+    const rows = await engine.executeRaw<{
+      review_owner: string | null;
+      acted_at: string | null;
+      acted_by: string | null;
+    }>(
+      `SELECT review_owner, acted_at, acted_by
+         FROM take_proposals
+        WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]).toEqual({
+      review_owner: 'people/alice-example', acted_at: null, acted_by: null,
+    });
+  });
+
+  test('clears an assigned pending proposal when review_owner is absent', async () => {
+    const id = await seedSimpleProposal('Clear this assignment', {
+      reviewOwner: 'people/alice-example',
+    });
+
+    const result = await assignProposal(ctx(), { id });
+    expect(result).toEqual({ id, source_id: 'default', status: 'pending', review_owner: null });
+  });
+
+  test('rejects an invalid review owner slug', async () => {
+    const id = await seedSimpleProposal('Invalid reviewer');
+    await expect(assignProposal(ctx(), { id, review_owner: 'people/Alice Example' }))
+      .rejects.toMatchObject({ code: 'invalid_params' });
+  });
+
+  test('rejects assignment of a non-pending proposal', async () => {
+    const id = await seedSimpleProposal('Already accepted', {
+      status: 'accepted',
+    });
+
+    await expect(assignProposal(ctx(), { id, review_owner: 'people/alice-example' }))
+      .rejects.toMatchObject({
+      code: 'not_pending',
+      status: 'accepted',
+    });
+  });
+
+  test('does not assign a numeric id outside the caller write source', async () => {
+    await seedSource('source-a');
+    await seedSource('source-b');
+    const id = await seedSimpleProposal('Source A only', {
+      sourceId: 'source-a',
+    });
+
+    await expect(assignProposal(ctx('source-b'), {
+      id, review_owner: 'people/alice-example',
+    })).rejects.toMatchObject({ code: 'not_found' });
+
+    const rows = await engine.executeRaw<{ review_owner: string | null }>(
+      `SELECT review_owner FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]?.review_owner).toBeNull();
+  });
+
+  test('dry-run reports the assignment without writing', async () => {
+    const id = await seedSimpleProposal('Preview assignment');
+
+    const result = await assignProposal(
+      ctx(), { id, review_owner: 'people/alice-example', dry_run: true },
+    );
+
+    expect(result).toEqual({
+      dry_run: true, id, source_id: 'default', status: 'pending',
+      review_owner: 'people/alice-example',
+    });
+    const rows = await engine.executeRaw<{ review_owner: string | null }>(
+      `SELECT review_owner FROM take_proposals WHERE id = $1`, [id],
+    );
+    expect(rows[0]?.review_owner).toBeNull();
   });
 });
 

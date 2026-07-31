@@ -99,7 +99,7 @@ describePostgres('take proposal operations on PostgreSQL', () => {
        RETURNING id`,
       [SOURCE_ID, slug, `content-${slug}`, claimText, claimHash],
     );
-    return { id: rows[0]!.id, pagePath };
+    return { id: Number(rows[0]!.id), pagePath };
   }
 
   test('accept round-trips through the fence, takes mirror, and proposal audit row', async () => {
@@ -142,6 +142,43 @@ describePostgres('take proposal operations on PostgreSQL', () => {
       since_date: '2026-07-20',
       source: `proposal:${id}`,
     }]);
+  });
+
+  test('assignment round-trips without stamping resolution audit fields', async () => {
+    const { id } = await seedProposal(
+      'proposal-assignment',
+      'Assign on PostgreSQL',
+    );
+
+    const assigned = await operationsByName.assign_take_proposal.handler(
+      ctx(),
+      { id, review_owner: 'people/alice-example' },
+    );
+    expect(assigned).toEqual({
+      id: Number(id),
+      source_id: SOURCE_ID,
+      status: 'pending',
+      review_owner: 'people/alice-example',
+    });
+
+    const cleared = await operationsByName.assign_take_proposal.handler(
+      ctx(),
+      { id },
+    );
+    expect(cleared).toEqual({
+      id: Number(id),
+      source_id: SOURCE_ID,
+      status: 'pending',
+      review_owner: null,
+    });
+    const rows = await engine.executeRaw<{
+      acted_at: string | null;
+      acted_by: string | null;
+    }>(
+      `SELECT acted_at, acted_by FROM take_proposals WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0]).toEqual({ acted_at: null, acted_by: null });
   });
 
   test('concurrent resolution has one winner and one not_pending result', async () => {

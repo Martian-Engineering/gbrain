@@ -2740,6 +2740,7 @@ export interface TakeProposal {
   claim_hash: string;
   kind: string;
   holder: string;
+  review_owner: string | null;
   weight: number;
   domain: string | null;
   dedup_against_fence_rows: unknown;
@@ -2759,6 +2760,8 @@ const TAKE_PROPOSAL_STATUSES: readonly TakeProposalStatus[] = [
   'superseded',
 ];
 
+const TAKE_PROPOSAL_REVIEW_OWNER_PATTERN = /^people\/[a-z0-9][a-z0-9-]*$/;
+
 const list_take_proposals: Operation = {
   name: 'list_take_proposals',
   description: 'List source-visible take proposals for review.',
@@ -2772,6 +2775,10 @@ const list_take_proposals: Operation = {
     },
     page_slug: { type: 'string', description: 'Filter to an exact page slug' },
     proposal_run_id: { type: 'string', description: 'Filter to one proposal run' },
+    review_owner: {
+      type: 'string',
+      description: "Filter by a people/<slug> reviewer or 'unassigned'",
+    },
     limit: { type: 'number', default: 50, description: 'Page size (default 50, clamp 1-200)' },
     offset: { type: 'number', default: 0, description: 'Rows to skip (default 0)' },
   },
@@ -2786,6 +2793,22 @@ const list_take_proposals: Operation = {
       throw new OperationError(
         'invalid_params',
         `Unknown take proposal status '${rawStatus}'.`,
+      );
+    }
+    const reviewOwner = p.review_owner;
+    if (
+      reviewOwner !== undefined
+      && (
+        typeof reviewOwner !== 'string'
+        || (
+          reviewOwner !== 'unassigned'
+          && !TAKE_PROPOSAL_REVIEW_OWNER_PATTERN.test(reviewOwner)
+        )
+      )
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        "review_owner must be 'unassigned' or a people/<slug> page.",
       );
     }
 
@@ -2824,13 +2847,20 @@ const list_take_proposals: Operation = {
       params.push(p.proposal_run_id);
       where.push(`proposal_run_id = $${params.length}`);
     }
+    if (reviewOwner === 'unassigned') {
+      where.push('review_owner IS NULL');
+    } else if (typeof reviewOwner === 'string') {
+      params.push(reviewOwner);
+      where.push(`review_owner = $${params.length}`);
+    }
     // No holder allow-list here, unlike takes_list: a proposal's claim is
     // extracted from `compiled_truth` of pages the caller can already read
     // under source scope, and its holder is unverified model attribution —
     // acceptance is what grants a claim holder standing. Source scope is the
-    // privacy boundary for the review queue; holder-filtering it would only
-    // hide reviewable rows from the review surface (OAuth clients have no
-    // holder grants and default to ['world']).
+    // privacy boundary for the review queue. review_owner routes workflow; it
+    // is not a privacy boundary. Holder-filtering would only hide reviewable
+    // rows from the review surface (OAuth clients have no holder grants and
+    // default to ['world']).
 
     const predicate = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
     const countRows = await ctx.engine.executeRaw<{ total: number }>(
@@ -3155,6 +3185,72 @@ const resolve_take_proposal: Operation = {
         id,
         page_slug: promoted.pageSlug,
       };
+    });
+  },
+};
+
+/** Assign or clear the reviewer for one pending take proposal. */
+const assign_take_proposal: Operation = {
+  name: 'assign_take_proposal',
+  description: 'Assign or clear the reviewer for one pending take proposal.',
+  scope: 'write',
+  mutating: true,
+  params: {
+    id: { type: 'number', required: true, description: 'Take proposal id' },
+    review_owner: {
+      type: 'string',
+      description: 'Reviewer person page slug; omit to clear',
+    },
+    dry_run: {
+      type: 'boolean',
+      description: 'Preview without changing the assignment',
+    },
+  },
+  handler: async (ctx, p) => {
+    // Direct operation consumers bypass transport schema validation.
+    const id = Number(p.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new OperationError('invalid_params', 'id must be a positive integer.');
+    }
+    const reviewOwner = p.review_owner === undefined ? null : p.review_owner;
+    if (
+      reviewOwner !== null
+      && (
+        typeof reviewOwner !== 'string'
+        || !TAKE_PROPOSAL_REVIEW_OWNER_PATTERN.test(reviewOwner)
+      )
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'review_owner must be a people/<slug> page.',
+      );
+    }
+    const sourceId = resolveWriteSourceId(ctx);
+    const dryRun = ctx.dryRun || p.dry_run === true;
+
+    if (dryRun) {
+      const proposal = await findTakeProposal(ctx.engine, id, sourceId);
+      assertPendingTakeProposal(proposal);
+      return {
+        dry_run: true,
+        id,
+        source_id: sourceId,
+        status: proposal.status,
+        review_owner: reviewOwner,
+      };
+    }
+
+    return ctx.engine.transaction(async tx => {
+      const proposal = await findTakeProposal(tx, id, sourceId, true);
+      assertPendingTakeProposal(proposal);
+      const rows = await tx.executeRaw(
+        `UPDATE take_proposals
+            SET review_owner = $3
+          WHERE id = $1 AND source_id = $2 AND status = 'pending'
+        RETURNING id, source_id, status, review_owner`,
+        [id, sourceId, reviewOwner],
+      );
+      return { ...rows[0], id };
     });
   },
 };
@@ -8115,7 +8211,7 @@ export const operations: Operation[] = [
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
   get_calibration_profile,
   // v0.28: Takes + think
-  list_take_proposals, resolve_take_proposal, supersede_take,
+  list_take_proposals, resolve_take_proposal, assign_take_proposal, supersede_take,
   takes_list, takes_search, think,
   // v0.30: calibration aggregates over takes
   takes_scorecard, takes_calibration,

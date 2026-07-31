@@ -769,6 +769,7 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   claim_hash                  TEXT         NOT NULL,
   kind                        TEXT         NOT NULL,
   holder                      TEXT         NOT NULL,
+  review_owner                TEXT,
   weight                      REAL         NOT NULL,
   domain                      TEXT,
   dedup_against_fence_rows    JSONB,
