@@ -18,6 +18,7 @@ const expectedTools = [
   'get_page',
   'list_pages',
   'resolve_slugs',
+  'get_links',
   'get_backlinks',
   'put_page',
   'add_link',
@@ -92,5 +93,15 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"unresolved":');
     expect(skill).not.toContain('effect list');
     expect(skill).not.toContain('content hash');
+  });
+
+  test('requires rich meeting enrichment before reporting success', () => {
+    expect(skill).toContain('Every unambiguous attendee must have a substantive `people/` dossier');
+    expect(skill).toContain('Every substantive organization, project, concept, and durable decision');
+    expect(skill).toContain('The meeting is not complete until every resolved entity dossier');
+    expect(skill).toContain('Every page created or updated during enrichment must appear');
+    expect(skill).toContain('Check `get_links`');
+    expect(skill).toContain('Check `get_backlinks`');
+    expect(skill).not.toContain('For each notable, unambiguous attendee');
   });
 });

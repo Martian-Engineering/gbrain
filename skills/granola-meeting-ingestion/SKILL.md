@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.0.0
+version: 1.1.0
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -11,6 +11,7 @@ tools:
   - get_page
   - list_pages
   - resolve_slugs
+  - get_links
   - get_backlinks
   - put_page
   - add_link
@@ -53,6 +54,14 @@ These instructions are self-contained for a source-bound remote Minion.
   into one page.
 - Search and read before creating or updating pages. Never invent an identity
   or create an empty entity stub.
+- Every unambiguous attendee must have a substantive `people/` dossier that is
+  created or updated from cited meeting evidence. The supported identity,
+  participation, and meeting relationship are sufficient for a concise
+  dossier; record roles, affiliations, work, decisions, or commitments only
+  when the artifact actually supports them.
+- Every substantive organization, project, concept, and durable decision
+  discussed in the meeting must have its canonical dossier created or updated.
+  Do not turn incidental mentions into pages.
 - Cite every meeting-derived fact inline as
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
@@ -169,22 +178,38 @@ Use explicit Markdown links only for identities resolved in this source.
 Historical meetings receive the same durable brain treatment; `historical`
 only informs the receipt because Lore owns Review admission.
 
-### 6. Propagate notable entities
+### 6. Enrich attendees and propagate entities
 
 > **Convention:** Apply the notability and filing rules in
 > `skills/_brain-filing-rules.md`; the operational summary below keeps this
 > remote skill usable without filesystem access.
 
-For each notable, unambiguous attendee or discussed entity:
+Apply the complete meeting-ingestion enrichment contract:
 
-1. Search and read the canonical page.
-2. Create it only when the artifact supplies enough cited substance to pass
-   the notability gate.
-3. Otherwise update only current understanding that materially changed.
-4. Add a dated timeline entry only for a material event, not routine
-   attendance or an incidental mention.
-5. Use `add_link` only for a typed relationship that is not already expressed
-   honestly by Markdown.
+1. Resolve every attendee. Every unambiguous attendee must have a substantive
+   `people/` dossier created or updated from the artifact. If the artifact does
+   not distinguish a person from same-name candidates, keep the name as plain
+   text and add the ambiguity to `unresolved` rather than guessing.
+2. Resolve every substantive organization, project, reusable concept, and
+   durable decision discussed. Create or update its canonical dossier when the
+   artifact supplies cited knowledge that belongs there.
+3. Search and read each canonical page before writing. Preserve useful
+   compiled truth and add only source-supported knowledge.
+4. Link the meeting explicitly to every resolved attendee and enriched entity.
+   A single directed meeting-to-entity edge plus the target's inverse
+   `get_backlinks` view provides bidirectional navigation; do not add duplicate
+   reverse edges or reciprocal prose merely for symmetry.
+5. Add a dated timeline entry only when the meeting records a material event
+   for that entity. Routine attendance and incidental mentions remain visible
+   through graph links without cluttering dossier timelines.
+6. Use `add_link` for a typed relationship that is not already expressed
+   honestly by the meeting or dossier Markdown.
+
+Every entity dossier written in this phase must contain meaningful, cited
+content rather than an empty stub. At minimum, verify its supported identity,
+current summary or State, source provenance, and relationship to the meeting.
+When the meeting materially changes the entity's history, also verify the
+dated timeline evidence.
 
 People belong in `people/`, organizations in `companies/`, ongoing work in
 `projects/`, reusable ideas in `concepts/`, and durable decisions in
@@ -192,16 +217,24 @@ People belong in `people/`, organizations in `companies/`, ongoing work in
 page requires substantive meeting evidence; never use it as an authorization
 boundary.
 
+The meeting is not complete until every resolved entity dossier has passed
+this enrichment and quality gate. Do not defer attendee or entity enrichment
+to a later run.
+
 ### 7. Verify and report
 
 1. Read back the raw page, meeting page, and every entity page written.
 2. Confirm their citations, source link, and intended facts.
-3. Check `get_backlinks` for every meaningful explicit reference and confirm
-   forward references in the source pages returned by `get_page`.
-4. Run `validate_links` on the meeting page and repair every missing canonical
+3. Check `get_links` on the meeting and every written dossier to verify their
+   outgoing graph edges.
+4. Check `get_backlinks` for every meaningful explicit reference and verify
+   reverse navigation to the meeting.
+5. Run `validate_links` on the meeting page and repair every missing canonical
    reference. Keep ambiguous identities as plain text.
-5. Confirm the source record still contains the exact artifact ID, external ID,
+6. Confirm the source record still contains the exact artifact ID, external ID,
    occurrence date, resolver revision, and local-mirror provenance statement.
+7. Every page created or updated during enrichment must appear in the matching
+   `createdPages` or `updatedPages` receipt array and in `verifiedPages`.
 
 Return `succeeded` only when every required write and verification passes.
 Return `needs_attention` for resolver ambiguity or unresolved conditions that
