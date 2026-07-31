@@ -86,6 +86,7 @@ Expect one complete task with these fields:
 
 ```yaml
 artifactId: <Lore artifact id>
+capturePageSlug: <exact slug of the sources/ capture page>
 canonicalExternalId: <stable upstream object identity>
 captureExternalId: <exact captured revision identity>
 revision: <content revision>
@@ -164,7 +165,10 @@ feature or initiative slugs. Inspect pages from `priorAttempt` first on retries.
 
 ### 4. Record the exact capture
 
-Create or update one traceable page under `sources/`. Include:
+Create or update the one traceable capture page at exactly the prompt-supplied
+`capturePageSlug`. Copy that slug character-for-character into every tool call
+that targets the capture page — never retype, re-case, or re-derive it from
+`artifactId` or any other identity. Include:
 
 - provider, repository, artifact kind, artifact ID, canonical external ID,
   capture external ID, revision, predecessor, upstream order, and source URL;
