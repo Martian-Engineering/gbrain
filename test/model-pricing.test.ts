@@ -135,6 +135,10 @@ describe('DRIFT GUARD — derived views stay equal to canonical (re-hardcode tri
 });
 
 describe('S1A — raw-index consumers price provider-prefixed ids', () => {
+  test('GPT-5.6 Luna is priced at its standard API rate', () => {
+    expect(CANONICAL_PRICING['openai:gpt-5.6-luna']).toEqual({ input: 1.0, output: 6.0 });
+  });
+
   test('estimateAnthropicCost prices anthropic:claude-opus-4-8 (was zero pre-fix)', () => {
     // 1 call, 1M in, 1M out → 1*5 + 1*25 = $30. Pre-fix the bare-key index
     // missed on the provider-prefixed id and returned 0.

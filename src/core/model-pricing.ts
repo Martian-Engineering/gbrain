@@ -78,6 +78,8 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'openai:gpt-5.5':                       { input:  4.00, output: 16.00 },
   // GPT-5.6 Terra standard rates, verified 2026-07-28.
   'openai:gpt-5.6-terra':                 { input:  2.50, output: 15.00 },
+  // GPT-5.6 Luna standard rates, verified 2026-07-31.
+  'openai:gpt-5.6-luna':                  { input:  1.00, output:  6.00 },
 
   // ── Google ─────────────────────────────────────────────────────────────
   'google:gemini-1.5-pro':                { input:  1.25, output:  5.00 },

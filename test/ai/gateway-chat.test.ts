@@ -224,6 +224,10 @@ describe('chat touchpoint — chat() smoke + stop-reason mapping (Codex D8)', ()
   test('OpenAI chat touchpoint accepts GPT-5.6 Terra', () => {
     expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.6-terra')).not.toThrow();
   });
+
+  test('OpenAI chat touchpoint accepts GPT-5.6 Luna', () => {
+    expect(() => assertTouchpoint(getRecipe('openai')!, 'chat', 'gpt-5.6-luna')).not.toThrow();
+  });
 });
 
 describe('chat touchpoint — provider_chat_options passthrough', () => {

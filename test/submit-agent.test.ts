@@ -396,7 +396,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       const ctx = makeCtx({ clientId: 'cursor' });
       const result = await callSubmitAgent(ctx, {
         prompt: 'correct the selected claim',
-        model: 'openai:gpt-5.6-terra',
+        model: 'openai:gpt-5.6-luna',
         reasoning_effort: 'high',
       });
       const rows = await engine.executeRaw<Record<string, unknown>>(
@@ -406,12 +406,12 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       const data = typeof rows[0].data === 'string'
         ? JSON.parse(rows[0].data as string)
         : (rows[0].data as Record<string, unknown>);
-      expect(data.model).toBe('openai:gpt-5.6-terra');
+      expect(data.model).toBe('openai:gpt-5.6-luna');
       expect(data.reasoning_effort).toBe('high');
 
       const auditFile = fs.readdirSync(tmpAuditDir).find(f => f.startsWith('agent-jobs-'));
       const auditLine = JSON.parse(fs.readFileSync(path.join(tmpAuditDir, auditFile!), 'utf8').trim());
-      expect(auditLine.model).toBe('openai:gpt-5.6-terra');
+      expect(auditLine.model).toBe('openai:gpt-5.6-luna');
       expect(auditLine.reasoning_effort).toBe('high');
     });
 

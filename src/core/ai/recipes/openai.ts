@@ -30,9 +30,10 @@ export const openai: Recipe = {
       price_last_verified: '2026-04-20',
     },
     chat: {
-      models: ['gpt-5.6-terra', 'gpt-5.2', 'gpt-4o-mini'],
+      models: ['gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.2', 'gpt-4o-mini'],
       reasoning_efforts: {
         'gpt-5.6-terra': ['none', 'low', 'medium', 'high', 'xhigh'],
+        'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh'],
         'gpt-5.2': ['none', 'low', 'medium', 'high', 'xhigh'],
       },
       supports_tools: true,
