@@ -8,7 +8,7 @@ export const TAKE_MINING_MAX_OUTPUT_TOKENS = 2048;
 
 /** Identity of the prompt and bounded extraction contract. */
 export const PROPOSE_TAKES_PROMPT_VERSION =
-  'v0.36.1.0-tuned-cat15-top10';
+  'v0.36.2.0-holder-asserter';
 
 /**
  * Bump the caller's prompt version whenever this template or its output
@@ -31,7 +31,14 @@ NOT gradeable (do NOT extract these):
 For each gradeable claim, output a JSON object with:
 - claim_text   (string, <=200 chars, paraphrase or near-verbatim from prose)
 - kind         ('prediction' | 'judgment' | 'bet')
-- holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain' — default 'brain' when author asserts the claim)
+- holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain')
+               The holder is who HOLDS the belief — the person who said or
+               clearly implied it — NOT who the claim is about. When the page's
+               author or a named speaker asserts the claim, holder is that
+               person's people/<slug>. Use 'world' for consensus facts,
+               'companies/<slug>' for institutional assertions with no
+               individual claimant, and 'brain' ONLY for your own analytic
+               inference or when the asserter is genuinely ambiguous.
 - weight       (number 0..1 inferred from hedging language: 'I bet'/'strong conviction'=0.7-0.85,
                 'I think'/'moderate conviction'=0.5-0.7, 'maybe'/'I'd guess'=0.3-0.5)
 - domain       (short tag — e.g. 'tactics', 'macro', 'hiring', 'geography', 'pricing')
