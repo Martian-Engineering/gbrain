@@ -81,7 +81,14 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"updatedPages":');
     expect(skill).toContain('"verifiedPages":');
     expect(skill).toContain('qualify every page as `<sourceId>:<slug>`');
-    expect(skill).toContain('Never return a bare `sources/...`');
+    expect(skill).toContain('with no status words or commentary');
+    expect(skill).toContain('"createdPages": ["<sourceId>:<slug>"]');
+    expect(skill).toContain('"updatedPages": ["<sourceId>:<slug>"]');
+    expect(skill).toContain('"verifiedPages": ["<sourceId>:<slug>"]');
+    expect(skill).not.toContain('<sourceId>:<slug> created');
+    expect(skill).not.toContain('<sourceId>:<slug> updated');
+    expect(skill).not.toContain('<sourceId>:<slug> read back and verified');
+    expect(skill).toMatch(/Never return a bare\s+`sources\/\.\.\.`/);
     expect(skill).toContain('"unresolved":');
     expect(skill).not.toContain('effect list');
     expect(skill).not.toContain('content hash');
