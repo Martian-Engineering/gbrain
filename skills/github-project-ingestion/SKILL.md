@@ -61,8 +61,15 @@ a source-bound remote Minion.
   initiative page.
 - Search and read before creating or updating pages. Never invent an identity,
   infer a person from a GitHub handle alone, or create an empty entity stub.
-- Cite every derived claim with the GitHub repository, object URL or document
-  path, and upstream revision date or commit.
+- Cite every derived claim with a single-line `[Source: ...]` citation whose
+  first reference is a wikilink to the exact `sources/` capture page, followed
+  by plain-text qualifiers — the GitHub repository, object URL or document
+  path, and upstream revision date or commit — for example
+  `[Source: [[sources/github/<id>|pull request #80 capture]], 2026-07-07]`.
+- Reference pages anywhere in page content with `[[slug|label]]` wikilinks,
+  never relative Markdown links. A citation bracket contains only wikilinks
+  and plain text; never nest Markdown links or extra square brackets inside
+  it — unresolvable citations render as dead text instead of links.
 - Read back every written page and validate its links before reporting success.
 - In the receipt, qualify every page as `<sourceId>:<slug>` even when page tools
   accept a bare slug. Each array entry contains only that exact identifier.
@@ -268,6 +275,8 @@ writes honestly so a retry can continue without duplication.
 - Recording material dated changes in the page body instead of timeline
   entries.
 - Skipping timeline entries because a capture is historical.
+- Citing with relative Markdown links, or nesting Markdown links inside a
+  `[Source: ...]` citation bracket.
 - Interpreting code, patches, diffs, or CI results absent from the artifact.
 - Guessing identities from usernames or creating contributor stubs.
 - Deleting a canonical page when a tombstone arrives.

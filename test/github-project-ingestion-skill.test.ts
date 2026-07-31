@@ -123,6 +123,21 @@ describe('github-project-ingestion skill', () => {
     );
   });
 
+  test('requires resolvable [Source:] citations built on capture wikilinks', () => {
+    expect(skill).toMatch(
+      /first reference is a wikilink to the exact `sources\/` capture page/,
+    );
+    expect(skill).toContain(
+      '`[Source: [[sources/github/<id>|pull request #80 capture]], 2026-07-07]`',
+    );
+    expect(skill).toMatch(
+      /Reference pages anywhere in page content with `\[\[slug\|label\]\]` wikilinks,\s+never relative Markdown links\./,
+    );
+    expect(skill).toMatch(
+      /Citing with relative Markdown links, or nesting Markdown links inside a\s+`\[Source: \.\.\.\]` citation bracket\./,
+    );
+  });
+
   test('returns the exact Lore ingestion receipt', () => {
     expect(skill).toContain('"status": "succeeded | needs_attention | failed"');
     expect(skill).toContain('"artifactId": "copied exactly from the prompt"');
