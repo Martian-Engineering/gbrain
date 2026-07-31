@@ -184,10 +184,31 @@ milestones, and open questions. Issue state, pull-request state, reviews,
 comments, labels, document paths, and revision metadata remain on the exact
 `sources/` capture unless they materially change the feature's current state.
 
+The feature or initiative page follows this anatomy:
+
+- The feature or initiative page body records current understanding only:
+  purpose, scope, behavior, decisions, constraints, status, and open questions.
+  It never contains dated per-capture sections, per-artifact headings, or
+  capture narration.
+- Record every material dated change exclusively with `add_timeline_entry`,
+  dated by the upstream event time and citing the repository, object URL or
+  document path, and upstream revision date.
+- Put qualifications about what a capture does or does not establish on the
+  exact `sources/` capture page or inside the timeline entry text, never as
+  repeated body boilerplate.
+
 Link the feature or initiative page to the exact `sources/` capture page. A
 newer capture updates current understanding and adds only material dated
-changes to the page timeline. Historical captures provide provenance but must
-not overwrite a newer understanding.
+changes to the page timeline.
+
+When `historical: true`:
+
+- Still write dated, cited timeline entries for material feature or initiative
+  events. Being historical is never a reason to skip the timeline.
+- Update the body's current understanding only when the capture is the newest
+  evidence recorded for that page, judged by `upstreamOrder` and revision dates
+  already recorded. Otherwise, the ingestion is timeline-and-provenance only.
+- Never append a per-capture section to the body.
 
 When no durable work was resolved, the verified source capture is a complete
 successful ingestion. Include the unresolved relationship in the receipt; do
@@ -242,6 +263,11 @@ writes honestly so a retry can continue without duplication.
   as a project without independently resolving durable work.
 - Creating separate project pages for artifacts that concern the same feature
   or initiative.
+- Appending dated capture sections or per-artifact narration to a feature or
+  initiative page body.
+- Recording material dated changes in the page body instead of timeline
+  entries.
+- Skipping timeline entries because a capture is historical.
 - Interpreting code, patches, diffs, or CI results absent from the artifact.
 - Guessing identities from usernames or creating contributor stubs.
 - Deleting a canonical page when a tombstone arrives.

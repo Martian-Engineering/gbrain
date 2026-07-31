@@ -105,6 +105,24 @@ describe('github-project-ingestion skill', () => {
     );
   });
 
+  test('prescribes current-state page anatomy for historical captures', () => {
+    expect(skill).toMatch(
+      /The feature or initiative page body records current understanding only:\s+purpose, scope, behavior, decisions, constraints, status, and open questions\./,
+    );
+    expect(skill).toMatch(
+      /Record every material dated change exclusively with `add_timeline_entry`,\s+dated by the upstream event time/,
+    );
+    expect(skill).toMatch(
+      /Still write dated, cited timeline entries for material feature or initiative\s+events\. Being historical is never a reason to skip the timeline\./,
+    );
+    expect(skill).toMatch(
+      /Update the body's current understanding only when the capture is the newest\s+evidence recorded for that page, judged by `upstreamOrder` and revision dates\s+already recorded\./,
+    );
+    expect(skill).toMatch(
+      /Appending dated capture sections or per-artifact narration to a feature or\s+initiative page body\./,
+    );
+  });
+
   test('returns the exact Lore ingestion receipt', () => {
     expect(skill).toContain('"status": "succeeded | needs_attention | failed"');
     expect(skill).toContain('"artifactId": "copied exactly from the prompt"');
