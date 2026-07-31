@@ -37,7 +37,7 @@ import type { ToolCtx, ToolDef } from '../types.ts';
  *
  * Read-only (all safe):
  *   query, search, get_page, list_pages, file_list, file_url,
- *   get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
+ *   get_links, get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
  *
  * Conditional write:
  *   put_page (namespace-enforced by the tool schema + server-side check),
@@ -55,6 +55,7 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'list_pages',
   'file_list',
   'file_url',
+  'get_links',
   'get_backlinks',
   'traverse_graph',
   // v114 (#1941): read-only provenance discovery. Edge-WRITE ops (add_link /
@@ -113,6 +114,7 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   list_pages: 'List pages by type or slug-prefix filter. Use when you need to enumerate (e.g. "list all `people/` pages") instead of search.',
   file_list: 'List uploaded files (attachments) by slug-prefix or content type. NOT the local filesystem — only files the brain has stored.',
   file_url: 'Get a presigned URL for a brain-stored file. Read-only; expires.',
+  get_links: 'List every outgoing graph edge from a page. Use after page writes to verify the relationships the page creates.',
   get_backlinks: 'List every page that links TO the given slug. Use for "what references this".',
   traverse_graph: 'Walk the typed-edge graph starting from a slug (e.g. `works_at`, `founded`, `invested_in`). Use for relationship queries.',
   list_link_sources: 'List the distinct link provenances in the brain with edge counts (e.g. `citation-graph`, `manual`). Use to discover which edge-writers have populated the graph.',

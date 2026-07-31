@@ -50,15 +50,16 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // get_recent_transcripts is deliberately excluded — subagent calls always
     // have ctx.remote=true, and the v0.29 trust gate rejects remote callers.
     // v114 (#1941) added list_link_sources (read-only provenance discovery);
-    // the edge-WRITE ops add_link/remove_link stay out (separate trust call).
+    // Reviewed graph reads and namespace-fenced writes remain explicit here.
     // #2778 added add_timeline_entry (write, fenced like put_page via
     // operations.ts:enforceSubagentSlugFence).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(26);
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(27);
     expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_page')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('list_pages')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('get_links')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('put_page')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('suppress_claim')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('unsuppress_claim')).toBe(true);
