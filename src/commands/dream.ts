@@ -16,6 +16,7 @@
  *   gbrain dream --phase lint          # run a single phase
  *   gbrain dream --pull                # also git pull the brain repo
  *   gbrain dream --dir /path/to/brain  # explicit brain location
+ *   gbrain dream --all-sources         # cycle every registered source
  *
  * Cron: 0 2 * * * gbrain dream --json >> /var/log/gbrain-dream.log
  *
@@ -88,6 +89,8 @@ interface DreamArgs {
    * skillopt) — a no-op for phases that always run when named directly.
    */
   once: boolean;
+  /** Run one source-scoped cycle for every non-archived registered source. */
+  allSources: boolean;
 }
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -132,6 +135,27 @@ function parseArgs(args: string[]): DreamArgs {
   if (rawPhase && !phase) {
     console.error(`Unknown phase "${rawPhase}". Valid: ${ALL_PHASES.join(', ')}`);
     process.exit(1);
+  }
+
+  const allSources = args.includes('--all-sources');
+  const wantsHelp = args.includes('--help') || args.includes('-h');
+  if (allSources && !wantsHelp) {
+    const incompatible = [
+      '--source',
+      '--source-id',
+      '--dir',
+      '--input',
+      '--drain',
+      '--date',
+      '--from',
+      '--to',
+    ].filter((flag) => args.includes(flag));
+    if (incompatible.length > 0) {
+      console.error(
+        `--all-sources cannot be combined with ${incompatible.join(', ')}`,
+      );
+      process.exit(1);
+    }
   }
 
   const dirIdx = args.indexOf('--dir');
@@ -251,7 +275,6 @@ function parseArgs(args: string[]): DreamArgs {
   // "--help --source whatever prints help and exits 0" case — `gbrain
   // dream --help --once` (no --phase) must show help, not a usage error.
   const once = args.includes('--once');
-  const wantsHelp = args.includes('--help') || args.includes('-h');
   if (once && !phaseWasExplicit && !wantsHelp) {
     console.error(
       '--once requires an explicit --phase <name> (bypasses that one ' +
@@ -279,6 +302,7 @@ function parseArgs(args: string[]): DreamArgs {
     drain,
     windowSeconds,
     once,
+    allSources,
   };
 }
 
@@ -385,6 +409,11 @@ Options:
                       see "stale cycle" forever.
   --source-id <id>    Alias for --source. Matches the v0.37.7.0+
                       naming used by import/extract/graph-query.
+  --all-sources       Run one source-scoped cycle for every non-archived
+                      registered source, in registry order. Sources may
+                      opt out with sources.config dream.enabled=false.
+                      Cannot be combined with --source/--source-id,
+                      --dir, --input, --drain, --date, --from, or --to.
 
   --input <file>      Synthesize a specific transcript file (implies
                       --phase synthesize). Bypasses corpus-dir scan.
@@ -414,6 +443,7 @@ Examples:
   gbrain dream
   gbrain dream --dry-run --json
   gbrain dream --phase lint
+  gbrain dream --all-sources --json
   gbrain dream --phase patterns --once   # run once, ignore dream.patterns.enabled=false
   gbrain dream --phase synthesize --input ~/transcripts/2026-04-25.txt
   gbrain dream --phase synthesize --from 2026-04-01 --to 2026-04-25
@@ -477,6 +507,103 @@ function printHuman(report: CycleReport) {
       `patterns=${t.patterns_written}`,
     );
   }
+}
+
+/** Options shared by every cycle in a registry-driven all-sources run. */
+export interface DreamAllSourcesOptions {
+  json: boolean;
+  dryRun: boolean;
+  pull: boolean;
+  phase: CyclePhase | null;
+  once: boolean;
+  bypassDreamGuard?: boolean;
+}
+
+/** One source's result from a registry-driven all-sources run. */
+export type DreamAllSourcesEntry =
+  | { source_id: string; report: CycleReport }
+  | { source_id: string; skipped: string }
+  | { source_id: string; error: string };
+
+/** Aggregate outcome returned by the testable all-sources orchestration seam. */
+export interface DreamAllSourcesResult {
+  entries: DreamAllSourcesEntry[];
+  failed: boolean;
+}
+
+type CycleRunner = typeof runCycle;
+
+/** True only for the explicit per-source opt-out shape. */
+function isDreamDisabled(config: Record<string, unknown>): boolean {
+  const dream = config.dream;
+  return typeof dream === 'object'
+    && dream !== null
+    && !Array.isArray(dream)
+    && (dream as Record<string, unknown>).enabled === false;
+}
+
+/**
+ * Run one maintenance cycle for every non-archived registered source.
+ *
+ * Sources run sequentially. A failed report or thrown error is recorded and
+ * does not prevent later sources from running. The optional runner is a test
+ * seam; production callers use the shared runCycle primitive.
+ */
+export async function runDreamAllSources(
+  engine: BrainEngine,
+  opts: DreamAllSourcesOptions,
+  cycleRunner: CycleRunner = runCycle,
+): Promise<DreamAllSourcesResult> {
+  const entries: DreamAllSourcesEntry[] = [];
+  let failed = false;
+  // Preserve the existing `dream --source <id>` contract exactly: an omitted
+  // --phase means that source gets the full cycle. This command changes source
+  // enrollment from a directory glob to the registry; it does not redefine
+  // phase scope or substitute autopilot's split global-maintenance schedule.
+  const phases: CyclePhase[] | undefined = opts.phase ? [opts.phase] : undefined;
+
+  // listAllSources excludes archived rows by default. Keep the default call so
+  // the registry remains the single enrollment and archival boundary.
+  const sources = await engine.listAllSources();
+  for (const source of sources) {
+    if (!opts.json) console.log(`\n=== Dream source: ${source.id} ===`);
+
+    if (isDreamDisabled(source.config)) {
+      const entry = { source_id: source.id, skipped: 'dream.enabled=false' };
+      entries.push(entry);
+      if (opts.json) console.log(JSON.stringify(entry));
+      else console.log('Skipped: sources.config dream.enabled=false.');
+      continue;
+    }
+
+    try {
+      // Use the single-source resolver so missing/nonexistent local_path values
+      // become null and runCycle degrades to its DB-only phase set.
+      const brainDir = await resolveBrainDir(engine, null, source.id);
+      const report = await cycleRunner(engine, {
+        brainDir,
+        dryRun: opts.dryRun,
+        pull: opts.pull,
+        phases,
+        sourceId: source.id,
+        synthBypassDreamGuard: opts.bypassDreamGuard === true,
+        onceForPhase: opts.once && opts.phase ? opts.phase : undefined,
+      });
+      entries.push({ source_id: source.id, report });
+      if (opts.json) console.log(JSON.stringify({ source_id: source.id, ...report }));
+      else printHuman(report);
+      if (report.status === 'failed') failed = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const entry = { source_id: source.id, error: message };
+      entries.push(entry);
+      failed = true;
+      if (opts.json) console.log(JSON.stringify(entry));
+      else console.log(`Error: ${message}`);
+    }
+  }
+
+  return { entries, failed };
 }
 
 // ─── CLI entry ─────────────────────────────────────────────────────
@@ -576,6 +703,19 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
   // below. If you reorder this, dream-cli-flags.test.ts will fail.
   if (opts.help) {
     printHelp();
+    return;
+  }
+
+  if (opts.allSources) {
+    if (engine === null) {
+      console.error(
+        'gbrain dream --all-sources requires a connected brain ' +
+        '(no engine available); run `gbrain init` first',
+      );
+      process.exit(1);
+    }
+    const result = await runDreamAllSources(engine, opts);
+    if (result.failed) process.exit(1);
     return;
   }
 

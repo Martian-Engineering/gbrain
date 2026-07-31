@@ -7,8 +7,9 @@
  * structure to avoid spinning up a process per test.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import { readFileSync } from 'fs';
+import { runDream } from '../src/commands/dream.ts';
 
 const dreamSrc = readFileSync(new URL('../src/commands/dream.ts', import.meta.url), 'utf-8');
 
@@ -179,6 +180,45 @@ describe('dream CLI flag wiring', () => {
     test('documents --once in --help output', () => {
       expect(dreamSrc).toContain('--once');
       expect(dreamSrc).toContain('Never reads or writes config');
+    });
+  });
+
+  describe('--all-sources exclusivity', () => {
+    const incompatibleArgs: Array<[string, string[]]> = [
+      ['--source', ['--source', 'alpha']],
+      ['--source-id', ['--source-id', 'alpha']],
+      ['--dir', ['--dir', '/tmp/brain']],
+      ['--input', ['--input', '/tmp/transcript.txt']],
+      ['--drain', ['--drain']],
+      ['--date', ['--date', '2026-07-31']],
+      ['--from', ['--from', '2026-07-01']],
+      ['--to', ['--to', '2026-07-31']],
+    ];
+
+    for (const [flag, flagArgs] of incompatibleArgs) {
+      test(`rejects --all-sources with ${flag} as a usage error`, async () => {
+        const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+        const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          try {
+            await runDream(null, ['--all-sources', ...flagArgs]);
+            throw new Error('expected runDream to exit');
+          } catch (error) {
+            expect((error as Error).message).toBe('EXIT');
+          }
+          expect(exitSpy).toHaveBeenCalledWith(1);
+          expect(errorSpy.mock.calls.flat().join(' ')).toContain(
+            '--all-sources cannot be combined with',
+          );
+        } finally {
+          exitSpy.mockRestore();
+          errorSpy.mockRestore();
+        }
+      });
+    }
+
+    test('routes aggregate failure to exit 1', () => {
+      expect(dreamSrc).toMatch(/if \(result\.failed\) process\.exit\(1\)/);
     });
   });
 });
