@@ -85,6 +85,7 @@ Expect one complete task with these fields:
 
 ```yaml
 artifactId: <Lore artifact id>
+capturePageSlug: <exact slug of the sources/ capture page>
 provider: granola
 sourceId: <already-selected immutable GBrain source id>
 resolverRevision: <revision used by Lore>
@@ -150,8 +151,11 @@ complete immutable source of record. The prompt supplies its complete contents
 so this Minion can analyze them, but GBrain page writes are not a second blob
 store and may not be able to round-trip an arbitrarily large transcript.
 
-Create or update one traceable page under `sources/` for the prompt-supplied
-artifact. The page must include:
+Create or update the one traceable capture page for the prompt-supplied
+artifact at exactly the prompt-supplied `capturePageSlug`. Copy that slug
+character-for-character into every tool call that targets the capture page —
+never retype, re-case, or re-derive it from `artifactId` or any other
+identity. The page must include:
 
 - provider, artifact ID, Granola external ID, title, occurrence date, source
   URL, participants, resolver revision, and historical flag;
