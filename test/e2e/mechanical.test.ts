@@ -271,18 +271,29 @@ describeE2E('E2E: Timeline', () => {
   afterAll(teardownDB);
 
   test('add_timeline_entry + get_timeline round trip', async () => {
-    await callOp('add_timeline_entry', {
+    const params = {
       slug: 'people/sarah-chen',
       date: '2025-04-01',
       summary: 'Test timeline entry',
       detail: 'Added via E2E test',
       source: 'e2e-test',
+    };
+    expect(await callOp('add_timeline_entry', params)).toEqual({
+      status: 'ok',
+      materialized: true,
     });
 
     const timeline = await callOp('get_timeline', { slug: 'people/sarah-chen' }) as any[];
     expect(timeline.length).toBeGreaterThanOrEqual(1);
     const entry = timeline.find((e: any) => e.summary === 'Test timeline entry');
     expect(entry).toBeDefined();
+
+    const page = await callOp('get_page', { slug: 'people/sarah-chen' }) as { timeline: string };
+    expect(page.timeline).toContain('- 2025-04-01 — Test timeline entry');
+    expect(await callOp('add_timeline_entry', params)).toEqual({
+      status: 'ok',
+      materialized: false,
+    });
   }, 30_000);
 });
 

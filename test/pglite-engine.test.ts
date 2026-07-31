@@ -1123,8 +1123,8 @@ describe('PGLiteEngine: Timeline dedup constraint (v6 migration)', () => {
   });
 
   test('inserting same (date, summary) twice is silent no-op (idempotent)', async () => {
-    await engine.addTimelineEntry('test/timeline-dedup', { date: '2026-01-15', summary: 'Event A' });
-    await engine.addTimelineEntry('test/timeline-dedup', { date: '2026-01-15', summary: 'Event A' });
+    expect(await engine.addTimelineEntry('test/timeline-dedup', { date: '2026-01-15', summary: 'Event A' })).toBe(true);
+    expect(await engine.addTimelineEntry('test/timeline-dedup', { date: '2026-01-15', summary: 'Event A' })).toBe(false);
     const entries = await engine.getTimeline('test/timeline-dedup');
     expect(entries.length).toBe(1);
   });
@@ -1143,12 +1143,11 @@ describe('PGLiteEngine: Timeline dedup constraint (v6 migration)', () => {
 
   test('skipExistenceCheck=true: silent no-op on missing page', async () => {
     // No throw, but also nothing inserted (subquery returns no rows).
-    await engine.addTimelineEntry(
+    expect(await engine.addTimelineEntry(
       'does/not-exist',
       { date: '2026-01-15', summary: 'X' },
       { skipExistenceCheck: true },
-    );
-    // No assertion needed beyond "did not throw".
+    )).toBe(false);
   });
 });
 

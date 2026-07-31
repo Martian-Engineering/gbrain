@@ -3594,7 +3594,7 @@ export class PGLiteEngine implements BrainEngine {
     slug: string,
     entry: TimelineInput,
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const sourceId = opts?.sourceId ?? 'default';
     if (!opts?.skipExistenceCheck) {
       const { rows } = await this.db.query(
@@ -3610,13 +3610,15 @@ export class PGLiteEngine implements BrainEngine {
     // timeline rows out across every source containing the slug.
     // Free-text body fields are NUL + lone-surrogate sanitized (#2011), matching
     // the batch path and the Postgres engine; identity fields (slug, date) raw.
-    await this.db.query(
+    const { rows } = await this.db.query(
       `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
        SELECT id, $2::date, $3, $4, $5
        FROM pages WHERE slug = $1 AND source_id = $6
-       ON CONFLICT (page_id, date, summary, source) DO NOTHING`,
+       ON CONFLICT (page_id, date, summary, source) DO NOTHING
+       RETURNING 1`,
       [slug, entry.date, sanitizeForJsonb(entry.source || ''), sanitizeForJsonb(entry.summary), sanitizeForJsonb(entry.detail || ''), sourceId]
     );
+    return rows.length > 0;
   }
 
   async addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number> {

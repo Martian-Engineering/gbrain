@@ -3783,7 +3783,7 @@ export class PostgresEngine implements BrainEngine {
     slug: string,
     entry: TimelineInput,
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
     if (!opts?.skipExistenceCheck) {
@@ -3800,12 +3800,14 @@ export class PostgresEngine implements BrainEngine {
     // Free-text body fields are NUL + lone-surrogate sanitized (#2011) so a
     // surrogate from sliced/imported content can't reach the (later) ::jsonb
     // batch path or corrupt the row; identity fields (slug, date) are left raw.
-    await sql`
+    const rows = await sql`
       INSERT INTO timeline_entries (page_id, date, source, summary, detail)
       SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')}
       FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}
       ON CONFLICT (page_id, date, summary, source) DO NOTHING
+      RETURNING 1
     `;
+    return rows.length > 0;
   }
 
   async addTimelineEntriesBatch(entries: TimelineBatchInput[], opts?: BatchOpts): Promise<number> {

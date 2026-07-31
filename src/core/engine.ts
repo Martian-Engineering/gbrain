@@ -1414,23 +1414,16 @@ export interface BrainEngine {
 
   // Timeline
   /**
-   * Insert a timeline entry. By default verifies the page exists and throws if not.
-   * Pass opts.skipExistenceCheck=true for batch operations where the slug is already
-   * known to exist (e.g., from a getAllSlugs() snapshot). Duplicates are silently
-   * deduplicated by the (page_id, date, summary) UNIQUE index (ON CONFLICT DO NOTHING).
-   */
-  /**
-   * Insert a timeline entry. By default verifies the page exists and throws if not.
-   * `opts.skipExistenceCheck` skips the pre-check for batch loops where the slug
-   * is already known to exist. `opts.sourceId` source-scopes both the existence
-   * check AND the page-id lookup inside the INSERT — required for multi-source
-   * brains where the slug exists in 2+ sources.
+   * Insert a timeline entry and report whether a row was created. By default
+   * verifies the page exists and throws if not. `opts.skipExistenceCheck` skips
+   * the pre-check for batch loops where the slug is already known to exist.
+   * `opts.sourceId` source-scopes both the existence check and the INSERT.
    */
   addTimelineEntry(
     slug: string,
     entry: TimelineInput,
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
-  ): Promise<void>;
+  ): Promise<boolean>;
   /**
    * Bulk insert timeline entries via a single multi-row INSERT...SELECT FROM (VALUES)
    * JOIN pages statement with ON CONFLICT DO NOTHING. Returns the count of rows

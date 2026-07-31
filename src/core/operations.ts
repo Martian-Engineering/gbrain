@@ -3907,6 +3907,8 @@ const add_timeline_entry: Operation = {
     summary: { type: 'string', required: true },
     detail: { type: 'string' },
     source: { type: 'string' },
+    ref: { type: 'string', description: 'Same-source provenance page slug.' },
+    ref_label: { type: 'string', description: 'Display label for the provenance wikilink.' },
   },
   mutating: true,
   scope: 'write',
@@ -3933,17 +3935,46 @@ const add_timeline_entry: Operation = {
     if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       throw new Error(`Invalid calendar date "${date}"`);
     }
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
-    await ctx.engine.addTimelineEntry(p.slug as string, { // gbrain-allow-direct-insert: add_timeline_entry MCP op is the explicit canonical surface for manual timeline entries
+    const sourceId = resolveWriteSourceId(ctx);
+    const { materializeTimelineMarkdown, resolveTimelineReference } = await import('./timeline-materialize.ts');
+    const ref = typeof p.ref === 'string'
+      ? await resolveTimelineReference(ctx.engine, sourceId, p.ref, p.ref_label as string | undefined)
+      : undefined;
+    const inserted = await ctx.engine.addTimelineEntry(p.slug as string, { // gbrain-allow-direct-insert: add_timeline_entry MCP op is the explicit canonical surface for manual timeline entries
       date,
       source: (p.source as string) || '',
       summary: p.summary as string,
       detail: (p.detail as string) || '',
-    }, sourceOpts);
-    return { status: 'ok' };
+    }, { sourceId });
+    if (!inserted) return { status: 'ok', materialized: false };
+    const materialized = await materializeTimelineMarkdown(ctx.engine, p.slug as string, sourceId, [{
+      date,
+      summary: p.summary as string,
+      ...ref,
+    }]);
+    return { status: 'ok', materialized: materialized.materialized === 1 };
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
+};
+
+const timeline_materialize: Operation = {
+  name: 'timeline_materialize',
+  description:
+    'Materialize existing timeline_entries rows into page Markdown for one source. ' +
+    'Local-only maintenance op. CLI: `gbrain timeline-materialize --source <id> [--dry-run]`.',
+  params: {
+    source: { type: 'string', required: true, description: 'Source id to backfill.' },
+    dry_run: { type: 'boolean', description: 'Report changes without writing pages.' },
+  },
+  mutating: true,
+  scope: 'admin',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    const sourceId = resolveWriteSourceId(ctx, p.source as string);
+    const { backfillTimelineMarkdown } = await import('./timeline-materialize.ts');
+    return backfillTimelineMarkdown(ctx.engine, sourceId, ctx.dryRun || p.dry_run === true);
+  },
+  cliHints: { name: 'timeline-materialize' },
 };
 
 const get_timeline: Operation = {
@@ -8181,7 +8212,7 @@ export const operations: Operation[] = [
   // Links
   add_link, remove_link, get_links, get_backlinks, list_link_sources, traverse_graph,
   // Timeline
-  add_timeline_entry, get_timeline, resolve_timeline_events,
+  add_timeline_entry, timeline_materialize, get_timeline, resolve_timeline_events,
   // Admin
   get_stats, get_health, run_doctor, get_versions, revert_version,
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)
