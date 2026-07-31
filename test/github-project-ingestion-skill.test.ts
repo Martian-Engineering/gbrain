@@ -75,6 +75,36 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain("Lore's local Markdown mirror");
   });
 
+  test('treats GitHub objects as evidence for durable features, not projects', () => {
+    expect(skill).toMatch(
+      /An issue, pull request, or plan document is evidence about work; it is not a\s+project merely because it is a canonical upstream object\./,
+    );
+    expect(skill).toMatch(
+      /Multiple GitHub objects about the same feature or initiative must converge on\s+one durable project page\./,
+    );
+    expect(skill).toMatch(
+      /When no durable feature or initiative can be resolved, keep the exact capture\s+and report the relationship as unresolved without creating a project stub\./,
+    );
+    expect(skill).toMatch(
+      /Reuse a source record only when its stored `captureExternalId` matches\s+exactly\./,
+    );
+    expect(skill).toMatch(
+      /never overwrite an earlier capture with a newer revision\./,
+    );
+    expect(skill).toMatch(
+      /A newer revision of the same canonical object records its own exact capture/,
+    );
+    expect(skill).toMatch(
+      /When `tombstone` is true, record or reuse only the exact tombstone capture\./,
+    );
+    expect(skill).toMatch(
+      /A\s+tombstone changes the availability of the upstream object, not the existence of\s+the feature or initiative it discussed\./,
+    );
+    expect(skill).not.toContain(
+      'create or update one canonical project page for the upstream object',
+    );
+  });
+
   test('returns the exact Lore ingestion receipt', () => {
     expect(skill).toContain('"status": "succeeded | needs_attention | failed"');
     expect(skill).toContain('"artifactId": "copied exactly from the prompt"');
