@@ -53,6 +53,24 @@ import {
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+const DEFAULT_OAUTH_RATE_LIMIT = 50;
+const MAX_OAUTH_RATE_LIMIT = 1_000_000;
+
+/**
+ * Resolve the per-IP OAuth token/revoke request ceiling for one 15-minute window.
+ *
+ * Invalid, zero, negative, or unreasonably large values retain the secure default.
+ */
+export function resolveOAuthRateLimit(
+  value: string | undefined = process.env.GBRAIN_HTTP_RATE_LIMIT_OAUTH,
+): number {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^[1-9]\d*$/.test(trimmed)) return DEFAULT_OAUTH_RATE_LIMIT;
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) && parsed <= MAX_OAUTH_RATE_LIMIT
+    ? parsed
+    : DEFAULT_OAUTH_RATE_LIMIT;
+}
 
 /**
  * v0.36.1.x #1024: bootstrap token resolution.
@@ -634,7 +652,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // ---------------------------------------------------------------------------
   const ccRateLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 50,
+    max: resolveOAuthRateLimit(),
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'too_many_requests', error_description: 'Rate limit exceeded. Try again in 15 minutes.' },
@@ -653,7 +671,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
   });
 
-  app.post('/token', ccRateLimiter, express.urlencoded({ extended: false }), async (req, res, next) => {
+  app.use('/token', ccRateLimiter);
+  app.post('/token', express.urlencoded({ extended: false }), async (req, res, next) => {
     if (req.body?.grant_type !== 'client_credentials') {
       return next(); // Fall through to confidential-client handler or SDK
     }
@@ -684,7 +703,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Public clients (token_endpoint_auth_method='none') fall through to
   // the SDK's handler — the v0.34.1.0 PKCE path stays canonical.
   // ---------------------------------------------------------------------------
-  app.post('/token', ccRateLimiter, async (req, res, next) => {
+  app.post('/token', async (req, res, next) => {
     const grantType = req.body?.grant_type;
     if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
       return next();

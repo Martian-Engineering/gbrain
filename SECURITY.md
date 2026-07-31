@@ -165,14 +165,15 @@ first request.
 
 ### Rate limiting
 
-Two buckets, both stored in a bounded LRU map (default 10K keys, evicts
-least-recently-used on overflow, prunes entries older than 2× the
-window):
+The MCP request buckets are stored in a bounded LRU map (default 10K keys,
+evicts least-recently-used on overflow, prunes entries older than 2× the
+window). OAuth token and revocation requests have a separate per-IP window:
 
 | Bucket | When it fires | Default | Env var |
 |---|---|---|---|
 | Pre-auth IP | Before the DB lookup, on every `/mcp` request | 30 req / 60s | `GBRAIN_HTTP_RATE_LIMIT_IP` |
 | Post-auth token | After a valid token is resolved | 60 req / 60s | `GBRAIN_HTTP_RATE_LIMIT_TOKEN` |
+| OAuth token/revoke IP | Before each `/token` or `/revoke` request | 50 req / 15m | `GBRAIN_HTTP_RATE_LIMIT_OAUTH` |
 | LRU cap | Maximum distinct keys across both buckets | 10000 | `GBRAIN_HTTP_RATE_LIMIT_LRU` |
 
 On exhaustion the server returns `429 Too Many Requests` with a
