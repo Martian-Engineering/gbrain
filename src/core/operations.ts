@@ -289,6 +289,16 @@ function enforceSubagentSlugFence(ctx: OperationContext, slug: string, opName: s
   if (typeof ctx.subagentId !== 'number' || Number.isNaN(ctx.subagentId)) {
     throw new OperationError('permission_denied', `${opName} via subagent requires ctx.subagentId`);
   }
+  // Subagent slugs are model-transcribed, and whitespace in one is always a
+  // transcription error (e.g. a space inserted mid-ULID), never an intended
+  // identity. Filename-derived slugs with spaces (Apple Notes sync) enter
+  // through trusted local paths, which never run with viaSubagent=true.
+  if (/\s/.test(slug)) {
+    throw new OperationError(
+      'invalid_params',
+      `${opName} slug '${slug}' contains whitespace; re-issue the call with the exact whitespace-free slug`
+    );
+  }
   const allowList = ctx.allowedSlugPrefixes;
   if (allowList && allowList.length > 0) {
     if (!matchesSlugAllowList(slug, allowList)) {
