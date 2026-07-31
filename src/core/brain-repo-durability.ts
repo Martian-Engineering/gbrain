@@ -77,6 +77,14 @@ export interface HardenOpts {
   logger?: (line: string) => void;
 }
 
+/** Inputs for installing only the local write-through durability hook. */
+export interface HardenHookOpts {
+  repoPath: string;
+  sourceId: string;
+  dryRun?: boolean;
+  logger?: (line: string) => void;
+}
+
 export interface UnhardenOpts {
   repoPath: string;
   sourceId: string;
@@ -644,6 +652,29 @@ function pullDetail(o: PullOutcome): { status: StepStatus; detail: string } {
     case 'skipped_dirty': return { status: 'skipped', detail: 'working tree dirty — pull skipped (in-progress edits preserved)' };
     case 'conflict_aborted': return { status: 'needs_attention', detail: o.detail };
   }
+}
+
+/** Install or refresh only the local post-commit durability hook. */
+export function hardenBrainRepoHook(opts: HardenHookOpts): DurabilityReport {
+  if (!isGitRepo(opts.repoPath)) {
+    throw new Error(`not a git repo: ${opts.repoPath}`);
+  }
+  const hook = installLocalHook(opts.repoPath, !!opts.dryRun);
+  opts.logger?.(`[hook] ${hook.status}: ${hook.detail}`);
+  const fixed = hook.status === 'fixed' ? ['hook' as const] : [];
+  const needsAttention = hook.status === 'needs_attention'
+    ? [`hook: ${hook.detail}`]
+    : [];
+  return {
+    source_id: opts.sourceId,
+    repo_path: opts.repoPath,
+    branch: detectDefaultBranch(opts.repoPath),
+    steps: [{ step: 'hook', ...hook }],
+    missing: fixed,
+    fixed,
+    needs_attention: needsAttention,
+    clean_against_origin: false,
+  };
 }
 
 /**

@@ -1416,7 +1416,7 @@ Subcommands:
                                     override (v0.40.3.0). Pass "unset" or
                                     "default" to clear (NULL falls through
                                     to the global search.mode bundle).
-  harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]
+  harden <id|--all> [--pat-file <p>] [--branch <b>] [--hook-only] [--no-cron] [--no-verify] [--dry-run] [--json]
                                     v0.42.44 — make a brain repo durable: local
                                     auto-push hook, committed commit-push helper,
                                     always-on agent rules, 30-min pull cron, and

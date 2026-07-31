@@ -9,7 +9,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import {
-  hardenBrainRepo, unhardenBrainRepo, acceptPat,
+  hardenBrainRepo, hardenBrainRepoHook, unhardenBrainRepo, acceptPat,
 } from '../src/core/brain-repo-durability.ts';
 
 const PAT = 'ghp_TESTSECRETTOKEN0123456789abcdef';
@@ -168,6 +168,47 @@ describe('hardenBrainRepo', () => {
     await harden({ dryRun: true });
     expect(commitCount(work)).toBe(before);
     expect(existsSync(join(work, 'scripts', 'brain-commit-push.sh'))).toBe(false);
+  });
+
+  test('hook-only installs just the local durability hook', async () => {
+    const before = commitCount(work);
+    const report = hardenBrainRepoHook({
+      repoPath: work,
+      sourceId: 'wiki',
+    });
+
+    expect(report.steps.map(({ step }) => step)).toEqual(['hook']);
+    expect(report.needs_attention).toEqual([]);
+    expect(existsSync(join(work, '.git', 'hooks', 'post-commit'))).toBe(true);
+    expect(existsSync(join(work, 'scripts', 'brain-commit-push.sh'))).toBe(false);
+    expect(existsSync(join(work, 'AGENTS.md'))).toBe(false);
+    expect(commitCount(work)).toBe(before);
+    expect(git(work, 'status', '--porcelain')).toBe('');
+  });
+
+  test('hook-only ignores credential options that only full hardening uses', async () => {
+    const commandModule = join(
+      import.meta.dir,
+      '..',
+      'src',
+      'commands',
+      'sources-harden.ts',
+    );
+    const script = [
+      `const { runHarden } = await import(${JSON.stringify(commandModule)});`,
+      `const engine = { executeRaw: async () => [{`,
+      `  id: 'wiki',`,
+      `  local_path: ${JSON.stringify(work)},`,
+      `  config: { remote_url: 'https://example.com/wiki.git' },`,
+      `}] };`,
+      `await runHarden(engine, [`,
+      `  '--all', '--hook-only', '--pat-file',`,
+      `  ${JSON.stringify(join(root, 'missing-pat'))}, '--json',`,
+      `]);`,
+    ].join('\n');
+    execFileSync(process.execPath, ['--eval', script], { stdio: 'ignore' });
+
+    expect(existsSync(join(work, '.git', 'hooks', 'post-commit'))).toBe(true);
   });
 });
 

@@ -2,7 +2,8 @@
  * gbrain sources harden / pull / unharden — brain-repo git durability (v0.42.44).
  *
  *   gbrain sources harden   <id|--all> [--pat-file <p>] [--branch <b>]
- *                                      [--no-cron] [--no-verify] [--dry-run] [--json]
+ *                                      [--hook-only] [--no-cron] [--no-verify]
+ *                                      [--dry-run] [--json]
  *   gbrain sources pull     <id> | --path <dir> [--branch <b>]
  *   gbrain sources unharden <id>
  *
@@ -14,7 +15,7 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import {
-  hardenBrainRepo, unhardenBrainRepo, acceptPat,
+  hardenBrainRepo, hardenBrainRepoHook, unhardenBrainRepo, acceptPat,
   type DurabilityReport,
 } from '../core/brain-repo-durability.ts';
 import { divergenceSafePull, detectDefaultBranch } from '../core/git-remote.ts';
@@ -44,7 +45,7 @@ async function loadSourceRows(engine: BrainEngine, id: string | undefined, all: 
   if (all) {
     return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL ORDER BY id`);
   }
-  if (!id) throw new Error('Usage: gbrain sources harden <id|--all> [--pat-file <p>] [--branch <b>] [--no-cron] [--no-verify] [--dry-run] [--json]');
+  if (!id) throw new Error('Usage: gbrain sources harden <id|--all> [--pat-file <p>] [--branch <b>] [--hook-only] [--no-cron] [--no-verify] [--dry-run] [--json]');
   return engine.executeRaw<SourceRow>(`SELECT id, local_path, config FROM sources WHERE id = $1`, [id]);
 }
 
@@ -56,12 +57,13 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
     && a !== flagVal(args, '--pat-file') && a !== flagVal(args, '--branch'));
   const json = args.includes('--json');
   const dryRun = args.includes('--dry-run');
+  const hookOnly = args.includes('--hook-only');
   const installCron = !args.includes('--no-cron');
   const verify = !args.includes('--no-verify');
   const branch = flagVal(args, '--branch');
   const patFile = flagVal(args, '--pat-file');
 
-  const pat = acceptPat({ patFile });
+  const pat = hookOnly ? null : acceptPat({ patFile });
   for (const w of pat?.warnings ?? []) console.error(`[gbrain] ${w}`);
 
   const rows = await loadSourceRows(engine, id, all);
@@ -85,11 +87,25 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
       console.error(`[${row.id}] skipped — no local git repo at ${row.local_path ?? '(none)'}`);
       continue;
     }
-    const report = await hardenBrainRepo({
-      repoPath: row.local_path, sourceId: row.id, branch,
-      pat: pat?.token, installCron, verify, dryRun,
-      logger: json ? undefined : (l) => console.error(`  ${l}`),
-    });
+    const logger = json ? undefined : (line: string) =>
+      console.error(`  ${line}`);
+    const report = hookOnly
+      ? hardenBrainRepoHook({
+        repoPath: row.local_path,
+        sourceId: row.id,
+        dryRun,
+        logger,
+      })
+      : await hardenBrainRepo({
+        repoPath: row.local_path,
+        sourceId: row.id,
+        branch,
+        pat: pat?.token,
+        installCron,
+        verify,
+        dryRun,
+        logger,
+      });
     reports.push(report);
     if (!json) renderReport(report);
   }
