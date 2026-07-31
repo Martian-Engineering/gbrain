@@ -199,7 +199,11 @@ The feature or initiative page follows this anatomy:
   capture narration.
 - Record every material dated change exclusively with `add_timeline_entry`,
   dated by the upstream event time and citing the repository, object URL or
-  document path, and upstream revision date.
+  document path, and upstream revision date. Always pass `ref` with the exact
+  `sources/` capture page slug (and a short `ref_label`) so the entry
+  materializes as a linked provenance bullet; the operation owns the page's
+  `## Timeline` section — never write or edit that section through
+  `put_page`.
 - Put qualifications about what a capture does or does not establish on the
   exact `sources/` capture page or inside the timeline entry text, never as
   repeated body boilerplate.
@@ -277,6 +281,8 @@ writes honestly so a retry can continue without duplication.
 - Skipping timeline entries because a capture is historical.
 - Citing with relative Markdown links, or nesting Markdown links inside a
   `[Source: ...]` citation bracket.
+- Calling `add_timeline_entry` without a `ref` to the exact `sources/`
+  capture page, or hand-writing a `## Timeline` section through `put_page`.
 - Interpreting code, patches, diffs, or CI results absent from the artifact.
 - Guessing identities from usernames or creating contributor stubs.
 - Deleting a canonical page when a tombstone arrives.

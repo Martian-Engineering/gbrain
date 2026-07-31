@@ -138,6 +138,18 @@ describe('github-project-ingestion skill', () => {
     );
   });
 
+  test('routes timeline writes through add_timeline_entry refs, not put_page', () => {
+    expect(skill).toMatch(
+      /Always pass `ref` with the exact\s+`sources\/` capture page slug/,
+    );
+    expect(skill).toMatch(
+      /the operation owns the page's\s+`## Timeline` section — never write or edit that section through\s+`put_page`\./,
+    );
+    expect(skill).toMatch(
+      /Calling `add_timeline_entry` without a `ref` to the exact `sources\/`\s+capture page, or hand-writing a `## Timeline` section through `put_page`\./,
+    );
+  });
+
   test('returns the exact Lore ingestion receipt', () => {
     expect(skill).toContain('"status": "succeeded | needs_attention | failed"');
     expect(skill).toContain('"artifactId": "copied exactly from the prompt"');
