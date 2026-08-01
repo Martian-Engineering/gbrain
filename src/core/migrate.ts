@@ -5927,6 +5927,32 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS review_owner TEXT;
     `,
   },
+  {
+    version: 135,
+    name: 'timeline_entry_refs',
+    // Refs are nullable because ordinary and Chronicle-projected rows have no
+    // explicit provenance wikilink. The handler also removes the dead legacy
+    // column from page FTS and rebuilds existing vectors so stale Markdown can
+    // no longer surface through searchTitles.
+    idempotent: true,
+    sql: `
+      ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS ref_slug TEXT;
+      ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS ref_label TEXT;
+    `,
+    handler: async (engine) => {
+      const lang = getFtsLanguage();
+      await engine.executeRaw(`
+        CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+        BEGIN
+          NEW.search_vector := setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A');
+
+          RETURN NEW;
+        END;
+        $fn$ LANGUAGE plpgsql;
+      `);
+      await engine.executeRaw(`UPDATE pages SET id = id WHERE search_vector IS NOT NULL`);
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

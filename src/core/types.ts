@@ -88,6 +88,7 @@ export interface Page {
   type: PageType;
   title: string;
   compiled_truth: string;
+  /** Read-time Markdown view composed from this page's timeline_entries rows. */
   timeline: string;
   frontmatter: Record<string, unknown>;
   content_hash?: string;
@@ -212,6 +213,7 @@ export interface PageInput {
   type: PageType;
   title: string;
   compiled_truth: string;
+  /** Legacy input retained for compatibility; engines persist an empty column. */
   timeline?: string;
   frontmatter?: Record<string, unknown>;
   content_hash?: string;
@@ -612,10 +614,10 @@ export interface StaleChunkRow {
 /**
  * v0.42.7 (#1696) — a page that needs link/timeline extraction, returned by
  * `listStalePagesForExtraction`. Carries the page CONTENT (compiled_truth +
- * timeline + frontmatter) so `gbrain extract --stale` extracts in ~1 query per
- * batch instead of an N+1 `getPage` per page (mirrors how StaleChunkRow carries
- * chunk_text). `id` is the keyset cursor; `updated_at` lets callers reason about
- * the edited-since-extract staleness arm.
+ * composed timeline view + frontmatter) so `gbrain extract --stale` extracts in
+ * ~2 queries per batch instead of an N+1 `getPage` per page (mirrors how
+ * StaleChunkRow carries chunk_text). `id` is the keyset cursor; `updated_at`
+ * lets callers reason about the edited-since-extract staleness arm.
  */
 export interface StalePageRow {
   id: number;
@@ -1284,6 +1286,10 @@ export interface TimelineEntry {
   source: string;
   summary: string;
   detail: string;
+  event_page_id: number | null;
+  owner: string | null;
+  ref_slug: string | null;
+  ref_label: string | null;
   created_at: Date;
 }
 
@@ -1292,6 +1298,8 @@ export interface TimelineInput {
   source?: string;
   summary: string;
   detail?: string;
+  ref_slug?: string;
+  ref_label?: string;
 }
 
 export interface TimelineOpts {

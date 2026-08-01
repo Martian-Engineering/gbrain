@@ -79,15 +79,30 @@ describe('#2704: oversized page body no longer overflows pages.search_vector', (
     expect(results.some((r) => r.slug === 'oversized-searchable')).toBe(true);
   }, 30_000);
 
-  test('normal-sized page search_vector still carries title/timeline signal (not fully inert)', async () => {
+  test('normal-sized page search_vector carries title but no timeline signal', async () => {
     await engine.putPage('small-page', {
       type: 'note',
       title: 'zzTitleToken2704',
       compiled_truth: 'short body',
     });
-    const rows = await engine.executeRaw<{ has_vector: boolean }>(
-      `SELECT search_vector IS NOT NULL AS has_vector FROM pages WHERE slug = 'small-page'`,
+    await engine.addTimelineEntry('small-page', {
+      date: '2026-07-31',
+      summary: 'zzStructuredTimelineToken2704',
+    });
+    await engine.executeRaw(
+      `UPDATE pages SET timeline = $1 WHERE slug = 'small-page'`,
+      ['zzLegacyTimelineToken2704'],
     );
-    expect(rows[0]?.has_vector).toBe(true);
+    const rows = await engine.executeRaw<{
+      has_title: boolean;
+      has_timeline: boolean;
+      has_legacy: boolean;
+    }>(
+      `SELECT search_vector @@ plainto_tsquery('english', 'zzTitleToken2704') AS has_title,
+              search_vector @@ plainto_tsquery('english', 'zzStructuredTimelineToken2704') AS has_timeline,
+              search_vector @@ plainto_tsquery('english', 'zzLegacyTimelineToken2704') AS has_legacy
+         FROM pages WHERE slug = 'small-page'`,
+    );
+    expect(rows[0]).toEqual({ has_title: true, has_timeline: false, has_legacy: false });
   }, 30_000);
 });

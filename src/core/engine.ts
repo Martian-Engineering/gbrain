@@ -209,6 +209,8 @@ export interface TimelineBatchInput {
   source?: string;
   summary: string;
   detail?: string;
+  ref_slug?: string;
+  ref_label?: string;
   /**
    * v0.18.0: source id for the owning page. When omitted, the engine JOINs
    * against `source_id='default'`. Without this, two pages sharing the
@@ -2000,8 +2002,10 @@ export interface BrainEngine {
   ): Promise<void>;
 
   /**
-   * v0.35.5 — narrow UPDATE of `pages.compiled_truth`, `pages.timeline`, and
-   * `pages.content_hash` for a single slug+source. NO chunking, NO embedding,
+   * v0.35.5 — narrow UPDATE of `pages.compiled_truth` and
+   * `pages.content_hash` for a single slug+source. The dead `pages.timeline`
+   * column is cleared; timeline Markdown is composed from rows at read time.
+   * NO chunking, NO embedding,
    * NO link reconcile, NO `updated_at` advance beyond the trivial bump.
    *
    * Used by the phantom-redirect pass in `extract_facts` after appending

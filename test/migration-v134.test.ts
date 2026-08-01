@@ -23,7 +23,7 @@ describe('migration v134 — take proposal review owner', () => {
     await engine.disconnect();
   });
 
-  test('registers the nullable idempotent column migration as latest', () => {
+  test('registers the nullable idempotent column migration', () => {
     const migration = MIGRATIONS.find(entry => entry.version === 134);
     expect(migration).toMatchObject({
       name: 'take_proposals_review_owner',
@@ -32,7 +32,7 @@ describe('migration v134 — take proposal review owner', () => {
     expect(migration?.sql).toContain(
       'ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS review_owner TEXT',
     );
-    expect(LATEST_VERSION).toBe(134);
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(134);
   });
 
   test('adds the nullable column and can safely reapply it', async () => {
@@ -42,7 +42,7 @@ describe('migration v134 — take proposal review owner', () => {
     await engine.setConfig('version', '133');
 
     const first = await runMigrations(engine);
-    expect(first).toEqual({ applied: 1, current: 134 });
+    expect(first).toEqual({ applied: 2, current: 135 });
     const columns = await engine.executeRaw<{
       is_nullable: string;
       column_default: string | null;
@@ -60,6 +60,6 @@ describe('migration v134 — take proposal review owner', () => {
 
     await engine.setConfig('version', '133');
     const second = await runMigrations(engine);
-    expect(second).toEqual({ applied: 1, current: 134 });
+    expect(second).toEqual({ applied: 2, current: 135 });
   }, 30_000);
 });

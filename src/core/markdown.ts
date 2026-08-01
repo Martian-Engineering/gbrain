@@ -359,6 +359,30 @@ export function splitBody(body: string): { compiled_truth: string; timeline: str
   return { compiled_truth, timeline };
 }
 
+/**
+ * Remove an incoming Timeline section while preserving the original
+ * frontmatter and authored body bytes before its structural sentinel.
+ */
+export function stripTimelineSection(content: string): {
+  content: string;
+  timeline: string;
+  present: boolean;
+} {
+  const parsed = matter(content);
+  const body = parsed.content;
+  const lines = body.split('\n');
+  const splitIndex = findTimelineSplitIndex(lines);
+  if (splitIndex === -1) {
+    return { content, timeline: '', present: false };
+  }
+  const prefix = content.slice(0, content.length - body.length);
+  return {
+    content: prefix + lines.slice(0, splitIndex).join('\n'),
+    timeline: lines.slice(splitIndex + 1).join('\n').trim(),
+    present: true,
+  };
+}
+
 function findTimelineSplitIndex(lines: string[]): number {
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();

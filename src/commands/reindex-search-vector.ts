@@ -178,8 +178,8 @@ export async function runReindexSearchVector(
     }
   }
 
-  // Recreate trigger functions. The strings are intentionally identical to
-  // the v124 migration body — keeping them in lockstep is the contract.
+  // Recreate trigger functions. The page function is intentionally identical
+  // to the v135 migration body — keeping them in lockstep is the contract.
   // `SET search_path = pg_catalog, public` mirrors the v120/#1647 hardening:
   // CREATE OR REPLACE resets proconfig, so omitting it here would strip the
   // hardening from every brain that runs this command.
@@ -188,21 +188,12 @@ export async function runReindexSearchVector(
   // NOT indexed here — it overflows Postgres's 1MB tsvector cap on large
   // pages, and content_chunks.search_vector (populated separately, chunk-
   // grain, well under the cap) is what searchKeyword() actually queries.
-  // See migrate.ts's v124 for the full rationale; keep this copy in sync.
+  // v135 also removes the dead pages.timeline cache from title search. See
+  // migrate.ts's v124 + v135 rationale; keep this copy in sync.
   const recreatePagesFn = `
     CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
-    DECLARE
-      timeline_text TEXT;
     BEGIN
-      SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
-      INTO timeline_text
-      FROM timeline_entries
-      WHERE page_id = NEW.id;
-
-      NEW.search_vector :=
-        setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A') ||
-        setweight(to_tsvector('${lang}', coalesce(NEW.timeline, '')), 'C') ||
-        setweight(to_tsvector('${lang}', coalesce(timeline_text, '')), 'C');
+      NEW.search_vector := setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A');
 
       RETURN NEW;
     END;

@@ -2,7 +2,7 @@
  * E2E test for the v0.10.1 knowledge graph layer.
  *
  * Runs the full pipeline against in-memory PGLite (no API keys, no external DB).
- *   1. Seed pages with entity refs and timeline content
+ *   1. Seed pages with entity refs and structured timeline rows
  *   2. Run link-extract + timeline-extract
  *   3. Verify graph populated
  *   4. Test auto-link via put_page operation handler
@@ -51,27 +51,34 @@ describe('E2E graph quality (v0.10.1 pipeline)', () => {
   beforeEach(truncateAll, 15_000);
 
   test('full pipeline: seed -> link-extract -> timeline-extract -> verify', async () => {
-    // Seed 5 pages with entity refs and timeline content.
+    // Seed pages with entity refs; timelines live only in structured rows.
     await engine.putPage('people/alice', {
       type: 'person', title: 'Alice',
       compiled_truth: 'Alice is the CEO of [Acme](companies/acme).',
-      timeline: '- **2026-01-15** | Joined as CEO\n- **2026-02-20** | Closed Series A',
+      timeline: '',
     });
     await engine.putPage('people/bob', {
       type: 'person', title: 'Bob',
       compiled_truth: 'Bob is a YC partner who invested in [Acme](companies/acme).',
-      timeline: '- **2026-03-01** | Wrote check to Acme',
+      timeline: '',
     });
     await engine.putPage('companies/acme', {
       type: 'company', title: 'Acme',
       compiled_truth: '',
-      timeline: '- **2026-01-01** | Founded',
+      timeline: '',
     });
     await engine.putPage('meetings/standup', {
       type: 'meeting', title: 'Standup',
       compiled_truth: 'Attendees: [Alice](people/alice), [Bob](people/bob).',
-      timeline: '- **2026-04-01** | Met at YC office',
+      timeline: '',
     });
+    await engine.addTimelineEntriesBatch([
+      { slug: 'people/alice', date: '2026-01-15', summary: 'Joined as CEO' },
+      { slug: 'people/alice', date: '2026-02-20', summary: 'Closed Series A' },
+      { slug: 'people/bob', date: '2026-03-01', summary: 'Wrote check to Acme' },
+      { slug: 'companies/acme', date: '2026-01-01', summary: 'Founded' },
+      { slug: 'meetings/standup', date: '2026-04-01', summary: 'Met at YC office' },
+    ]);
 
     // Run extractions.
     await runExtract(engine, ['links', '--source', 'db']);

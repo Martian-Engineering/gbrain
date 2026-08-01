@@ -21,6 +21,14 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
       if (prop === '_calls') return calls;
       if (prop === 'getTags') return overrides.getTags || (() => Promise.resolve([]));
       if (prop === 'getPage') return overrides.getPage || (() => Promise.resolve(null));
+      if (prop === 'executeRaw') return overrides.executeRaw || (() => Promise.resolve([]));
+      if (prop === 'addTimelineEntriesBatch') {
+        return (...args: unknown[]) => {
+          calls.push({ method: prop, args });
+          if (overrides.addTimelineEntriesBatch) return overrides.addTimelineEntriesBatch(...args);
+          return Promise.resolve((args[0] as unknown[]).length);
+        };
+      }
       // transaction: just call the fn with the same engine (no real DB transaction in tests)
       if (prop === 'transaction') return async (fn: (tx: BrainEngine) => Promise<any>) => fn(engine);
       return track(prop);
@@ -250,7 +258,7 @@ Content here.
     expect(addCalls.map((c: any) => c.args[1]).sort()).toEqual(['kept-tag', 'new-tag']);
   });
 
-  test('chunks compiled_truth and timeline separately', async () => {
+  test('imports timeline rows without storing timeline chunks', async () => {
     const filePath = join(TMP, 'chunked.md');
     writeFileSync(filePath, `---
 type: concept
@@ -261,23 +269,38 @@ This is compiled truth content that should be chunked as compiled_truth source.
 
 <!-- timeline -->
 
-- 2024-01-01: This is timeline content that should be chunked as timeline source.
+- 2024-01-01 — This timeline content should become a structured row.
 `);
 
     const engine = mockEngine();
     const result = await importFile(engine, filePath, 'concepts/chunked.md', { noEmbed: true });
 
     expect(result.status).toBe('imported');
-    expect(result.chunks).toBeGreaterThanOrEqual(2);
+    expect(result.chunks).toBeGreaterThanOrEqual(1);
+    expect(result.timeline_import).toEqual({
+      imported: 1,
+      skipped_duplicates: 0,
+      dropped: 0,
+    });
 
     const calls = (engine as any)._calls;
     const chunkCall = calls.find((c: any) => c.method === 'upsertChunks');
     const chunks = chunkCall.args[1];
+    const putCall = calls.find((c: any) => c.method === 'putPage');
+    const timelineCall = calls.find((c: any) => c.method === 'addTimelineEntriesBatch');
 
     const ctChunks = chunks.filter((c: any) => c.chunk_source === 'compiled_truth');
     const tlChunks = chunks.filter((c: any) => c.chunk_source === 'timeline');
     expect(ctChunks.length).toBeGreaterThan(0);
-    expect(tlChunks.length).toBeGreaterThan(0);
+    expect(tlChunks.length).toBe(0);
+    expect(putCall.args[1].timeline).toBe('');
+    expect(timelineCall.args[0]).toMatchObject([
+      {
+        slug: 'concepts/chunked',
+        date: '2024-01-01',
+        summary: 'This timeline content should become a structured row.',
+      },
+    ]);
   });
 
   test('handles file with minimal content', async () => {

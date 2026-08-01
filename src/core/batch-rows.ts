@@ -109,6 +109,8 @@ export interface TimelineRow {
   source: string;
   summary: string;
   detail: string;
+  ref_slug: string | null;
+  ref_label: string | null;
   source_id: string;
 }
 
@@ -151,6 +153,8 @@ export function buildTimelineRows(entries: TimelineBatchInput[]): TimelineRow[] 
     source: sanitizeForJsonb(e.source || ''), // free-text body: NUL + lone-surrogate sanitized (#2011)
     summary: sanitizeForJsonb(e.summary), // free-text body: NUL + lone-surrogate sanitized
     detail: sanitizeForJsonb(e.detail || ''), // free-text body: NUL + lone-surrogate sanitized
+    ref_slug: e.ref_slug || null,
+    ref_label: e.ref_label == null ? null : sanitizeForJsonb(e.ref_label),
     source_id: e.source_id || 'default',
   }));
 }

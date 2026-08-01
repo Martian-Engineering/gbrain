@@ -26,6 +26,10 @@ import { stripTakesFence } from './takes-fence.ts';
 import { stripFactsFence } from './facts-fence.ts';
 import { parseMarkdown, serializeMarkdown } from './markdown.ts';
 import {
+  importTimelineSection,
+  resolveTimelineReference,
+} from './timeline-view.ts';
+import {
   PageTextReplaceError,
   replaceAuthoredPageText,
 } from './page-text-replace.ts';
@@ -857,7 +861,7 @@ export interface Operation {
 
 const get_page: Operation = {
   name: 'get_page',
-  description: 'Read a page by slug (supports optional fuzzy matching). Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
+  description: 'Read a page by slug (supports optional fuzzy matching). The ## Timeline section is composed from timeline_entries at read time. Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
@@ -1053,7 +1057,7 @@ function replacePageTextOperationError(error: unknown): OperationError {
 
 const replace_page_text: Operation = {
   name: 'replace_page_text',
-  description: 'Replace an exact literal in the authored body of one existing page. Preserves frontmatter, tags, timeline content, and GBrain-managed regions. Requires the current get_page content_hash and an exact expected match count; stale or ambiguous edits fail without mutation.',
+  description: 'Replace an exact literal in the authored body of one existing page. Preserves frontmatter, tags, structured timeline rows, and GBrain-managed regions. Requires the current get_page content_hash and an exact expected match count; stale or ambiguous edits fail without mutation.',
   params: {
     slug: { type: 'string', required: true, description: 'Existing page slug', trace: { kind: 'page' } },
     old_text: { type: 'string', required: true, description: 'Exact case-sensitive literal to replace in authored body text' },
@@ -1174,7 +1178,7 @@ const replace_page_text: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Write/update a page (markdown with frontmatter). Incoming ## Timeline bullets are imported into structured timeline rows and never replace existing timeline history; page reads compose the section from those rows. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
@@ -1421,6 +1425,12 @@ const put_page: Operation = {
       && Array.isArray(ctx.allowedSlugPrefixes)
       && ctx.allowedSlugPrefixes.length > 0;
     const rawSourceArtifact = trustedWorkspace && slug.startsWith('sources/');
+    const composedPage = result.parsedPage
+      ? await ctx.engine.getPage(result.slug, { sourceId: ctx.sourceId ?? 'default' })
+      : null;
+    const parsedForLinks = result.parsedPage
+      ? { ...result.parsedPage, timeline: composedPage?.timeline ?? '' }
+      : undefined;
     if (ctx.remote !== false && (!trustedWorkspace || rawSourceArtifact)) {
       autoLinks = { skipped: 'remote' };
       autoTimeline = { skipped: 'remote' };
@@ -1428,7 +1438,7 @@ const put_page: Operation = {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, {
+          autoLinks = await runAutoLink(ctx.engine, slug, parsedForLinks!, {
             ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
             directories: linkDirectoriesFromPack(activePack),
           });
@@ -1566,7 +1576,9 @@ const put_page: Operation = {
 
     return {
       slug: result.slug,
-      status: result.status === 'imported' ? 'created_or_updated' : result.status,
+      status: result.status === 'imported' || (result.timeline_import && result.status === 'skipped')
+        ? 'created_or_updated'
+        : result.status,
       chunks: result.chunks,
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
@@ -1574,6 +1586,7 @@ const put_page: Operation = {
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
       ...(chronicleQueued ? { chronicle_backstop: chronicleQueued } : {}),
       ...(writeThrough ? { write_through: writeThrough } : {}),
+      ...(result.timeline_import ? { timeline_import: result.timeline_import } : {}),
     };
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
@@ -3910,7 +3923,7 @@ const traverse_graph: Operation = {
 
 const add_timeline_entry: Operation = {
   name: 'add_timeline_entry',
-  description: 'Add timeline entry to a page',
+  description: 'Add one structured timeline row. Page reads compose ## Timeline from these rows; this operation never rewrites page Markdown.',
   params: {
     slug: { type: 'string', required: true },
     date: { type: 'string', required: true },
@@ -3946,7 +3959,6 @@ const add_timeline_entry: Operation = {
       throw new Error(`Invalid calendar date "${date}"`);
     }
     const sourceId = resolveWriteSourceId(ctx);
-    const { materializeTimelineMarkdown, resolveTimelineReference } = await import('./timeline-materialize.ts');
     const ref = typeof p.ref === 'string'
       ? await resolveTimelineReference(ctx.engine, sourceId, p.ref, p.ref_label as string | undefined)
       : undefined;
@@ -3955,23 +3967,18 @@ const add_timeline_entry: Operation = {
       source: (p.source as string) || '',
       summary: p.summary as string,
       detail: (p.detail as string) || '',
-    }, { sourceId });
-    if (!inserted) return { status: 'ok', materialized: false };
-    const materialized = await materializeTimelineMarkdown(ctx.engine, p.slug as string, sourceId, [{
-      date,
-      summary: p.summary as string,
       ...ref,
-    }]);
-    return { status: 'ok', materialized: materialized.materialized === 1 };
+    }, { sourceId });
+    return { status: 'ok', inserted };
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
 
-const timeline_materialize: Operation = {
-  name: 'timeline_materialize',
+const timeline_import: Operation = {
+  name: 'timeline_import',
   description:
-    'Materialize existing timeline_entries rows into page Markdown for one source. ' +
-    'Local-only maintenance op. CLI: `gbrain timeline-materialize --source <id> [--dry-run]`.',
+    'Import parseable bullets from legacy stored pages.timeline sections into timeline_entries for one source. ' +
+    'Idempotent and row-only. Local-only maintenance op. CLI: `gbrain timeline-import --source <id> [--dry-run]`.',
   params: {
     source: { type: 'string', required: true, description: 'Source id to backfill.' },
     dry_run: { type: 'boolean', description: 'Report changes without writing pages.' },
@@ -3981,10 +3988,37 @@ const timeline_materialize: Operation = {
   localOnly: true,
   handler: async (ctx, p) => {
     const sourceId = resolveWriteSourceId(ctx, p.source as string);
-    const { backfillTimelineMarkdown } = await import('./timeline-materialize.ts');
-    return backfillTimelineMarkdown(ctx.engine, sourceId, ctx.dryRun || p.dry_run === true);
+    const pages = await ctx.engine.executeRaw<{ slug: string; timeline: string }>(
+      `SELECT slug, timeline
+         FROM pages
+        WHERE source_id = $1
+          AND deleted_at IS NULL
+          AND timeline IS NOT NULL
+          AND btrim(timeline) <> ''
+        ORDER BY slug`,
+      [sourceId],
+    );
+    const total = {
+      pages_scanned: pages.length,
+      imported: 0,
+      skipped_duplicates: 0,
+      dropped: 0,
+    };
+    for (const page of pages) {
+      const result = await importTimelineSection(
+        ctx.engine,
+        page.slug,
+        sourceId,
+        page.timeline,
+        ctx.dryRun || p.dry_run === true,
+      );
+      total.imported += result.imported;
+      total.skipped_duplicates += result.skipped_duplicates;
+      total.dropped += result.dropped;
+    }
+    return total;
   },
-  cliHints: { name: 'timeline-materialize' },
+  cliHints: { name: 'timeline-import' },
 };
 
 const get_timeline: Operation = {
@@ -4018,7 +4052,7 @@ const get_timeline: Operation = {
 const resolve_timeline_events: Operation = {
   name: 'resolve_timeline_events',
   description:
-    'Resolve canonical Chronicle event wikilinks from one page Timeline into source-scoped event metadata, depth-page destinations, and lifecycle diagnostics. Read-only: preserves the materialized Markdown and graph edges.',
+    'Resolve canonical Chronicle event wikilinks from one page Timeline view into source-scoped event metadata, depth-page destinations, and lifecycle diagnostics. Read-only: preserves timeline rows and graph edges.',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug whose Timeline contains the event backlinks' },
     source_id: { type: 'string', description: 'Optional source selector; must be inside the caller grant' },
@@ -8222,7 +8256,7 @@ export const operations: Operation[] = [
   // Links
   add_link, remove_link, get_links, get_backlinks, list_link_sources, traverse_graph,
   // Timeline
-  add_timeline_entry, timeline_materialize, get_timeline, resolve_timeline_events,
+  add_timeline_entry, timeline_import, get_timeline, resolve_timeline_events,
   // Admin
   get_stats, get_health, run_doctor, get_versions, revert_version,
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)

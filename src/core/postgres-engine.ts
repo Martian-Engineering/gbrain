@@ -66,6 +66,7 @@ import * as db from './db.ts';
 import { ConnectionManager } from './connection-manager.ts';
 import { logConnectionEvent } from './connection-audit.ts';
 import { validateSlug, contentHash, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, parseEmbedding, tryParseEmbedding, takeRowToTake, takeHitRowToHit, isUndefinedColumnError, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
+import { composePageTimelineViews } from './timeline-view.ts';
 import { resolveBoostMap, resolveHardExcludes } from './search/source-boost.ts';
 import { buildSourceFactorCase, buildHardExcludeClause, buildVisibilityClause, buildRecencyComponentSql, buildBestPerPagePoolCte, buildOrFallbackWebsearchQuery } from './search/sql-ranking.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
@@ -73,6 +74,17 @@ import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { shouldExcludeFromOrphanReporting, loadOrphanPolicyOverrides } from './orphan-policy.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { recordPageMutation } from './page-mutation.ts';
+
+function timelineExecutor(tx: ReturnType<typeof postgres>): Pick<BrainEngine, 'executeRaw'> {
+  return {
+    async executeRaw<T = Record<string, unknown>>(query: string, params?: unknown[]): Promise<T[]> {
+      return await tx.unsafe(
+        query,
+        params as Parameters<typeof tx.unsafe>[1],
+      ) as unknown as T[];
+    },
+  };
+}
 
 function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
@@ -1064,7 +1076,10 @@ export class PostgresEngine implements BrainEngine {
         LIMIT 1
       `;
       if (rows.length === 0) return null;
-      return rowToPage(rows[0]);
+      const page = rowToPage(rows[0]);
+      const timelines = await composePageTimelineViews(timelineExecutor(tx), [page.id]);
+      page.timeline = timelines.get(page.id) ?? '';
+      return page;
     });
   }
 
@@ -1157,7 +1172,7 @@ export class PostgresEngine implements BrainEngine {
     const ingestedAt = (sourceKind || sourceUri || ingestedVia) ? new Date() : null;
     const rows = await sql`
       INSERT INTO pages (source_id, slug, type, page_kind, title, compiled_truth, timeline, frontmatter, content_hash, updated_at, effective_date, effective_date_source, import_filename, chunker_version, source_path, source_kind, source_uri, ingested_via, ingested_at)
-      VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, ${page.timeline || ''}, ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, COALESCE(${chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt})
+      VALUES (${sourceId}, ${slug}, ${page.type}, ${pageKind}, ${page.title}, ${page.compiled_truth}, '', ${sql.json(frontmatter as Parameters<typeof sql.json>[0])}, ${hash}, now(), ${effectiveDate}, ${effectiveDateSource}, ${importFilename}, COALESCE(${chunkerVersion}::smallint, ${MARKDOWN_CHUNKER_VERSION}), ${sourcePath}, ${sourceKind}, ${sourceUri}, ${ingestedVia}, ${ingestedAt})
       ON CONFLICT (source_id, slug) DO UPDATE SET
         type = EXCLUDED.type,
         page_kind = EXCLUDED.page_kind,
@@ -1325,7 +1340,7 @@ export class PostgresEngine implements BrainEngine {
     await sql`
       UPDATE pages
       SET compiled_truth = ${compiledTruth},
-          timeline = ${timeline},
+          timeline = '',
           content_hash = ${contentHash},
           updated_at = now()
       WHERE source_id = ${sourceId}
@@ -1438,7 +1453,10 @@ export class PostgresEngine implements BrainEngine {
         WHERE 1=1 ${typeCondition} ${tagCondition} ${updatedCondition} ${slugCondition} ${sourceCondition} ${deletedCondition}
         ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}
       `;
-      return rows.map(rowToPage);
+      const pages = rows.map(rowToPage);
+      const timelines = await composePageTimelineViews(timelineExecutor(tx), pages.map(page => page.id));
+      for (const page of pages) page.timeline = timelines.get(page.id) ?? '';
+      return pages;
     });
   }
 
@@ -2898,7 +2916,10 @@ export class PostgresEngine implements BrainEngine {
            LIMIT $${limitIdx}`,
         params as Parameters<typeof tx.unsafe>[1],
       );
-      return (rows as Record<string, unknown>[]).map(rowToStalePage);
+      const pages = (rows as Record<string, unknown>[]).map(rowToStalePage);
+      const timelines = await composePageTimelineViews(timelineExecutor(tx), pages.map(page => page.id));
+      for (const page of pages) page.timeline = timelines.get(page.id) ?? '';
+      return pages;
     });
   }
 
@@ -3801,8 +3822,9 @@ export class PostgresEngine implements BrainEngine {
     // surrogate from sliced/imported content can't reach the (later) ::jsonb
     // batch path or corrupt the row; identity fields (slug, date) are left raw.
     const rows = await sql`
-      INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-      SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')}
+      INSERT INTO timeline_entries (page_id, date, source, summary, detail, ref_slug, ref_label)
+      SELECT id, ${entry.date}::date, ${sanitizeForJsonb(entry.source || '')}, ${sanitizeForJsonb(entry.summary)}, ${sanitizeForJsonb(entry.detail || '')},
+             ${entry.ref_slug || null}, ${entry.ref_label == null ? null : sanitizeForJsonb(entry.ref_label)}
       FROM pages WHERE slug = ${slug} AND source_id = ${sourceId}
       ON CONFLICT (page_id, date, summary, source) DO NOTHING
       RETURNING 1
@@ -3824,10 +3846,10 @@ export class PostgresEngine implements BrainEngine {
     const rows = buildTimelineRows(entries);
     const result = await executeRawJsonb(
       this,
-      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-       SELECT p.id, v.date::date, v.source, v.summary, v.detail
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail, ref_slug, ref_label)
+       SELECT p.id, v.date::date, v.source, v.summary, v.detail, v.ref_slug, v.ref_label
        FROM jsonb_to_recordset(($1::jsonb)->'rows')
-         AS v(slug text, date text, source text, summary text, detail text, source_id text)
+         AS v(slug text, date text, source text, summary text, detail text, ref_slug text, ref_label text, source_id text)
        JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
        ON CONFLICT (page_id, date, summary, source) DO NOTHING
        RETURNING 1`,

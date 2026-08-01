@@ -1,7 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import {
+  composeTimelineView,
+  type TimelineViewRow,
+} from '../src/core/timeline-view.ts';
+import { writePageThrough } from '../src/core/write-through.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -40,191 +49,351 @@ async function putTarget(timeline = ''): Promise<void> {
     timeline,
     frontmatter: {},
   });
+  if (timeline) {
+    await engine.executeRaw(
+      `UPDATE pages SET timeline = $1 WHERE slug = $2 AND source_id = 'default'`,
+      [timeline, 'companies/acme-example'],
+    );
+  }
 }
 
-describe('add_timeline_entry Markdown materialization', () => {
-  test('creates a Timeline section and appends a refless bullet', async () => {
-    await putTarget();
+function viewRow(overrides: Partial<TimelineViewRow>): TimelineViewRow {
+  return {
+    id: 1,
+    page_id: 1,
+    date: '2026-07-31',
+    summary: 'Bare event',
+    event_page_id: null,
+    event_slug: null,
+    event_deleted_at: null,
+    ref_slug: null,
+    ref_label: null,
+    ...overrides,
+  };
+}
 
-    const result = await operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-31',
-      summary: 'Opened the new office',
-    });
-
-    expect(result).toEqual({ status: 'ok', materialized: true });
-    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
-      '## Timeline\n\n- 2026-07-31 — Opened the new office',
+describe('read-time timeline view', () => {
+  test('renders date-desc/id-asc rows in all three canonical shapes', () => {
+    expect(composeTimelineView([
+      viewRow({ id: 4, date: '2026-07-30', summary: 'Bare event' }),
+      viewRow({
+        id: 2,
+        summary: 'Reviewed the change',
+        ref_slug: 'sources/github/456',
+        ref_label: 'review thread',
+      }),
+      viewRow({
+        id: 1,
+        summary: 'Launch Dinner',
+        event_page_id: 22,
+        event_slug: 'life/events/2026-07-31-launch',
+      }),
+    ])).toBe(
+      '## Timeline\n\n' +
+      '- 2026-07-31 — [[life/events/2026-07-31-launch|Launch Dinner]]\n' +
+      '- 2026-07-31 — Reviewed the change [[sources/github/456|review thread]]\n' +
+      '- 2026-07-30 — Bare event',
     );
   });
 
-  test('appends a ref wikilink using the ref page title by default', async () => {
-    await putTarget('## Timeline\n\n- 2026-07-15 — Existing entry');
+  test('skips soft-deleted event projections and returns empty for no rows', () => {
+    expect(composeTimelineView([
+      viewRow({
+        event_page_id: 22,
+        event_slug: 'life/events/2026-07-31-deleted',
+        event_deleted_at: new Date('2026-07-31T12:00:00Z'),
+      }),
+    ])).toBe('');
+    expect(composeTimelineView([])).toBe('');
+  });
+
+  test('getPage ignores stored Markdown and composes active rows', async () => {
+    await putTarget('## Timeline\n\n- 1999-01-01 — stale stored copy');
+    await engine.putPage('life/events/2026-07-31-launch', {
+      type: 'event',
+      title: 'Launch',
+      compiled_truth: '# Launch',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('life/events/2026-07-30-deleted', {
+      type: 'event',
+      title: 'Deleted',
+      compiled_truth: '# Deleted',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now() WHERE slug = $1 AND source_id = 'default'`,
+      ['life/events/2026-07-30-deleted'],
+    );
+    await engine.executeRaw(
+      `INSERT INTO timeline_entries (page_id, date, summary, event_page_id)
+       SELECT target.id, $1::date, $2, event.id
+         FROM pages target, pages event
+        WHERE target.slug = $3 AND event.slug = $4`,
+      ['2026-07-31', 'Launch summary', 'companies/acme-example', 'life/events/2026-07-31-launch'],
+    );
+    await engine.executeRaw(
+      `INSERT INTO timeline_entries (page_id, date, summary, event_page_id)
+       SELECT target.id, $1::date, $2, event.id
+         FROM pages target, pages event
+        WHERE target.slug = $3 AND event.slug = $4`,
+      ['2026-07-30', 'Deleted summary', 'companies/acme-example', 'life/events/2026-07-30-deleted'],
+    );
+
+    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
+      '## Timeline\n\n- 2026-07-31 — [[life/events/2026-07-31-launch|Launch summary]]',
+    );
+    const listed = await engine.listPages({ slugPrefix: 'companies/acme-example' });
+    expect(listed[0]?.timeline).toBe(
+      '## Timeline\n\n- 2026-07-31 — [[life/events/2026-07-31-launch|Launch summary]]',
+    );
+    const stale = await engine.listStalePagesForExtraction({ batchSize: 20 });
+    expect(stale.find(page => page.slug === 'companies/acme-example')?.timeline).toBe(
+      '## Timeline\n\n- 2026-07-31 — [[life/events/2026-07-31-launch|Launch summary]]',
+    );
+  });
+
+  test('writePageThrough serializes the composed timeline view', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-timeline-view-'));
+    try {
+      await putTarget('## Timeline\n\n- 1999-01-01 — stale stored copy');
+      await engine.addTimelineEntry('companies/acme-example', {
+        date: '2026-07-31',
+        summary: 'Durable row',
+      });
+      await engine.setConfig('sync.repo_path', repo);
+
+      const result = await writePageThrough(engine, 'companies/acme-example');
+
+      expect(result.written).toBe(true);
+      expect(readFileSync(join(repo, 'companies/acme-example.md'), 'utf8')).toContain(
+        '<!-- timeline -->\n\n## Timeline\n\n- 2026-07-31 — Durable row',
+      );
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('put_page timeline import', () => {
+  test('the shared importer converts Timeline Markdown for non-put_page callers', async () => {
+    const result = await importFromContent(
+      engine,
+      'companies/direct-import',
+      `---
+type: company
+title: Direct Import
+---
+
+# Direct Import
+
+<!-- timeline -->
+
+## Timeline
+
+- 2026-07-31 — Imported through shared pipeline
+`,
+      { noEmbed: true },
+    );
+
+    expect(result.timeline_import).toEqual({
+      imported: 1,
+      skipped_duplicates: 0,
+      dropped: 0,
+    });
+    expect((await engine.getPage('companies/direct-import'))?.timeline).toContain(
+      '- 2026-07-31 — Imported through shared pipeline',
+    );
+    const stored = await engine.executeRaw<{ timeline: string }>(
+      `SELECT timeline FROM pages WHERE slug = 'companies/direct-import'`,
+    );
+    expect(stored[0]?.timeline).toBe('');
+  });
+
+  test('a body-only rewrite cannot erase the composed timeline', async () => {
+    await putTarget();
+    await engine.addTimelineEntry('companies/acme-example', {
+      date: '2026-07-31',
+      summary: 'Survives rewrite',
+    });
+
+    const result = await operationsByName.put_page.handler(makeContext(), {
+      slug: 'companies/acme-example',
+      content: '---\ntype: company\ntitle: Acme Example\n---\n\n# Acme Example\n\nRewritten body.',
+    });
+
+    expect(result).not.toHaveProperty('timeline_import');
+    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
+      '## Timeline\n\n- 2026-07-31 — Survives rewrite',
+    );
+    const stored = await engine.executeRaw<{ timeline: string }>(
+      `SELECT timeline FROM pages WHERE slug = $1 AND source_id = 'default'`,
+      ['companies/acme-example'],
+    );
+    expect(stored[0]?.timeline).toBe('');
+  });
+
+  test('imports supported shapes, skips Chronicle event lines, and reports counts idempotently', async () => {
+    await engine.putPage('sources/github/456', {
+      type: 'source',
+      title: 'Issue 456',
+      compiled_truth: '# Issue 456',
+      timeline: '',
+      frontmatter: {},
+    });
+    const content = `---
+type: company
+title: Acme Example
+---
+
+# Acme Example
+
+<!-- timeline -->
+
+## Timeline
+
+- 2026-07-31 — [[life/events/2026-07-31-launch|Launch Dinner]]
+- 2026-07-30 — Reviewed change [[sources/github/456|review thread]]
+- 2026-07-29 — Missing ref remains visible [[sources/github/missing|missing issue]]
+- 2026-07-28 — Bare event
+- **2026-07-27** | Legacy event
+- not parseable
+`;
+
+    const first = await operationsByName.put_page.handler(makeContext(), {
+      slug: 'companies/acme-example',
+      content,
+    });
+    expect(first).toMatchObject({
+      status: 'created_or_updated',
+      timeline_import: { imported: 4, skipped_duplicates: 0, dropped: 1 },
+    });
+
+    const rows = await engine.executeRaw<{
+      summary: string;
+      ref_slug: string | null;
+      ref_label: string | null;
+    }>(
+      `SELECT summary, ref_slug, ref_label
+         FROM timeline_entries
+        ORDER BY date DESC, id ASC`,
+    );
+    expect(rows).toEqual([
+      { summary: 'Reviewed change', ref_slug: 'sources/github/456', ref_label: 'review thread' },
+      { summary: 'Missing ref remains visible', ref_slug: null, ref_label: null },
+      { summary: 'Bare event', ref_slug: null, ref_label: null },
+      { summary: 'Legacy event', ref_slug: null, ref_label: null },
+    ]);
+    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
+      '## Timeline\n\n' +
+      '- 2026-07-30 — Reviewed change [[sources/github/456|review thread]]\n' +
+      '- 2026-07-29 — Missing ref remains visible\n' +
+      '- 2026-07-28 — Bare event\n' +
+      '- 2026-07-27 — Legacy event',
+    );
+
+    const second = await operationsByName.put_page.handler(makeContext(), {
+      slug: 'companies/acme-example',
+      content,
+    });
+    expect(second).toMatchObject({
+      timeline_import: { imported: 0, skipped_duplicates: 4, dropped: 1 },
+    });
+  });
+});
+
+describe('add_timeline_entry row-only write', () => {
+  test('stores validated refs, preserves dedupe, and never writes stored Markdown', async () => {
+    await putTarget('## Timeline\n\n- 1999-01-01 — old copy');
     await engine.putPage('sources/github/123', {
       type: 'source',
       title: 'GitHub issue 123',
       compiled_truth: '# GitHub issue 123',
+      timeline: '',
       frontmatter: {},
     });
-
-    const result = await operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-10',
-      summary: 'Shipped the release',
-      ref: 'sources/github/123',
-    });
-
-    expect(result).toEqual({ status: 'ok', materialized: true });
-    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
-      '## Timeline\n\n- 2026-07-15 — Existing entry\n' +
-      '- 2026-07-10 — Shipped the release [[sources/github/123|GitHub issue 123]]',
-    );
-    expect(await engine.getLinks('companies/acme-example')).toEqual([
-      expect.objectContaining({ to_slug: 'sources/github/123' }),
-    ]);
-  });
-
-  test('uses an explicit ref_label', async () => {
-    await putTarget();
-    await engine.putPage('sources/github/456', {
-      type: 'source',
-      title: 'Long source title',
-      compiled_truth: '# Long source title',
-      frontmatter: {},
-    });
-
-    await operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-30',
-      summary: 'Reviewed the change',
-      ref: 'sources/github/456',
-      ref_label: 'review thread',
-    });
-
-    expect((await engine.getPage('companies/acme-example'))?.timeline).toContain(
-      '- 2026-07-30 — Reviewed the change [[sources/github/456|review thread]]',
-    );
-  });
-
-  test('rejects a ref that does not exist in the target source before inserting', async () => {
-    await putTarget();
-
-    await expect(operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-31',
-      summary: 'Should not insert',
-      ref: 'sources/github/missing',
-    })).rejects.toThrow(
-      'Timeline reference page "sources/github/missing" (source=default) not found',
-    );
-
-    expect(await engine.getTimeline('companies/acme-example')).toHaveLength(0);
-  });
-
-  test('rejects a ref that exists only in another source', async () => {
-    await putTarget();
-    await engine.executeRaw(
-      `INSERT INTO sources (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-      ['other-source', 'Other source'],
-    );
-    await engine.putPage('sources/github/cross-source', {
-      type: 'source',
-      title: 'Foreign source page',
-      compiled_truth: '# Foreign source page',
-      frontmatter: {},
-    }, { sourceId: 'other-source' });
-
-    await expect(operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-31',
-      summary: 'Should not cross sources',
-      ref: 'sources/github/cross-source',
-    })).rejects.toThrow(
-      'Timeline reference page "sources/github/cross-source" (source=default) not found',
-    );
-    expect(await engine.getTimeline('companies/acme-example')).toHaveLength(0);
-  });
-
-  test('a duplicate call does not append a second line', async () => {
-    await putTarget();
     const params = {
       slug: 'companies/acme-example',
       date: '2026-07-31',
-      summary: 'Idempotent event',
+      summary: 'Shipped the release',
+      ref: 'sources/github/123',
+      ref_label: 'release issue',
     };
 
     expect(await operationsByName.add_timeline_entry.handler(makeContext(), params))
-      .toEqual({ status: 'ok', materialized: true });
+      .toEqual({ status: 'ok', inserted: true });
     expect(await operationsByName.add_timeline_entry.handler(makeContext(), params))
-      .toEqual({ status: 'ok', materialized: false });
+      .toEqual({ status: 'ok', inserted: false });
 
-    const timeline = (await engine.getPage('companies/acme-example'))!.timeline;
-    expect(timeline.split('- 2026-07-31 — Idempotent event')).toHaveLength(2);
-  });
-
-  test('an existing date-and-summary line suppresses materialization after a new DB insert', async () => {
-    await putTarget('## Timeline\n\n- 2026-07-31 — Already visible [[sources/github/old|old ref]]');
-
-    const result = await operationsByName.add_timeline_entry.handler(makeContext(), {
-      slug: 'companies/acme-example',
-      date: '2026-07-31',
-      summary: 'Already visible',
-    });
-
-    expect(result).toEqual({ status: 'ok', materialized: false });
-    expect((await engine.getPage('companies/acme-example'))!.timeline)
-      .toBe('## Timeline\n\n- 2026-07-31 — Already visible [[sources/github/old|old ref]]');
-    expect(await engine.getTimeline('companies/acme-example')).toHaveLength(1);
+    const rows = await engine.executeRaw<{
+      ref_slug: string | null;
+      ref_label: string | null;
+    }>(`SELECT ref_slug, ref_label FROM timeline_entries`);
+    expect(rows).toEqual([{ ref_slug: 'sources/github/123', ref_label: 'release issue' }]);
+    const stored = await engine.executeRaw<{ timeline: string }>(
+      `SELECT timeline FROM pages WHERE slug = $1 AND source_id = 'default'`,
+      ['companies/acme-example'],
+    );
+    expect(stored[0]?.timeline).toBe('## Timeline\n\n- 1999-01-01 — old copy');
   });
 });
 
-describe('timeline_materialize backfill', () => {
-  test('dry-run reports work without changing Markdown', async () => {
-    await putTarget();
-    await engine.addTimelineEntry('companies/acme-example', {
-      date: '2026-07-28',
-      summary: 'Preview event',
+describe('timeline_import legacy migration', () => {
+  test('is exposed as the local-only admin timeline-import command', () => {
+    expect(operationsByName.timeline_import).toMatchObject({
+      scope: 'admin',
+      localOnly: true,
+      cliHints: { name: 'timeline-import' },
     });
-
-    expect(await operationsByName.timeline_materialize.handler(makeContext(), {
-      source: 'default',
-      dry_run: true,
-    })).toEqual({ pages_touched: 1, lines_written: 1, skipped_duplicates: 0 });
-    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe('');
+    expect(operationsByName.timeline_materialize).toBeUndefined();
   });
 
-  test('materializes existing rows and is idempotent on a second run', async () => {
-    await putTarget();
-    await engine.putPage('sources/github/789', {
-      type: 'source',
-      title: 'GitHub issue 789',
-      compiled_truth: '# GitHub issue 789',
-      frontmatter: {},
-    });
-    await engine.addTimelineEntry('companies/acme-example', {
-      date: '2026-07-29',
-      summary: 'Source-backed event',
-      source: 'sources/github/789',
-    });
-    await engine.addTimelineEntry('companies/acme-example', {
-      date: '2026-07-30',
-      summary: 'Free-text source event',
-      source: 'manual note with no page slug',
-    });
-
-    const first = await operationsByName.timeline_materialize.handler(makeContext(), {
-      source: 'default',
-    });
-    expect(first).toEqual({ pages_touched: 1, lines_written: 2, skipped_duplicates: 0 });
-    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
+  test('imports stored legacy sections idempotently without rewriting pages', async () => {
+    await putTarget(
       '## Timeline\n\n' +
-      '- 2026-07-29 — Source-backed event [[sources/github/789|GitHub issue 789]]\n' +
-      '- 2026-07-30 — Free-text source event',
+      '- 2026-07-31 — New row\n' +
+      '- **2026-07-30** | Legacy row\n' +
+      '- 2026-07-29 — [[life/events/2026-07-29-owned|Chronicle-owned]]\n' +
+      '- malformed',
     );
 
-    const second = await operationsByName.timeline_materialize.handler(makeContext(), {
+    const preview = await operationsByName.timeline_import.handler(makeContext(), {
+      source: 'default',
+      dry_run: true,
+    });
+    expect(preview).toEqual({
+      pages_scanned: 1,
+      imported: 2,
+      skipped_duplicates: 0,
+      dropped: 1,
+    });
+    expect(await engine.getTimeline('companies/acme-example')).toHaveLength(0);
+
+    const first = await operationsByName.timeline_import.handler(makeContext(), {
       source: 'default',
     });
-    expect(second).toEqual({ pages_touched: 0, lines_written: 0, skipped_duplicates: 2 });
+    expect(first).toEqual({
+      pages_scanned: 1,
+      imported: 2,
+      skipped_duplicates: 0,
+      dropped: 1,
+    });
+    const second = await operationsByName.timeline_import.handler(makeContext(), {
+      source: 'default',
+    });
+    expect(second).toEqual({
+      pages_scanned: 1,
+      imported: 0,
+      skipped_duplicates: 2,
+      dropped: 1,
+    });
+
+    const stored = await engine.executeRaw<{ timeline: string }>(
+      `SELECT timeline FROM pages WHERE slug = $1 AND source_id = 'default'`,
+      ['companies/acme-example'],
+    );
+    expect(stored[0]?.timeline).toContain('- **2026-07-30** | Legacy row');
   });
 });

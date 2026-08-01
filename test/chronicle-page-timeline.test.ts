@@ -82,16 +82,8 @@ describe('canonical Chronicle page timeline', () => {
     }]);
   });
 
-  test('enriches active events and exposes stale, missing, and graph-missing states', async () => {
-    const timeline = [
-      '## Timeline',
-      '',
-      '- 2026-07-24 — [[life/events/2026-07-24-active|Short active label]]',
-      '- 2026-07-23 — [[life/events/2026-07-23-stale|Stale label]]',
-      '- 2026-07-22 — [[life/events/2026-07-22-missing|Missing label]]',
-      '- 2026-07-21 — [[life/events/2026-07-21-unlinked|Unlinked label]]',
-    ].join('\n');
-    await putPage('people/alice-example', 'person', timeline);
+  test('enriches active composed projections and exposes graph-missing state', async () => {
+    await putPage('people/alice-example', 'person');
     await putPage('meetings/2026-07-24-depth', 'meeting');
     await putPage(
       'life/events/2026-07-24-active',
@@ -137,6 +129,24 @@ describe('canonical Chronicle page timeline', () => {
         },
       },
     );
+    await engine.upsertEventProjection({
+      depthSlug: 'people/alice-example',
+      eventSlug: 'life/events/2026-07-24-active',
+      date: '2026-07-24',
+      summary: 'Short active label',
+    });
+    await engine.upsertEventProjection({
+      depthSlug: 'people/alice-example',
+      eventSlug: 'life/events/2026-07-23-stale',
+      date: '2026-07-23',
+      summary: 'Stale label',
+    });
+    await engine.upsertEventProjection({
+      depthSlug: 'people/alice-example',
+      eventSlug: 'life/events/2026-07-21-unlinked',
+      date: '2026-07-21',
+      summary: 'Unlinked label',
+    });
     await engine.addLink(
       'people/alice-example',
       'life/events/2026-07-24-active',
@@ -177,21 +187,19 @@ describe('canonical Chronicle page timeline', () => {
       schema_version: 1,
       page_slug: 'people/alice-example',
       source_id: 'default',
-      total: 4,
+      total: 2,
       offset: 0,
       limit: 10,
       truncated: false,
       issue_counts: {
-        soft_deleted: 1,
-        missing: 1,
+        soft_deleted: 0,
+        missing: 0,
         graph_missing: 1,
-        depth_missing: 1,
+        depth_missing: 0,
       },
     });
     expect(result.events.map(event => event.state)).toEqual([
       'active',
-      'soft_deleted',
-      'missing',
       'graph_missing',
     ]);
     expect(result.events[0]).toMatchObject({
@@ -208,23 +216,25 @@ describe('canonical Chronicle page timeline', () => {
         state: 'active',
       },
     });
-    expect(result.events[1]?.depth).toEqual({
-      slug: 'meetings/2026-07-23-missing-depth',
-      title: null,
-      type: null,
-      state: 'missing',
-    });
-    expect(result.events[2]?.summary).toBe('Missing label');
     expect(linksAfter).toEqual(linksBefore);
   });
 
   test('paginates without changing canonical source order', async () => {
-    await putPage('people/alice-example', 'person', [
-      '## Timeline',
-      '- 2026-07-24 — [[life/events/a|A]]',
-      '- 2026-07-23 — [[life/events/b|B]]',
-      '- 2026-07-22 — [[life/events/c|C]]',
-    ].join('\n'));
+    await putPage('people/alice-example', 'person');
+    const projections: Array<[string, string, string]> = [
+      ['2026-07-24', 'life/events/a', 'A'],
+      ['2026-07-23', 'life/events/b', 'B'],
+      ['2026-07-22', 'life/events/c', 'C'],
+    ];
+    for (const [date, eventSlug, summary] of projections) {
+      await putPage(eventSlug, 'event');
+      await engine.upsertEventProjection({
+        depthSlug: 'people/alice-example',
+        eventSlug,
+        date,
+        summary,
+      });
+    }
 
     const result = await resolvePageTimelineEvents(engine, {
       slug: 'people/alice-example',

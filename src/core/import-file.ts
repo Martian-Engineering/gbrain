@@ -8,7 +8,11 @@ import type {
   PageWriteContext,
 } from './engine.ts';
 import { StalePageError } from './engine.ts';
-import { parseMarkdown } from './markdown.ts';
+import { parseMarkdown, stripTimelineSection } from './markdown.ts';
+import {
+  importTimelineSection,
+  type TimelineImportResult,
+} from './timeline-view.ts';
 import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
@@ -209,6 +213,8 @@ export interface ImportResult {
    * Absent only on status='error' (early payload-size rejection).
    */
   parsedPage?: ParsedPage;
+  /** Present when the incoming Markdown contained a Timeline section. */
+  timeline_import?: TimelineImportResult;
   /** Content-quality gate (issue #1699): true when the page landed with a
    *  `quarantine` marker (high-confidence junk, hidden from search). */
   quarantined?: boolean;
@@ -329,7 +335,8 @@ export async function importFromContent(
     };
   }
 
-  const parsed = parseMarkdown(content, slug + '.md', { activePack: opts.activePack });
+  const incomingTimeline = stripTimelineSection(content);
+  const parsed = parseMarkdown(incomingTimeline.content, slug + '.md', { activePack: opts.activePack });
 
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
   // input. parseMarkdown preserves every frontmatter key except type/title/
@@ -595,7 +602,21 @@ export async function importFromContent(
     );
   }
   if (existing?.content_hash === hash && !opts.forceRechunk) {
-    return { slug, status: 'skipped', chunks: 0, parsedPage };
+    const timelineImport = incomingTimeline.present
+      ? await importTimelineSection(
+          engine,
+          slug,
+          sourceId ?? 'default',
+          incomingTimeline.timeline,
+        )
+      : undefined;
+    return {
+      slug,
+      status: 'skipped',
+      chunks: 0,
+      parsedPage,
+      ...(timelineImport ? { timeline_import: timelineImport } : {}),
+    };
   }
 
   // v0.41.13 (#1309) — identity-based cross-slug dedup pre-check.
@@ -915,6 +936,15 @@ export async function importFromContent(
     await engine.transaction(persistImport);
   }
 
+  const timelineImport = incomingTimeline.present
+    ? await importTimelineSection(
+        engine,
+        slug,
+        sourceId ?? 'default',
+        incomingTimeline.timeline,
+      )
+    : undefined;
+
   // T3 — project frontmatter `aliases:` into page_aliases (free-text alias
   // resolution for search). Runs AFTER the page write commits so the slug
   // exists. Fail-soft: a pre-v110 brain has no page_aliases table yet (the
@@ -939,6 +969,7 @@ export async function importFromContent(
     status: 'imported',
     chunks: chunks.length,
     parsedPage,
+    ...(timelineImport ? { timeline_import: timelineImport } : {}),
     ...(pageQuarantined ? { quarantined: true } : {}),
     ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
   };

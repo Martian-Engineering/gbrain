@@ -50,6 +50,7 @@ import type {
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
 import { validateSlug, contentHash, rowToPage, rowToStalePage, rowToChunk, rowToSearchResult, takeRowToTake, takeHitRowToHit, isUndefinedColumnError, isUndefinedTableError, warnOncePerProcess } from './utils.ts';
+import { composePageTimelineViews } from './timeline-view.ts';
 import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts';
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
@@ -1010,7 +1011,10 @@ export class PGLiteEngine implements BrainEngine {
       params
     );
     if (rows.length === 0) return null;
-    return rowToPage(rows[0] as Record<string, unknown>);
+    const page = rowToPage(rows[0] as Record<string, unknown>);
+    const timelines = await composePageTimelineViews(this, [page.id]);
+    page.timeline = timelines.get(page.id) ?? '';
+    return page;
   }
 
   /**
@@ -1111,7 +1115,7 @@ export class PGLiteEngine implements BrainEngine {
          ingested_via          = COALESCE(EXCLUDED.ingested_via,          pages.ingested_via),
          ingested_at           = COALESCE(EXCLUDED.ingested_at,           pages.ingested_at)
        RETURNING id, source_id, slug, type, title, compiled_truth, timeline, frontmatter, content_hash, created_at, updated_at, effective_date, effective_date_source, import_filename, source_kind, source_uri, ingested_via, ingested_at`,
-      [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, page.timeline || '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
+      [sourceId, slug, page.type, pageKind, page.title, page.compiled_truth, '', JSON.stringify(frontmatter), hash, effectiveDate, effectiveDateSource, importFilename, chunkerVersion, sourcePath, sourceKind, sourceUri, ingestedVia, ingestedAt]
     );
     const stored = rowToPage(rows[0] as Record<string, unknown>);
     await recordPageMutation(this, {
@@ -1267,7 +1271,7 @@ export class PGLiteEngine implements BrainEngine {
        WHERE source_id = $4
          AND slug = $5
          AND deleted_at IS NULL`,
-      [compiledTruth, timeline, contentHash, sourceId, slug],
+      [compiledTruth, '', contentHash, sourceId, slug],
     );
     await recordPageMutation(this, {
       sourceId,
@@ -1375,7 +1379,10 @@ export class PGLiteEngine implements BrainEngine {
       params
     );
 
-    return (rows as Record<string, unknown>[]).map(rowToPage);
+    const pages = (rows as Record<string, unknown>[]).map(rowToPage);
+    const timelines = await composePageTimelineViews(this, pages.map(page => page.id));
+    for (const page of pages) page.timeline = timelines.get(page.id) ?? '';
+    return pages;
   }
 
   async getAllSlugs(opts?: { sourceId?: string }): Promise<Set<string>> {
@@ -2735,7 +2742,10 @@ export class PGLiteEngine implements BrainEngine {
          LIMIT $${limitIdx}`,
       params,
     );
-    return (rows as Record<string, unknown>[]).map(rowToStalePage);
+    const pages = (rows as Record<string, unknown>[]).map(rowToStalePage);
+    const timelines = await composePageTimelineViews(this, pages.map(page => page.id));
+    for (const page of pages) page.timeline = timelines.get(page.id) ?? '';
+    return pages;
   }
 
   async markPagesExtractedBatch(refs: Array<{ slug: string; source_id: string; extractedAt?: string }>, defaultExtractedAt: string): Promise<void> {
@@ -3611,12 +3621,21 @@ export class PGLiteEngine implements BrainEngine {
     // Free-text body fields are NUL + lone-surrogate sanitized (#2011), matching
     // the batch path and the Postgres engine; identity fields (slug, date) raw.
     const { rows } = await this.db.query(
-      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-       SELECT id, $2::date, $3, $4, $5
-       FROM pages WHERE slug = $1 AND source_id = $6
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail, ref_slug, ref_label)
+       SELECT id, $2::date, $3, $4, $5, $6, $7
+       FROM pages WHERE slug = $1 AND source_id = $8
        ON CONFLICT (page_id, date, summary, source) DO NOTHING
        RETURNING 1`,
-      [slug, entry.date, sanitizeForJsonb(entry.source || ''), sanitizeForJsonb(entry.summary), sanitizeForJsonb(entry.detail || ''), sourceId]
+      [
+        slug,
+        entry.date,
+        sanitizeForJsonb(entry.source || ''),
+        sanitizeForJsonb(entry.summary),
+        sanitizeForJsonb(entry.detail || ''),
+        entry.ref_slug || null,
+        entry.ref_label == null ? null : sanitizeForJsonb(entry.ref_label),
+        sourceId,
+      ]
     );
     return rows.length > 0;
   }
@@ -3634,10 +3653,10 @@ export class PGLiteEngine implements BrainEngine {
     const rows = buildTimelineRows(entries);
     const result = await executeRawJsonb(
       this,
-      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
-       SELECT p.id, v.date::date, v.source, v.summary, v.detail
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail, ref_slug, ref_label)
+       SELECT p.id, v.date::date, v.source, v.summary, v.detail, v.ref_slug, v.ref_label
        FROM jsonb_to_recordset(($1::jsonb)->'rows')
-         AS v(slug text, date text, source text, summary text, detail text, source_id text)
+         AS v(slug text, date text, source text, summary text, detail text, ref_slug text, ref_label text, source_id text)
        JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
        ON CONFLICT (page_id, date, summary, source) DO NOTHING
        RETURNING 1`,

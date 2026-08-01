@@ -376,6 +376,9 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
   event_page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE,
   -- Accountable person for commitment/intro event projections.
   owner TEXT,
+  -- Optional same-source provenance link rendered in the read-time view.
+  ref_slug TEXT,
+  ref_label TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -1106,7 +1109,7 @@ CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
   ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
 
 -- ============================================================
--- Trigger-based search_vector (spans pages + timeline_entries)
+-- Trigger-based title search_vector
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
@@ -1115,22 +1118,12 @@ CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 -- #2704: compiled_truth (unbounded whole-page body) deliberately NOT
 -- indexed — overflows Postgres's 1MB tsvector cap on large pages.
 -- content_chunks.search_vector (chunk-grain, populated separately) is
--- what searchKeyword() actually queries. See migrate.ts's v124 migration
--- for the full rationale; keep in sync with that + reindex-search-vector.ts
--- + schema-embedded.ts.
+-- what searchKeyword() actually queries. v135 also excludes the dead
+-- pages.timeline cache. Keep in sync with migrate.ts v124 + v135,
+-- reindex-search-vector.ts, and schema-embedded.ts.
 CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $$
-DECLARE
-  timeline_text TEXT;
 BEGIN
-  SELECT coalesce(string_agg(summary || ' ' || detail, ' '), '')
-  INTO timeline_text
-  FROM timeline_entries
-  WHERE page_id = NEW.id;
-
-  NEW.search_vector :=
-    setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
-    setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
+  NEW.search_vector := setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A');
 
   RETURN NEW;
 END;
@@ -1144,7 +1137,7 @@ CREATE TRIGGER trg_pages_search_vector
 
 -- Note: timeline_entries trigger removed (v0.10.1).
 -- Structured timeline_entries power temporal queries (graph layer).
--- pages.timeline (markdown) still feeds search_vector via trg_pages_search_vector.
+-- Timeline text is deliberately excluded; searchTitles owns title candidates.
 DROP TRIGGER IF EXISTS trg_timeline_search_vector ON timeline_entries;
 DROP FUNCTION IF EXISTS update_page_search_vector_from_timeline();
 

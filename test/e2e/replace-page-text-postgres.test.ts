@@ -65,10 +65,14 @@ Postgres Parity works at Old Company.
 <!-- timeline -->
 
 - 2026-07-30: Postgres Parity joined Old Company.
-`, {
+    `, {
       noEmbed: true,
       sourceId: 'default',
     });
+    await engine.addTimelineEntry(slug, {
+      date: '2026-07-30',
+      summary: 'Postgres Parity joined Old Company.',
+    }, { sourceId: 'default' });
     const before = await engine.getPage(slug, { sourceId: 'default' });
 
     const applied = await operationsByName.replace_page_text.handler(context(), {

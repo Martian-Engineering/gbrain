@@ -280,7 +280,7 @@ describeE2E('E2E: Timeline', () => {
     };
     expect(await callOp('add_timeline_entry', params)).toEqual({
       status: 'ok',
-      materialized: true,
+      inserted: true,
     });
 
     const timeline = await callOp('get_timeline', { slug: 'people/sarah-chen' }) as any[];
@@ -292,7 +292,7 @@ describeE2E('E2E: Timeline', () => {
     expect(page.timeline).toContain('- 2025-04-01 — Test timeline entry');
     expect(await callOp('add_timeline_entry', params)).toEqual({
       status: 'ok',
-      materialized: false,
+      inserted: false,
     });
   }, 30_000);
 });
