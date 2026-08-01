@@ -12,6 +12,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   resolveRequestedScope,
   resolveCodeIntelScope,
+  sourceScopeOpts,
   thinkSourceScopeOpts,
   OperationError,
   type OperationContext,
@@ -68,6 +69,36 @@ describe('think operation → runThink scope propagation', () => {
       auth: { allowedSources: ['tenant-a', 'tenant-b'] } as OperationContext['auth'],
     });
     expect(thinkSourceScopeOpts(ctx)).toEqual({ allowedSources: ['tenant-a', 'tenant-b'] });
+  });
+});
+
+describe('sourceScopeOpts — admin visibility', () => {
+  test('admin scope reads every source regardless of federated grant', () => {
+    const ctx = ctxOf({
+      sourceId: 'tenant-a',
+      auth: { scopes: ['admin'], allowedSources: ['tenant-a'] } as OperationContext['auth'],
+    });
+
+    expect(sourceScopeOpts(ctx)).toEqual({});
+    expect(thinkSourceScopeOpts(ctx)).toEqual({});
+  });
+
+  test('read scope remains limited to its federated grant', () => {
+    const ctx = ctxOf({
+      sourceId: 'tenant-a',
+      auth: { scopes: ['read'], allowedSources: ['tenant-a'] } as OperationContext['auth'],
+    });
+
+    expect(sourceScopeOpts(ctx)).toEqual({ sourceIds: ['tenant-a'] });
+  });
+
+  test('empty non-admin grant falls back to the scalar source', () => {
+    const ctx = ctxOf({
+      sourceId: 'tenant-a',
+      auth: { scopes: ['read'], allowedSources: [] } as any,
+    });
+
+    expect(sourceScopeOpts(ctx)).toEqual({ sourceId: 'tenant-a' });
   });
 });
 

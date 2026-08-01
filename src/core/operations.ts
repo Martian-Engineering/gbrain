@@ -585,10 +585,11 @@ export function pageWriteContextForOperation(
  * engine call.
  *
  * Precedence:
- *  1. `ctx.auth?.allowedSources` (federated read, #876) → emits
+ *  1. `admin` scope → emits `{}` so the caller can read every source.
+ *  2. `ctx.auth?.allowedSources` (federated read, #876) → emits
  *     `{sourceIds: [...]}`. Federated semantics subsume the scalar case.
- *  2. `ctx.sourceId` (scalar) → emits `{sourceId: '...'}`.
- *  3. Neither set → emits `{}`. Local CLI callers (and tests that don't
+ *  3. `ctx.sourceId` (scalar) → emits `{sourceId: '...'}`.
+ *  4. Neither set → emits `{}`. Local CLI callers (and tests that don't
  *     populate ctx) keep the pre-v0.34 unscoped behavior.
  *
  * Both fields default to the engine's "no filter" behavior individually,
@@ -601,6 +602,7 @@ export function pageWriteContextForOperation(
  * same precedence ladder — drift between sites is the bug class.
  */
 export function sourceScopeOpts(ctx: OperationContext): { sourceId?: string; sourceIds?: string[] } {
+  if (hasScope(ctx.auth?.scopes ?? [], 'admin')) return {};
   const allowed = ctx.auth?.allowedSources;
   // Treat an empty `allowedSources: []` as "no federated read scope" — the
   // op-handler defers to scalar `ctx.sourceId` below. An attacker-controlled
