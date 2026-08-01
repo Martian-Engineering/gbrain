@@ -188,12 +188,21 @@ export async function runReindexSearchVector(
   // NOT indexed here — it overflows Postgres's 1MB tsvector cap on large
   // pages, and content_chunks.search_vector (populated separately, chunk-
   // grain, well under the cap) is what searchKeyword() actually queries.
-  // v135 also removes the dead pages.timeline cache from title search. See
-  // migrate.ts's v124 + v135 rationale; keep this copy in sync.
+  // v135 removes the dead pages.timeline cache while retaining the structured
+  // timeline_entries aggregation. Keep this copy in sync.
   const recreatePagesFn = `
     CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+    DECLARE
+      timeline_text TEXT;
     BEGIN
-      NEW.search_vector := setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A');
+      SELECT string_agg(summary || ' ' || detail, ' ')
+        INTO timeline_text
+        FROM timeline_entries
+       WHERE page_id = NEW.id;
+
+      NEW.search_vector :=
+        setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A') ||
+        setweight(to_tsvector('${lang}', coalesce(timeline_text, '')), 'C');
 
       RETURN NEW;
     END;

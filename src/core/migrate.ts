@@ -5931,20 +5931,34 @@ export const MIGRATIONS: Migration[] = [
     version: 135,
     name: 'timeline_entry_refs',
     // Refs are nullable because ordinary and Chronicle-projected rows have no
-    // explicit provenance wikilink. The handler also removes the dead legacy
-    // column from page FTS and rebuilds existing vectors so stale Markdown can
-    // no longer surface through searchTitles.
+    // explicit provenance wikilink. Event dedup is per target page so one
+    // Chronicle event can project onto its depth and entity pages. The handler
+    // removes only the dead Markdown cache from page FTS while retaining the
+    // live timeline_entries aggregation.
     idempotent: true,
     sql: `
       ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS ref_slug TEXT;
       ALTER TABLE timeline_entries ADD COLUMN IF NOT EXISTS ref_label TEXT;
+      DROP INDEX IF EXISTS idx_timeline_event_dedup;
+      CREATE UNIQUE INDEX idx_timeline_event_dedup
+        ON timeline_entries(page_id, event_page_id, date)
+        WHERE event_page_id IS NOT NULL;
     `,
     handler: async (engine) => {
       const lang = getFtsLanguage();
       await engine.executeRaw(`
         CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+        DECLARE
+          timeline_text TEXT;
         BEGIN
-          NEW.search_vector := setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A');
+          SELECT string_agg(summary || ' ' || detail, ' ')
+            INTO timeline_text
+            FROM timeline_entries
+           WHERE page_id = NEW.id;
+
+          NEW.search_vector :=
+            setweight(to_tsvector('${lang}', coalesce(NEW.title, '')), 'A') ||
+            setweight(to_tsvector('${lang}', coalesce(timeline_text, '')), 'C');
 
           RETURN NEW;
         END;

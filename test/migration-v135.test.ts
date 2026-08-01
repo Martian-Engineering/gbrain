@@ -19,7 +19,7 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.disconnect();
   });
 
-  test('registers nullable ref columns as the latest migration', () => {
+  test('registers refs, per-page event dedup, and search repair as the latest migration', () => {
     const migration = MIGRATIONS.find(entry => entry.version === 135);
     expect(migration).toMatchObject({
       name: 'timeline_entry_refs',
@@ -27,11 +27,13 @@ describe('migration v135 — timeline reference columns', () => {
     });
     expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS ref_slug TEXT');
     expect(migration?.sql).toContain('ADD COLUMN IF NOT EXISTS ref_label TEXT');
+    expect(migration?.sql).toContain('DROP INDEX IF EXISTS idx_timeline_event_dedup');
+    expect(migration?.sql).toContain('page_id, event_page_id, date');
     expect(typeof migration?.handler).toBe('function');
     expect(LATEST_VERSION).toBe(135);
   });
 
-  test('adds both nullable columns and can safely reapply them', async () => {
+  test('adds refs, widens event dedup, and preserves row-backed timeline search', async () => {
     await engine.putPage('legacy-search-page', {
       type: 'note',
       title: 'Legacy search page',
@@ -39,10 +41,17 @@ describe('migration v135 — timeline reference columns', () => {
     });
     await engine.executeRaw(`
       CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $fn$
+      DECLARE
+        timeline_text TEXT;
       BEGIN
+        SELECT string_agg(coalesce(summary, '') || ' ' || coalesce(detail, ''), ' ')
+          INTO timeline_text
+          FROM timeline_entries
+         WHERE page_id = NEW.id;
         NEW.search_vector :=
           setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
-          setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C');
+          setweight(to_tsvector('english', coalesce(NEW.timeline, '')), 'C') ||
+          setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
         RETURN NEW;
       END;
       $fn$ LANGUAGE plpgsql;
@@ -50,6 +59,16 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.executeRaw(
       `UPDATE pages SET timeline = $1 WHERE slug = 'legacy-search-page'`,
       ['zzLegacyMigrationTimeline135'],
+    );
+    await engine.executeRaw(
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail)
+       SELECT id, '2026-07-31'::date, '', 'zzStructuredTimeline135', 'search detail'
+         FROM pages WHERE slug = 'legacy-search-page'`,
+    );
+    await engine.executeRaw('DROP INDEX IF EXISTS idx_timeline_event_dedup');
+    await engine.executeRaw(
+      `CREATE UNIQUE INDEX idx_timeline_event_dedup
+         ON timeline_entries(event_page_id, date) WHERE event_page_id IS NOT NULL`,
     );
     const before = await engine.executeRaw<{ matches: boolean }>(
       `SELECT search_vector @@ plainto_tsquery('english', 'zzLegacyMigrationTimeline135') AS matches
@@ -75,16 +94,29 @@ describe('migration v135 — timeline reference columns', () => {
       { column_name: 'ref_label', is_nullable: 'YES' },
       { column_name: 'ref_slug', is_nullable: 'YES' },
     ]);
-    const searchState = await engine.executeRaw<{ matches: boolean; function_body: string }>(
-      `SELECT p.search_vector @@ plainto_tsquery('english', 'zzLegacyMigrationTimeline135') AS matches,
+    const searchState = await engine.executeRaw<{
+      legacy_matches: boolean;
+      structured_matches: boolean;
+      function_body: string;
+    }>(
+      `SELECT p.search_vector @@ plainto_tsquery('english', 'zzLegacyMigrationTimeline135') AS legacy_matches,
+              p.search_vector @@ plainto_tsquery('english', 'zzStructuredTimeline135') AS structured_matches,
               fn.prosrc AS function_body
          FROM pages p
          CROSS JOIN pg_proc fn
         WHERE p.slug = 'legacy-search-page'
           AND fn.proname = 'update_page_search_vector'`,
     );
-    expect(searchState[0]?.matches).toBe(false);
+    expect(searchState[0]?.legacy_matches).toBe(false);
+    expect(searchState[0]?.structured_matches).toBe(true);
     expect(searchState[0]?.function_body).not.toContain('NEW.timeline');
+    expect(searchState[0]?.function_body).toContain('FROM timeline_entries');
+    const index = await engine.executeRaw<{ definition: string }>(
+      `SELECT pg_get_indexdef(indexrelid) AS definition
+         FROM pg_index
+        WHERE indexrelid = 'idx_timeline_event_dedup'::regclass`,
+    );
+    expect(index[0]?.definition).toContain('(page_id, event_page_id, date)');
 
     await engine.setConfig('version', '134');
     const second = await runMigrations(engine);

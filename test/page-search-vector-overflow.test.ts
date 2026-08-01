@@ -79,7 +79,7 @@ describe('#2704: oversized page body no longer overflows pages.search_vector', (
     expect(results.some((r) => r.slug === 'oversized-searchable')).toBe(true);
   }, 30_000);
 
-  test('normal-sized page search_vector carries title but no timeline signal', async () => {
+  test('normal-sized page search_vector carries title and structured timeline only', async () => {
     await engine.putPage('small-page', {
       type: 'note',
       title: 'zzTitleToken2704',
@@ -103,6 +103,6 @@ describe('#2704: oversized page body no longer overflows pages.search_vector', (
               search_vector @@ plainto_tsquery('english', 'zzLegacyTimelineToken2704') AS has_legacy
          FROM pages WHERE slug = 'small-page'`,
     );
-    expect(rows[0]).toEqual({ has_title: true, has_timeline: false, has_legacy: false });
+    expect(rows[0]).toEqual({ has_title: true, has_timeline: true, has_legacy: false });
   }, 30_000);
 });

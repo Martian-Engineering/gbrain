@@ -3977,7 +3977,7 @@ const add_timeline_entry: Operation = {
 const timeline_import: Operation = {
   name: 'timeline_import',
   description:
-    'Import parseable bullets from legacy stored pages.timeline sections into timeline_entries for one source. ' +
+    'Import parseable bullets from legacy stored pages.timeline sections into timeline_entries for one source, including active same-source Chronicle event projections. ' +
     'Idempotent and row-only. Local-only maintenance op. CLI: `gbrain timeline-import --source <id> [--dry-run]`.',
   params: {
     source: { type: 'string', required: true, description: 'Source id to backfill.' },

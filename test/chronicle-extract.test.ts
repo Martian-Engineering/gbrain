@@ -110,6 +110,28 @@ describe('runChronicleExtract', () => {
     });
     const firstDay = await engine.getTimelineForDate('2026-06-18', { sourceId: 'default' });
     const priorSlug = firstDay[0].event_slug!;
+    await engine.putPage('people/sarah-chen', {
+      type: 'person',
+      title: 'Sarah Chen',
+      compiled_truth: '# Sarah Chen',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.upsertEventProjection({
+      depthSlug: 'people/sarah-chen',
+      eventSlug: priorSlug,
+      date: '2026-06-18',
+      summary: 'Sarah committed to the Q3 follow-up',
+      sourceId: 'default',
+    });
+    const priorBefore = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM timeline_entries te
+         JOIN pages ep ON ep.id = te.event_page_id
+        WHERE ep.slug = $1`,
+      [priorSlug],
+    );
+    expect(priorBefore[0]?.n).toBe(2);
 
     const rephrased: ChronicleJudge = async () => ({
       events: [{
@@ -134,6 +156,14 @@ describe('runChronicleExtract', () => {
       sourceId: 'default',
       includeDeleted: true,
     })).not.toBeNull();
+    const priorAfter = await engine.executeRaw<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM timeline_entries te
+         JOIN pages ep ON ep.id = te.event_page_id
+        WHERE ep.slug = $1`,
+      [priorSlug],
+    );
+    expect(priorAfter[0]?.n).toBe(0);
 
     const projections = await engine.executeRaw<{ event_slug: string }>(
       `SELECT ep.slug AS event_slug

@@ -390,7 +390,7 @@ CREATE INDEX IF NOT EXISTS idx_timeline_date ON timeline_entries(date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id, date, summary, source);
 -- v0.42.x (Life Chronicle): event-projection lookup + dedup (partial).
 CREATE INDEX IF NOT EXISTS idx_timeline_event_page ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup ON timeline_entries(event_page_id, date) WHERE event_page_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup ON timeline_entries(page_id, event_page_id, date) WHERE event_page_id IS NOT NULL;
 
 -- ============================================================
 -- page_versions: snapshot history
@@ -1109,7 +1109,7 @@ CREATE INDEX IF NOT EXISTS migration_impact_log_attribution_idx
   ON migration_impact_log(job_id, source_id) WHERE job_id IS NOT NULL;
 
 -- ============================================================
--- Trigger-based title search_vector
+-- Trigger-based page search_vector
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
@@ -1122,8 +1122,17 @@ CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 -- pages.timeline cache. Keep in sync with migrate.ts v124 + v135,
 -- reindex-search-vector.ts, and schema-embedded.ts.
 CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS $$
+DECLARE
+  timeline_text TEXT;
 BEGIN
-  NEW.search_vector := setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A');
+  SELECT string_agg(summary || ' ' || detail, ' ')
+    INTO timeline_text
+    FROM timeline_entries
+   WHERE page_id = NEW.id;
+
+  NEW.search_vector :=
+    setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
 
   RETURN NEW;
 END;
@@ -1135,9 +1144,8 @@ CREATE TRIGGER trg_pages_search_vector
   FOR EACH ROW
   EXECUTE FUNCTION update_page_search_vector();
 
--- Note: timeline_entries trigger removed (v0.10.1).
--- Structured timeline_entries power temporal queries (graph layer).
--- Timeline text is deliberately excluded; searchTitles owns title candidates.
+-- The timeline_entries mutation trigger remains removed (v0.10.1). Page
+-- reindexing still aggregates structured timeline text at C weight.
 DROP TRIGGER IF EXISTS trg_timeline_search_vector ON timeline_entries;
 DROP FUNCTION IF EXISTS update_page_search_vector_from_timeline();
 

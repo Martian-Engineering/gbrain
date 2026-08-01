@@ -3,8 +3,7 @@
  * Runs against PGLite in-memory. Covers getTimelineForDate (day + ISO week),
  * getSince (+ kind filter), getLastSeen (own page + via event `who`),
  * intra-day ordering by event effective_date, source isolation, read-time
- * hiding of soft-deleted event projections, and the (event_page_id, date)
- * dedup index.
+ * hiding of soft-deleted event projections, and per-page event deduplication.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -168,10 +167,21 @@ describe('Life Chronicle timeline reads', () => {
     });
   });
 
-  test('(event_page_id, date) dedup index rejects a duplicate projection', async () => {
+  test('(page_id, event_page_id, date) permits one projection per page', async () => {
+    const entity = await insertPage({ slug: 'people/event-projection-target', type: 'person' });
+    await insertProjection(entity, ids.e1, '2026-06-18', 'entity projection');
     await expect(
       insertProjection(ids.meeting, ids.e1, '2026-06-18', 'dup'),
     ).rejects.toThrow();
+    const projections = await engine.executeRaw<{ page_id: number }>(
+      `SELECT page_id FROM timeline_entries
+        WHERE event_page_id = $1 AND date = '2026-06-18'::date
+        ORDER BY page_id`,
+      [ids.e1],
+    );
+    expect(projections.map(row => Number(row.page_id))).toEqual(
+      [ids.meeting, entity].sort((a, b) => a - b),
+    );
   });
 
   test('soft-deleting an event page hides it from reads (read-time, not doctor)', async () => {

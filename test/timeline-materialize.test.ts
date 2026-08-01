@@ -235,7 +235,7 @@ title: Direct Import
     expect(stored[0]?.timeline).toBe('');
   });
 
-  test('imports supported shapes, skips Chronicle event lines, and reports counts idempotently', async () => {
+  test('imports supported shapes and Chronicle projections with idempotent counts', async () => {
     await engine.putPage('sources/github/456', {
       type: 'source',
       title: 'Issue 456',
@@ -243,6 +243,24 @@ title: Direct Import
       timeline: '',
       frontmatter: {},
     });
+    await engine.putPage('life/events/2026-07-31-launch', {
+      type: 'event',
+      title: 'Launch Dinner',
+      compiled_truth: '# Launch Dinner',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.putPage('life/events/2026-07-26-deleted', {
+      type: 'event',
+      title: 'Deleted Event',
+      compiled_truth: '# Deleted Event',
+      timeline: '',
+      frontmatter: {},
+    });
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now()
+        WHERE source_id = 'default' AND slug = 'life/events/2026-07-26-deleted'`,
+    );
     const content = `---
 type: company
 title: Acme Example
@@ -259,6 +277,8 @@ title: Acme Example
 - 2026-07-29 — Missing ref remains visible [[sources/github/missing|missing issue]]
 - 2026-07-28 — Bare event
 - **2026-07-27** | Legacy event
+- 2026-07-26 — [[life/events/2026-07-26-deleted|Deleted Event]]
+- 2026-07-25 — [[life/events/2026-07-25-missing|Missing Event]]
 - not parseable
 `;
 
@@ -268,7 +288,7 @@ title: Acme Example
     });
     expect(first).toMatchObject({
       status: 'created_or_updated',
-      timeline_import: { imported: 4, skipped_duplicates: 0, dropped: 1 },
+      timeline_import: { imported: 5, skipped_duplicates: 0, dropped: 3 },
     });
 
     const rows = await engine.executeRaw<{
@@ -281,6 +301,7 @@ title: Acme Example
         ORDER BY date DESC, id ASC`,
     );
     expect(rows).toEqual([
+      { summary: 'Launch Dinner', ref_slug: null, ref_label: null },
       { summary: 'Reviewed change', ref_slug: 'sources/github/456', ref_label: 'review thread' },
       { summary: 'Missing ref remains visible', ref_slug: null, ref_label: null },
       { summary: 'Bare event', ref_slug: null, ref_label: null },
@@ -288,10 +309,16 @@ title: Acme Example
     ]);
     expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
       '## Timeline\n\n' +
+      '- 2026-07-31 — [[life/events/2026-07-31-launch|Launch Dinner]]\n' +
       '- 2026-07-30 — Reviewed change [[sources/github/456|review thread]]\n' +
       '- 2026-07-29 — Missing ref remains visible\n' +
       '- 2026-07-28 — Bare event\n' +
       '- 2026-07-27 — Legacy event',
+    );
+    await engine.executeRaw(
+      `UPDATE timeline_entries
+          SET detail = 'Private Chronicle detail', owner = 'people/alice-example'
+        WHERE event_page_id IS NOT NULL`,
     );
 
     const second = await operationsByName.put_page.handler(makeContext(), {
@@ -299,8 +326,15 @@ title: Acme Example
       content,
     });
     expect(second).toMatchObject({
-      timeline_import: { imported: 0, skipped_duplicates: 4, dropped: 1 },
+      timeline_import: { imported: 0, skipped_duplicates: 5, dropped: 3 },
     });
+    const projection = await engine.executeRaw<{ detail: string; owner: string | null }>(
+      `SELECT detail, owner FROM timeline_entries WHERE event_page_id IS NOT NULL`,
+    );
+    expect(projection).toEqual([{
+      detail: 'Private Chronicle detail',
+      owner: 'people/alice-example',
+    }]);
   });
 });
 
@@ -351,6 +385,13 @@ describe('timeline_import legacy migration', () => {
   });
 
   test('imports stored legacy sections idempotently without rewriting pages', async () => {
+    await engine.putPage('life/events/2026-07-29-owned', {
+      type: 'event',
+      title: 'Chronicle owned',
+      compiled_truth: '# Chronicle owned',
+      timeline: '',
+      frontmatter: {},
+    });
     await putTarget(
       '## Timeline\n\n' +
       '- 2026-07-31 — New row\n' +
@@ -365,7 +406,7 @@ describe('timeline_import legacy migration', () => {
     });
     expect(preview).toEqual({
       pages_scanned: 1,
-      imported: 2,
+      imported: 3,
       skipped_duplicates: 0,
       dropped: 1,
     });
@@ -376,7 +417,7 @@ describe('timeline_import legacy migration', () => {
     });
     expect(first).toEqual({
       pages_scanned: 1,
-      imported: 2,
+      imported: 3,
       skipped_duplicates: 0,
       dropped: 1,
     });
@@ -386,7 +427,7 @@ describe('timeline_import legacy migration', () => {
     expect(second).toEqual({
       pages_scanned: 1,
       imported: 0,
-      skipped_duplicates: 2,
+      skipped_duplicates: 3,
       dropped: 1,
     });
 
@@ -395,5 +436,11 @@ describe('timeline_import legacy migration', () => {
       ['companies/acme-example'],
     );
     expect(stored[0]?.timeline).toContain('- **2026-07-30** | Legacy row');
+    expect((await engine.getPage('companies/acme-example'))?.timeline).toBe(
+      '## Timeline\n\n' +
+      '- 2026-07-31 — New row\n' +
+      '- 2026-07-30 — Legacy row\n' +
+      '- 2026-07-29 — [[life/events/2026-07-29-owned|Chronicle-owned]]',
+    );
   });
 });

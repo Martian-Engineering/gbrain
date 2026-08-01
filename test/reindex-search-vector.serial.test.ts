@@ -78,6 +78,9 @@ describe('runReindexSearchVector', () => {
     expect(state.calls.length).toBe(5);
     expect(state.calls[1]).toContain('CREATE OR REPLACE FUNCTION update_page_search_vector');
     expect(state.calls[1]).toContain("to_tsvector('pt_br'");
+    expect(state.calls[1]).toContain('FROM timeline_entries');
+    expect(state.calls[1]).toContain("coalesce(timeline_text, '')");
+    expect(state.calls[1]).not.toContain('NEW.timeline');
     expect(state.calls[2]).toContain('CREATE OR REPLACE FUNCTION update_chunk_search_vector');
     expect(state.calls[2]).toContain("to_tsvector('pt_br'");
     expect(state.calls[3]).toMatch(/UPDATE pages/);

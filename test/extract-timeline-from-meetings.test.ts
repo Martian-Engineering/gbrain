@@ -180,7 +180,8 @@ describe('extractTimelineFromMeetings event widening', () => {
 
     expect(putPageCalls).toBe(1);
     const timeline = await engine.getTimeline('people/alice-example', { sourceId: 'default' });
-    expect(timeline).toHaveLength(1);
+    expect(timeline).toHaveLength(2);
+    expect(timeline.filter(row => row.event_page_id !== null)).toHaveLength(1);
 
     const alice = await engine.getPage('people/alice-example', { sourceId: 'default' });
     const backlink = '[[life/events/2026-07-25-launch|Launch Dinner]]';

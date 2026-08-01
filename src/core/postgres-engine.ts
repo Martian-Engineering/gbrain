@@ -4028,10 +4028,9 @@ export class PostgresEngine implements BrainEngine {
         FROM pages dp, pages ep
         WHERE dp.slug = ${opts.depthSlug} AND dp.source_id = ${sourceId}
           AND ep.slug = ${opts.eventSlug} AND ep.source_id = ${sourceId}
-        ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+        ON CONFLICT (page_id, event_page_id, date) WHERE event_page_id IS NOT NULL
         DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
-                      page_id = EXCLUDED.page_id, source = EXCLUDED.source,
-                      owner = EXCLUDED.owner
+                      source = EXCLUDED.source, owner = EXCLUDED.owner
         RETURNING id`;
     } catch (error) {
       // A deployed binary can briefly run before migration v127 lands. Keep
@@ -4044,9 +4043,9 @@ export class PostgresEngine implements BrainEngine {
         FROM pages dp, pages ep
         WHERE dp.slug = ${opts.depthSlug} AND dp.source_id = ${sourceId}
           AND ep.slug = ${opts.eventSlug} AND ep.source_id = ${sourceId}
-        ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+        ON CONFLICT (page_id, event_page_id, date) WHERE event_page_id IS NOT NULL
         DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
-                      page_id = EXCLUDED.page_id, source = EXCLUDED.source
+                      source = EXCLUDED.source
         RETURNING id`;
     }
     return { projected: rows.length > 0 };

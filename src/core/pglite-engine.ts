@@ -3849,10 +3849,9 @@ export class PGLiteEngine implements BrainEngine {
          SELECT dp.id, $1::date, $2, $3, $4, ep.id, $5
          FROM pages dp, pages ep
          WHERE dp.slug = $6 AND dp.source_id = $7 AND ep.slug = $8 AND ep.source_id = $7
-         ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+         ON CONFLICT (page_id, event_page_id, date) WHERE event_page_id IS NOT NULL
          DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
-                       page_id = EXCLUDED.page_id, source = EXCLUDED.source,
-                       owner = EXCLUDED.owner
+                       source = EXCLUDED.source, owner = EXCLUDED.owner
          RETURNING id`,
         [
           opts.date, 'life-chronicle:event:' + opts.eventSlug, opts.summary,
@@ -3868,9 +3867,9 @@ export class PGLiteEngine implements BrainEngine {
          SELECT dp.id, $1::date, $2, $3, $4, ep.id
          FROM pages dp, pages ep
          WHERE dp.slug = $5 AND dp.source_id = $6 AND ep.slug = $7 AND ep.source_id = $6
-         ON CONFLICT (event_page_id, date) WHERE event_page_id IS NOT NULL
+         ON CONFLICT (page_id, event_page_id, date) WHERE event_page_id IS NOT NULL
          DO UPDATE SET summary = EXCLUDED.summary, detail = EXCLUDED.detail,
-                       page_id = EXCLUDED.page_id, source = EXCLUDED.source
+                       source = EXCLUDED.source
          RETURNING id`,
         [
           opts.date, 'life-chronicle:event:' + opts.eventSlug, opts.summary,

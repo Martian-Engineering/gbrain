@@ -1453,10 +1453,10 @@ export interface BrainEngine {
   /** Most recent date an entity appears (its own page or an event's `who`). */
   getLastSeen(entitySlug: string, opts?: { asof?: string; sourceId?: string; sourceIds?: string[] }): Promise<LastSeenResult>;
   /**
-   * Upsert the date-index projection row for an event page: page_id = depth
-   * page, event_page_id = event page, keyed (event_page_id, date). Re-extraction
-   * with a changed summary UPDATEs (no duplicate). Returns projected=false when
-   * either slug is missing in the source. Idempotent.
+   * Upsert an event projection onto one target page, keyed by target page,
+   * event page, and date. Re-extraction with a changed summary updates that
+   * page's projection without displacing projections on other pages. Returns
+   * projected=false when either slug is missing in the source. Idempotent.
    */
   upsertEventProjection(opts: {
     depthSlug: string;

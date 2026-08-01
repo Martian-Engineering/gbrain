@@ -32,6 +32,7 @@ interface TimelineEventReference {
   date: string;
   slug: string;
   label: string;
+  canonical: boolean;
 }
 
 interface ExistingTimelineRow {
@@ -41,6 +42,9 @@ interface ExistingTimelineRow {
   source: string;
   ref_slug: string | null;
   ref_label: string | null;
+  event_slug: string | null;
+  detail: string;
+  owner: string | null;
 }
 
 const CANONICAL_EVENT_LINE =
@@ -109,7 +113,7 @@ export async function composePageTimelineViews(
   ]));
 }
 
-/** Parse supported dated bullets while ignoring Chronicle-owned event lines. */
+/** Parse supported dated bullets, including Chronicle event projections. */
 export function parseTimelineSection(section: string): {
   entries: TimelineImportEntry[];
   eventReferences: TimelineEventReference[];
@@ -128,6 +132,7 @@ export function parseTimelineSection(section: string): {
           date: event[1]!,
           slug: event[2]!.trim(),
           label: (event[3] ?? event[2]!).trim(),
+          canonical: true,
         });
       } else dropped++;
       continue;
@@ -139,6 +144,7 @@ export function parseTimelineSection(section: string): {
           date: linkOnly[1]!,
           slug: linkOnly[2]!.trim(),
           label: (linkOnly[3] ?? linkOnly[2]!).trim(),
+          canonical: false,
         });
       }
       dropped++;
@@ -214,16 +220,17 @@ export async function importTimelineSection(
 
   const existing = await engine.executeRaw<ExistingTimelineRow>(
     `SELECT te.id, te.date::text AS date, te.summary, te.source,
-            te.ref_slug, te.ref_label
+            te.ref_slug, te.ref_label, ep.slug AS event_slug,
+            te.detail, te.owner
        FROM timeline_entries te
        JOIN pages p ON p.id = te.page_id
+       LEFT JOIN pages ep ON ep.id = te.event_page_id
       WHERE p.source_id = $1 AND p.slug = $2`,
     [sourceId, slug],
   );
-  // A legacy materialized Chronicle line may accompany an ordinary row whose
-  // source names that exact event. It never creates a projection row; it only
-  // preserves the already-proven same-source backlink as ref metadata.
-  for (const event of parsed.eventReferences) {
+  // A legacy materialized event backlink may accompany an ordinary extracted
+  // row whose source names that event. Preserve that provenance metadata.
+  for (const event of parsed.eventReferences.filter(reference => !reference.canonical)) {
     const row = existing.find(candidate =>
       normalizeDate(candidate.date) === event.date
       && candidate.source === `extract-timeline-from-meetings:${event.slug}`
@@ -235,6 +242,56 @@ export async function importTimelineSection(
       );
       row.ref_slug = event.slug;
       row.ref_label = event.label;
+    }
+  }
+
+  const canonicalEvents = parsed.eventReferences.filter(event => event.canonical);
+  const eventSlugs = [...new Set(canonicalEvents.map(event => event.slug))];
+  const activeEvents = eventSlugs.length === 0
+    ? new Set<string>()
+    : new Set((await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages
+        WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])`,
+      [sourceId, eventSlugs],
+    )).map(row => row.slug));
+  const existingEvents = new Map<string, ExistingTimelineRow>(existing.flatMap(row => row.event_slug
+    ? [[`${normalizeDate(row.date)}\u0000${row.event_slug}`, row] as const]
+    : []));
+  let eventImported = 0;
+  let eventDuplicates = 0;
+  let missingEvents = 0;
+  for (const event of canonicalEvents) {
+    if (!activeEvents.has(event.slug)) {
+      missingEvents++;
+      continue;
+    }
+    const key = `${event.date}\u0000${event.slug}`;
+    const duplicate = existingEvents.get(key);
+    if (duplicate) eventDuplicates++;
+    else {
+      existingEvents.set(key, {
+        id: -1,
+        date: event.date,
+        summary: event.label,
+        source: `life-chronicle:event:${event.slug}`,
+        ref_slug: null,
+        ref_label: null,
+        event_slug: event.slug,
+        detail: '',
+        owner: null,
+      });
+      eventImported++;
+    }
+    if (!dryRun) {
+      await engine.upsertEventProjection({
+        depthSlug: slug,
+        eventSlug: event.slug,
+        date: event.date,
+        summary: event.label,
+        detail: duplicate?.detail,
+        owner: duplicate?.owner,
+        sourceId,
+      });
     }
   }
 
@@ -264,6 +321,9 @@ export async function importTimelineSection(
       source: candidate.source ?? '',
       ref_slug: candidate.ref_slug ?? null,
       ref_label: candidate.ref_label ?? null,
+      event_slug: null,
+      detail: candidate.detail ?? '',
+      owner: null,
     });
     pending.push(candidate);
   }
@@ -272,9 +332,9 @@ export async function importTimelineSection(
     ? pending.length
     : await engine.addTimelineEntriesBatch(pending);
   return {
-    imported,
-    skipped_duplicates: skippedDuplicates + pending.length - imported,
-    dropped: parsed.dropped,
+    imported: imported + eventImported,
+    skipped_duplicates: skippedDuplicates + pending.length - imported + eventDuplicates,
+    dropped: parsed.dropped + missingEvents,
   };
 }
 

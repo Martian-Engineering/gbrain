@@ -175,7 +175,8 @@ async function supersedePriorEvents(
 /**
  * Run the chronicle extractor for one depth page. Idempotent: event slugs are
  * content-addressed (re-run upserts the same pages) and the projection upserts
- * on (event_page_id, date). A crash between writes re-runs to the same state.
+ * per target page, event page, and date. A crash between writes re-runs to the
+ * same state.
  */
 export async function runChronicleExtract(
   engine: BrainEngine,

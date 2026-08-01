@@ -544,8 +544,8 @@ CREATE TABLE IF NOT EXISTS timeline_entries (
   -- of a \`type:event\` page, event_page_id points at that event page; page_id
   -- stays the depth/meeting page. NULL for ordinary timeline entries. Reads
   -- hide rows whose event page is soft-deleted; the partial unique index below
-  -- keys dedup on (event_page_id, date) so re-extraction with a changed summary
-  -- updates the row instead of double-inserting.
+  -- keys dedup per target page so one event can project onto its meeting and
+  -- every stitched entity page without double-inserting on re-import.
   event_page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE,
   -- Accountable person for commitment/intro event projections.
   owner TEXT,
@@ -564,7 +564,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_dedup ON timeline_entries(page_id
 -- v0.42.x (Life Chronicle): event-projection lookup + dedup. Partial
 -- (event_page_id IS NOT NULL) so ordinary timeline rows are unaffected.
 CREATE INDEX IF NOT EXISTS idx_timeline_event_page ON timeline_entries(event_page_id) WHERE event_page_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup ON timeline_entries(event_page_id, date) WHERE event_page_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_event_dedup ON timeline_entries(page_id, event_page_id, date) WHERE event_page_id IS NOT NULL;
 
 -- ============================================================
 -- page_versions: snapshot history for compiled_truth
@@ -831,7 +831,7 @@ CREATE INDEX IF NOT EXISTS idx_file_migration_ledger_status
   ON file_migration_ledger(status) WHERE status != 'complete';
 
 -- ============================================================
--- Trigger-based title search_vector
+-- Trigger-based page search_vector
 -- ============================================================
 ALTER TABLE pages ADD COLUMN IF NOT EXISTS search_vector tsvector;
 
@@ -845,8 +845,17 @@ CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN(search_vector);
 -- pages.timeline cache. Keep in sync with migrate.ts v124 + v135,
 -- reindex-search-vector.ts, and pglite-schema.ts.
 CREATE OR REPLACE FUNCTION update_page_search_vector() RETURNS trigger SET search_path = pg_catalog, public AS \$\$
+DECLARE
+  timeline_text TEXT;
 BEGIN
-  NEW.search_vector := setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A');
+  SELECT string_agg(summary || ' ' || detail, ' ')
+    INTO timeline_text
+    FROM timeline_entries
+   WHERE page_id = NEW.id;
+
+  NEW.search_vector :=
+    setweight(to_tsvector('english', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(timeline_text, '')), 'C');
 
   RETURN NEW;
 END;
@@ -858,9 +867,8 @@ CREATE TRIGGER trg_pages_search_vector
   FOR EACH ROW
   EXECUTE FUNCTION update_page_search_vector();
 
--- Note: timeline_entries trigger removed (v0.10.1).
--- Structured timeline_entries power temporal queries (graph layer).
--- Timeline text is deliberately excluded; searchTitles owns title candidates.
+-- The timeline_entries mutation trigger remains removed (v0.10.1). Page
+-- reindexing still aggregates structured timeline text at C weight.
 DROP TRIGGER IF EXISTS trg_timeline_search_vector ON timeline_entries;
 DROP FUNCTION IF EXISTS update_page_search_vector_from_timeline();
 
