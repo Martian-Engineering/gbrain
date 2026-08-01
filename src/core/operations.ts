@@ -3969,7 +3969,22 @@ const add_timeline_entry: Operation = {
       detail: (p.detail as string) || '',
       ...ref,
     }, { sourceId });
-    return { status: 'ok', inserted };
+    // Rows change the composed ## Timeline view, but only put_page refreshed
+    // the space write-through mirror — leaving file-backed readers (Lore)
+    // stale until the next body write. Refresh it here on every real insert.
+    // Best-effort: a mirror failure never fails the row write.
+    let writeThrough: Awaited<ReturnType<typeof writePageThrough>> | undefined;
+    if (inserted) {
+      writeThrough = await writePageThrough(ctx.engine, p.slug as string, {
+        sourceId,
+        logger: ctx.logger,
+      });
+    }
+    return {
+      status: 'ok',
+      inserted,
+      ...(writeThrough ? { write_through: writeThrough } : {}),
+    };
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
@@ -3988,33 +4003,52 @@ const timeline_import: Operation = {
   localOnly: true,
   handler: async (ctx, p) => {
     const sourceId = resolveWriteSourceId(ctx, p.source as string);
-    const pages = await ctx.engine.executeRaw<{ slug: string; timeline: string }>(
-      `SELECT slug, timeline
-         FROM pages
-        WHERE source_id = $1
-          AND deleted_at IS NULL
-          AND timeline IS NOT NULL
-          AND btrim(timeline) <> ''
-        ORDER BY slug`,
+    // Scan the union of legacy stored sections AND pages that already have
+    // rows: the former feed the import loop, and BOTH need their space
+    // write-through mirror recomposed — row-only histories are invisible to
+    // file-backed readers (Lore) until a mirror refresh.
+    const pages = await ctx.engine.executeRaw<{ slug: string; timeline: string | null; has_rows: boolean }>(
+      `SELECT p.slug,
+              NULLIF(btrim(coalesce(p.timeline, '')), '') AS timeline,
+              EXISTS (
+                SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id
+              ) AS has_rows
+         FROM pages p
+        WHERE p.source_id = $1
+          AND p.deleted_at IS NULL
+          AND (btrim(coalesce(p.timeline, '')) <> ''
+               OR EXISTS (SELECT 1 FROM timeline_entries te WHERE te.page_id = p.id))
+        ORDER BY p.slug`,
       [sourceId],
     );
+    const dryRun = ctx.dryRun || p.dry_run === true;
     const total = {
       pages_scanned: pages.length,
       imported: 0,
       skipped_duplicates: 0,
       dropped: 0,
+      mirrored: 0,
     };
     for (const page of pages) {
-      const result = await importTimelineSection(
-        ctx.engine,
-        page.slug,
+      if (page.timeline) {
+        const result = await importTimelineSection(
+          ctx.engine,
+          page.slug,
+          sourceId,
+          page.timeline,
+          dryRun,
+        );
+        total.imported += result.imported;
+        total.skipped_duplicates += result.skipped_duplicates;
+        total.dropped += result.dropped;
+      }
+      if (dryRun) continue;
+      // Best-effort mirror recompose; a failed mirror never fails the import.
+      const mirror = await writePageThrough(ctx.engine, page.slug, {
         sourceId,
-        page.timeline,
-        ctx.dryRun || p.dry_run === true,
-      );
-      total.imported += result.imported;
-      total.skipped_duplicates += result.skipped_duplicates;
-      total.dropped += result.dropped;
+        logger: ctx.logger,
+      });
+      if (mirror.written) total.mirrored++;
     }
     return total;
   },

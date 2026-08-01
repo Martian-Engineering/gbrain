@@ -356,8 +356,12 @@ describe('add_timeline_entry row-only write', () => {
       ref_label: 'release issue',
     };
 
-    expect(await operationsByName.add_timeline_entry.handler(makeContext(), params))
-      .toEqual({ status: 'ok', inserted: true });
+    const firstInsert = await operationsByName.add_timeline_entry.handler(makeContext(), params);
+    expect(firstInsert).toMatchObject({ status: 'ok', inserted: true });
+    // A real insert refreshes the space write-through mirror (best-effort;
+    // unconfigured test env reports written:false rather than failing).
+    expect((firstInsert as { write_through?: { written: boolean } }).write_through)
+      .toBeDefined();
     expect(await operationsByName.add_timeline_entry.handler(makeContext(), params))
       .toEqual({ status: 'ok', inserted: false });
 
@@ -409,6 +413,7 @@ describe('timeline_import legacy migration', () => {
       imported: 3,
       skipped_duplicates: 0,
       dropped: 1,
+      mirrored: 0,
     });
     expect(await engine.getTimeline('companies/acme-example')).toHaveLength(0);
 
@@ -420,6 +425,7 @@ describe('timeline_import legacy migration', () => {
       imported: 3,
       skipped_duplicates: 0,
       dropped: 1,
+      mirrored: 0,
     });
     const second = await operationsByName.timeline_import.handler(makeContext(), {
       source: 'default',
@@ -429,6 +435,7 @@ describe('timeline_import legacy migration', () => {
       imported: 0,
       skipped_duplicates: 3,
       dropped: 1,
+      mirrored: 0,
     });
 
     const stored = await engine.executeRaw<{ timeline: string }>(
