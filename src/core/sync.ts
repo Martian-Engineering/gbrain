@@ -340,7 +340,7 @@ export type SyncableReason =
  * It was the lone structural sibling missing from this list, so it leaked
  * into the index as a content page (slug `resolver`).
  */
-export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md'] as const;
+export const SYNC_SKIP_FILES = ['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md', 'USER.md'] as const;
 
 /**
  * Internal classifier. Returns null when the path IS syncable, or a tagged
@@ -364,7 +364,7 @@ function classifySync(path: string, opts: SyncableOptions = {}): SyncableReason 
 
   // Skip meta files that aren't pages
   const basename = segments[segments.length - 1] || '';
-  if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return 'metafile';
+  if (SYNC_SKIP_FILES.some(file => file.toLowerCase() === basename.toLowerCase())) return 'metafile';
 
   if (opts.include && opts.include.length > 0 && !matchesAnyGlob(path, opts.include)) return 'include-glob-miss';
   if (opts.exclude && opts.exclude.length > 0 && matchesAnyGlob(path, opts.exclude)) return 'exclude-glob-hit';

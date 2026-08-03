@@ -73,6 +73,25 @@ function viewRow(overrides: Partial<TimelineViewRow>): TimelineViewRow {
 }
 
 describe('read-time timeline view', () => {
+  test('timeline write surfaces reject multiline wikilink targets', async () => {
+    await putTarget();
+    await expect(engine.addTimelineEntry('companies/acme-example', {
+      date: '2026-07-31',
+      source: 'test',
+      summary: 'Broken ref',
+      ref_slug: 'projects/acme\n- next row',
+      ref_label: 'Acme',
+    })).rejects.toThrow('single safe wikilink target');
+    await expect(engine.addTimelineEntriesBatch([{
+      slug: 'companies/acme-example',
+      date: '2026-07-31',
+      source: 'test',
+      summary: 'Broken ref',
+      ref_slug: 'projects/acme\n- next row',
+      ref_label: 'Acme',
+    }])).rejects.toThrow('single safe wikilink target');
+  });
+
   test('renders date-desc/id-asc rows in all three canonical shapes', () => {
     expect(composeTimelineView([
       viewRow({ id: 4, date: '2026-07-30', summary: 'Bare event' }),

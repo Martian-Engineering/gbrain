@@ -56,6 +56,9 @@ describe('isSyncable with strategy', () => {
     expect(isSyncable('.git/config.js', { strategy: 'code' })).toBe(false);
     // README.md is skipped under markdown
     expect(isSyncable('README.md', { strategy: 'markdown' })).toBe(false);
+    expect(isSyncable('people/readme.md', { strategy: 'markdown' })).toBe(false);
+    expect(isSyncable('partners/eric/USER.md', { strategy: 'markdown' })).toBe(false);
+    expect(isSyncable('partners/eric/user.md', { strategy: 'markdown' })).toBe(false);
     // ops/ is ordinary content — NOT skipped (#2404)
     expect(isSyncable('ops/migrate.py', { strategy: 'code' })).toBe(true);
     // vendored trees always skipped

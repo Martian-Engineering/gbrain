@@ -147,7 +147,9 @@ export function buildLinkRows(links: LinkBatchInput[]): LinkRow[] {
 }
 
 export function buildTimelineRows(entries: TimelineBatchInput[]): TimelineRow[] {
-  return entries.map(e => ({
+  return entries.map(e => {
+    assertValidTimelineReference(e);
+    return ({
     slug: e.slug,
     date: e.date,
     source: sanitizeForJsonb(e.source || ''), // free-text body: NUL + lone-surrogate sanitized (#2011)
@@ -156,7 +158,18 @@ export function buildTimelineRows(entries: TimelineBatchInput[]): TimelineRow[] 
     ref_slug: e.ref_slug || null,
     ref_label: e.ref_label == null ? null : sanitizeForJsonb(e.ref_label),
     source_id: e.source_id || 'default',
-  }));
+    });
+  });
+}
+
+/** Reject structured timeline references that could escape their outer wikilink. */
+export function assertValidTimelineReference(entry: Pick<TimelineBatchInput, 'ref_slug' | 'ref_label'>): void {
+  if (entry.ref_slug && /[\r\n\[\]|]/.test(entry.ref_slug)) {
+    throw new Error('timeline ref_slug must be a single safe wikilink target');
+  }
+  if (entry.ref_label && /[\r\n\[\]]/.test(entry.ref_label)) {
+    throw new Error('timeline ref_label must be a single safe wikilink label');
+  }
 }
 
 /**

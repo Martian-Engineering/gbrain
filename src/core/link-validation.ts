@@ -24,6 +24,13 @@ export interface LinkValidationReport {
   findings: LinkValidationFinding[];
 }
 
+interface LinkValidationOptions {
+  sourceId?: string;
+  sourceIds?: string[];
+  /** Internal cache: existence-only rows used to classify inaccessible exact targets. */
+  allPageRefs?: Array<{ slug: string; source_id: string }>;
+}
+
 /**
  * Validate explicit internal references without mutating graph state.
  *
@@ -34,19 +41,25 @@ export interface LinkValidationReport {
 export async function validatePageReferences(
   engine: BrainEngine,
   page: Page,
-  opts: { sourceId?: string; sourceIds?: string[] } = {},
+  opts: LinkValidationOptions = {},
 ): Promise<LinkValidationFinding[]> {
   const content = `${page.compiled_truth}\n${page.timeline}`;
   const refs = extractEntityRefs(content);
   const findings: LinkValidationFinding[] = [];
   const seen = new Set<string>();
+  const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : [page.source_id]);
+  const allPageRefs = opts.allPageRefs
+    ?? ((opts.sourceId || opts.sourceIds) ? await engine.listAllPageRefs() : []);
+  const existsOutsideScope = (slugs: string[]): boolean => {
+    const candidates = new Set(slugs.map(slug => slug.toLowerCase()));
+    return allPageRefs.some(ref =>
+      !allowedSources.includes(ref.source_id) && candidates.has(ref.slug.toLowerCase()));
+  };
 
   for (const ref of refs) {
     const key = `${ref.sourceId ?? ''}\u0000${ref.slug}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const allowedSources = opts.sourceIds ?? (opts.sourceId ? [opts.sourceId] : [page.source_id]);
-
     if (ref.needsResolution) {
       // Generic wikilinks include both true basenames (`[[openclaw]]`) and
       // full paths outside the extractor's entity-directory allow-list
@@ -82,6 +95,10 @@ export async function validatePageReferences(
             target_source_id: exact.source_id,
             ...(exactSlug !== ref.slug ? { resolved_target: exactSlug } : {}),
           });
+          continue;
+        }
+        if (existsOutsideScope(exactCandidates)) {
+          findings.push({ source_slug: page.slug, target: ref.slug, status: 'blocked', source_id: page.source_id });
           continue;
         }
       }
@@ -130,7 +147,9 @@ export async function validatePageReferences(
           target_source_id: target.source_id,
           ...(canonical !== ref.slug ? { resolved_target: canonical } : {}),
         }
-      : { source_slug: page.slug, target: ref.slug, status: 'missing', source_id: page.source_id });
+      : existsOutsideScope([ref.slug, canonical])
+        ? { source_slug: page.slug, target: ref.slug, status: 'blocked', source_id: page.source_id }
+        : { source_slug: page.slug, target: ref.slug, status: 'missing', source_id: page.source_id });
   }
   return findings;
 }
@@ -138,10 +157,12 @@ export async function validatePageReferences(
 export async function validateLinks(
   engine: BrainEngine,
   pages: Page[],
-  opts: { sourceId?: string; sourceIds?: string[] } = {},
+  opts: LinkValidationOptions = {},
 ): Promise<LinkValidationReport> {
+  const allPageRefs = opts.allPageRefs
+    ?? ((opts.sourceId || opts.sourceIds) ? await engine.listAllPageRefs() : []);
   const findings: LinkValidationFinding[] = [];
-  for (const page of pages) findings.push(...await validatePageReferences(engine, page, opts));
+  for (const page of pages) findings.push(...await validatePageReferences(engine, page, { ...opts, allPageRefs }));
   return {
     pages_scanned: pages.length,
     references_scanned: findings.length,

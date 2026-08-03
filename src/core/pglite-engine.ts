@@ -54,7 +54,7 @@ import { composePageTimelineViews } from './timeline-view.ts';
 import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts';
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
-import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows } from './batch-rows.ts';
+import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows, assertValidTimelineReference } from './batch-rows.ts';
 import { GBrainError, PAGE_SORT_SQL, ENRICH_ORDER_SQL } from './types.ts';
 import { finalizeLastSeen } from './chronicle/last-seen.ts';
 import { normalizeChronicleTimelineRows } from './chronicle/timeline-row.ts';
@@ -3605,6 +3605,7 @@ export class PGLiteEngine implements BrainEngine {
     entry: TimelineInput,
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
   ): Promise<boolean> {
+    assertValidTimelineReference(entry);
     const sourceId = opts?.sourceId ?? 'default';
     if (!opts?.skipExistenceCheck) {
       const { rows } = await this.db.query(

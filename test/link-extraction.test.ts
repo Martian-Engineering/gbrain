@@ -56,6 +56,14 @@ describe('inferLinkType — image type', () => {
 // ─── extractEntityRefs ─────────────────────────────────────────
 
 describe('extractEntityRefs', () => {
+  test('does not compose typed or qualified wikilinks across line breaks', () => {
+    const refs = extractEntityRefs(
+      '[[projects/signalcore\n- next row [[projects/gatehouse]] ' +
+      '[[restricted:projects/secret\n- next row [[projects/peter]]',
+    );
+    expect(refs.map(ref => ref.slug)).toEqual(['projects/gatehouse', 'projects/peter']);
+  });
+
   test('keeps the legacy directory set as the unconditional base', () => {
     expect(BASE_LINK_DIRECTORIES).toEqual([
       'people', 'companies', 'meetings', 'concepts', 'deal', 'civic',

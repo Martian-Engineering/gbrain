@@ -54,7 +54,7 @@ describe('#1433 — isSyncable / unsyncableReason are duals of one classifier', 
   });
 
   test('SYNC_SKIP_FILES export contains the canonical structural metafiles', () => {
-    expect([...SYNC_SKIP_FILES]).toEqual(['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md']);
+    expect([...SYNC_SKIP_FILES]).toEqual(['schema.md', 'index.md', 'log.md', 'README.md', 'RESOLVER.md', 'USER.md']);
   });
 
   test('isSyncable(p) === (unsyncableReason(p) === null) — duality holds for all canonical cases', () => {

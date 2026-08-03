@@ -161,7 +161,7 @@ function entityRefPattern(directories?: Iterable<string>): RegExp {
  */
 function wikilinkPattern(directories?: Iterable<string>): RegExp {
   return new RegExp(
-    `\\[\\[(${directoryPattern(directories)}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+    `\\[\\[(${directoryPattern(directories)}\\/[^|\\]#\\n[]+?)(?:#[^|\\]\\n]*?)?(?:\\|([^\\]\\n]+?))?\\]\\]`,
     'g',
   );
 }
@@ -180,7 +180,7 @@ function wikilinkPattern(directories?: Iterable<string>): RegExp {
  */
 function qualifiedWikilinkPattern(directories?: Iterable<string>): RegExp {
   return new RegExp(
-    `\\[\\[([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(${directoryPattern(directories)}\\/[^|\\]#]+?)(?:#[^|\\]]*?)?(?:\\|([^\\]]+?))?\\]\\]`,
+    `\\[\\[([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?):(${directoryPattern(directories)}\\/[^|\\]#\\n[]+?)(?:#[^|\\]\\n]*?)?(?:\\|([^\\]\\n]+?))?\\]\\]`,
     'g',
   );
 }

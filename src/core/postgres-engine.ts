@@ -24,7 +24,7 @@ import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts';
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
-import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows } from './batch-rows.ts';
+import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows, assertValidTimelineReference } from './batch-rows.ts';
 import { runMigrations } from './migrate.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import { verifySchema } from './schema-verify.ts';
@@ -3805,6 +3805,7 @@ export class PostgresEngine implements BrainEngine {
     entry: TimelineInput,
     opts?: { skipExistenceCheck?: boolean; sourceId?: string },
   ): Promise<boolean> {
+    assertValidTimelineReference(entry);
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
     if (!opts?.skipExistenceCheck) {

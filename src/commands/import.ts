@@ -648,7 +648,7 @@ function isCollectibleForWalker(
   // resolver), not typed brain pages — same exclusion `sync`'s `isSyncable`
   // applies. Guards both the FS-walk and the git-fast-path collection routes.
   const basename = segments[segments.length - 1] || '';
-  if ((SYNC_SKIP_FILES as readonly string[]).includes(basename)) return false;
+  if (SYNC_SKIP_FILES.some(file => file.toLowerCase() === basename.toLowerCase())) return false;
 
   switch (strategy) {
     case 'code':

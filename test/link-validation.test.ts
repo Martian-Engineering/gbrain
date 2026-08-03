@@ -26,6 +26,7 @@ function engine(existing: string[], fuzzy: Record<string, string[]> = {}): Brain
       pages.has(slug) && (!opts?.sourceId || opts.sourceId === 'martian') ? page(slug, '') : null,
     resolveSlugs: async (slug: string) => fuzzy[slug] ?? [],
     resolveSlugWithAlias: async (slug: string) => slug,
+    listAllPageRefs: async () => [...pages].map(slug => ({ slug, source_id: 'martian' })),
   } as unknown as BrainEngine;
 }
 
@@ -124,6 +125,24 @@ describe('link validation', () => {
     );
     expect(findings[0].status).toBe('blocked');
     expect(reads).toBe(0);
+  });
+
+  test('reports an exact target that exists only outside caller scope as blocked', async () => {
+    const e = engine([]);
+    e.listAllPageRefs = async () => [{
+      slug: 'partners/josh/meetings/restricted-record',
+      source_id: 'martian-restricted',
+    }];
+    const findings = await validatePageReferences(
+      e,
+      page('people/alice', '[[partners/josh/meetings/restricted-record]]'),
+      { sourceId: 'martian' },
+    );
+    expect(findings[0]).toMatchObject({
+      target: 'partners/josh/meetings/restricted-record',
+      status: 'blocked',
+    });
+    expect(findings[0].target_source_id).toBeUndefined();
   });
 
   test('validate_links operation paginates the whole source', async () => {
