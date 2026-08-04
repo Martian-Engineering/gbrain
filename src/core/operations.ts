@@ -10,7 +10,7 @@ import { clampSearchLimit, StalePageError } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
 import { isReasoningEffort, REASONING_EFFORTS } from './ai/types.ts';
 import { supportsReasoningEffort } from './ai/model-resolver.ts';
-import type { PageType } from './types.ts';
+import type { Page, PageType } from './types.ts';
 import type { TakeMiningStatus } from './take-mining-control.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
@@ -861,16 +861,75 @@ export interface Operation {
 
 // --- Page CRUD ---
 
+interface ScopedPageLookup {
+  page: Page | null;
+  candidates?: Array<{ source_id: string; title: string; type: PageType }>;
+}
+
+// get_page historically confines scalar-bound remote callers to that source.
+// The shared resolver's scalar-floor mode is broader, so preserve this tighter
+// read boundary when the caller has no federated or admin grant.
+function resolveGetPageScope(
+  ctx: OperationContext,
+  sourceIdParam: string | undefined,
+): { sourceId?: string; sourceIds?: string[] } {
+  const scope = resolveRequestedScope(ctx, sourceIdParam);
+  if (sourceIdParam === undefined || ctx.remote === false || hasScope(ctx.auth?.scopes ?? [], 'admin')) {
+    return scope;
+  }
+  if (ctx.auth?.allowedSources && ctx.auth.allowedSources.length > 0) return scope;
+
+  const scalarSource = ctx.sourceId ?? ctx.auth?.sourceId;
+  if (scalarSource && sourceIdParam !== scalarSource) {
+    throw new OperationError(
+      'permission_denied',
+      `source '${sourceIdParam}' is outside your granted source`,
+      'Request access to this source, or omit source_id to read your assigned source.',
+    );
+  }
+  return scope;
+}
+
+// A federated slug is singular only when at most one granted source owns it.
+async function getScopedPage(
+  engine: BrainEngine,
+  slug: string,
+  includeDeleted: boolean,
+  scope: { sourceId?: string; sourceIds?: string[] },
+): Promise<ScopedPageLookup> {
+  if (scope.sourceId) {
+    return { page: await engine.getPage(slug, { includeDeleted, ...scope }) };
+  }
+
+  // Prefix lookup keeps the unscoped/admin path index-backed, then the exact
+  // filter prevents neighboring slugs from becoming ambiguity candidates.
+  const pages = (await engine.listPages({
+    includeDeleted,
+    limit: 1_000,
+    slugPrefix: slug,
+    sort: 'slug',
+    ...scope,
+  })).filter(page => page.slug === slug);
+  if (pages.length < 2) return { page: pages[0] ?? null };
+
+  const candidates = pages
+    .map(page => ({ source_id: page.source_id, title: page.title, type: page.type }))
+    .sort((a, b) => a.source_id.localeCompare(b.source_id));
+  return { page: null, candidates };
+}
+
 const get_page: Operation = {
   name: 'get_page',
-  description: 'Read a page by slug (supports optional fuzzy matching). The ## Timeline section is composed from timeline_entries at read time. Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
+  description: 'Read a page by slug (supports optional fuzzy matching). Pass source_id to select one source; an omitted source_id returns ambiguous_source when multiple granted sources own the slug. The ## Timeline section is composed from timeline_entries at read time. Soft-deleted pages are hidden by default; pass include_deleted: true to surface them with deleted_at populated (see v0.26.5 recovery window).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
+    source_id: { type: 'string', description: 'Select one source. Remote callers may select only a source in their grant.' },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
     // #1393: route BOTH the exact-match read and the fuzzy resolveSlugs through
@@ -879,16 +938,24 @@ const get_page: Operation = {
     // with a federated `allowedSources` grant (and no single ctx.sourceId) got
     // an UNSCOPED exact lookup — a cross-source read of any page by slug. getPage
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
-    const sourceOpts = sourceScopeOpts(ctx);
+    const sourceOpts = resolveGetPageScope(ctx, sourceIdParam);
     const fuzzyScope = sourceOpts;
 
-    let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
+    let lookup = await getScopedPage(ctx.engine, slug, includeDeleted, sourceOpts);
+    if (lookup.candidates) {
+      return { error: 'ambiguous_source', slug, candidates: lookup.candidates };
+    }
+    let page = lookup.page;
     let resolved_slug: string | undefined;
 
     if (!page && fuzzy) {
       const candidates = await ctx.engine.resolveSlugs(slug, fuzzyScope);
       if (candidates.length === 1) {
-        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...sourceOpts });
+        lookup = await getScopedPage(ctx.engine, candidates[0], includeDeleted, sourceOpts);
+        if (lookup.candidates) {
+          return { error: 'ambiguous_source', slug: candidates[0], candidates: lookup.candidates };
+        }
+        page = lookup.page;
         resolved_slug = candidates[0];
       } else if (candidates.length > 1) {
         return { error: 'ambiguous_slug', candidates };

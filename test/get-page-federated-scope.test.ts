@@ -152,6 +152,81 @@ describe('get_page handler closes the cross-source exact-read leak', () => {
     const page: any = await get_page.handler(ctx, { slug: 'shared/alpha-doc' });
     expect(page.title).toBe('Alpha doc');
   });
+
+  test('explicit source_id selects the requested same-slug variant', async () => {
+    const alpha: any = await get_page.handler(remoteCtx(['alpha', 'beta']), {
+      slug: 'shared/dup',
+      source_id: 'alpha',
+    });
+    const beta: any = await get_page.handler(remoteCtx(['alpha', 'beta']), {
+      slug: 'shared/dup',
+      source_id: 'beta',
+    });
+
+    expect(alpha).toMatchObject({ source_id: 'alpha', title: 'Dup alpha' });
+    expect(beta).toMatchObject({ source_id: 'beta', title: 'Dup beta' });
+  });
+
+  test('explicit source_id outside the federated grant is denied', async () => {
+    await expect(get_page.handler(remoteCtx(['alpha']), {
+      slug: 'shared/dup',
+      source_id: 'beta',
+    })).rejects.toMatchObject({ code: 'permission_denied' });
+  });
+
+  test('explicit source_id cannot escape a remote scalar source grant', async () => {
+    await expect(get_page.handler(ctxOf({
+      remote: true,
+      sourceId: 'alpha',
+      auth: { token: 't', clientId: 'scalar-c', scopes: [], sourceId: 'alpha' } as any,
+    }), {
+      slug: 'shared/dup',
+      source_id: 'beta',
+    })).rejects.toMatchObject({ code: 'permission_denied' });
+  });
+
+  test('omitted source_id reports every granted same-slug variant as ambiguous', async () => {
+    const result = await get_page.handler(remoteCtx(['alpha', 'beta']), {
+      slug: 'shared/dup',
+    });
+
+    expect(result).toEqual({
+      error: 'ambiguous_source',
+      slug: 'shared/dup',
+      candidates: [
+        { source_id: 'alpha', title: 'Dup alpha', type: 'note' },
+        { source_id: 'beta', title: 'Dup beta', type: 'note' },
+      ],
+    });
+  });
+
+  test('admin all-source visibility still reports a same-slug collision', async () => {
+    const result = await get_page.handler(ctxOf({
+      remote: true,
+      sourceId: undefined,
+      auth: {
+        token: 't', clientId: 'admin-c', scopes: ['admin'], allowedSources: ['alpha'],
+      } as any,
+    }), { slug: 'shared/dup' });
+
+    expect(result).toMatchObject({
+      error: 'ambiguous_source',
+      slug: 'shared/dup',
+    });
+  });
+
+  test('trusted local all-source lookup reports a same-slug collision', async () => {
+    const result = await get_page.handler(ctxOf({
+      remote: false,
+      sourceId: undefined,
+      auth: undefined,
+    }), { slug: 'shared/dup' });
+
+    expect(result).toMatchObject({
+      error: 'ambiguous_source',
+      slug: 'shared/dup',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
