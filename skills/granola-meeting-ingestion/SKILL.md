@@ -76,10 +76,15 @@ These instructions are self-contained for a source-bound remote Minion.
   visible from its target through `get_backlinks`.
 - Read back every created or updated page. Report success only after the
   artifact source-record read-back, link validation, and page verification pass.
-- In the receipt, qualify every page as `<sourceId>:<slug>` even when the page
-  tools accept a bare slug. Each array entry must contain only that exact
-  identifier, with no status words or commentary. Never return a bare
-  `sources/...`, `meetings/...`, or entity slug.
+- In `createdPages`, `updatedPages`, `verifiedPages`, and
+  `pageResults.appliedPage`, qualify every page as `<sourceId>:<slug>` even
+  when the page tools accept a bare slug. Each top-level page-array entry must
+  contain only that exact identifier, with no status words or commentary.
+  Never return a bare `sources/...`, `meetings/...`, or entity slug in those
+  source-qualified page fields.
+  Timeline and link result identities are the exception: they copy the
+  plan's unqualified slugs exactly, subject only to an approved
+  `slugAdjustment`.
 - Return exactly the JSON receipt in Output Format and no surrounding prose.
 
 This skill does not acquire data from Granola, inspect local files, choose
@@ -296,8 +301,12 @@ timeline entry or link.
 Initialize one `timelineResults` entry per proposed timeline entry and one
 `linkResults` entry per proposed link, preserving proposal order. Each status
 is `pending` until attempted, `applied` after mutation and verification, or
-`failed` with a compact error after either step fails. For each timeline entry
-in order, call `add_timeline_entry` exactly once with the mapped frozen values:
+`failed` with a compact error after either step fails. Every timeline result
+copies the mapped frozen `pageSlug`, `date`, `text`, `ref`, and optional
+`refLabel`; every link result copies the mapped frozen `from`, `to`, and
+`type`. Keep those identifiers unqualified, and do not add positional
+`index` or alternate `page` fields. For each timeline entry in order, call
+`add_timeline_entry` exactly once with the mapped frozen values:
 map `pageSlug` to `slug`, `text` to `summary`, and `refLabel` to `ref_label`;
 pass `date` and `ref` unchanged except for the recorded slug mapping. Read the
 actual timeline target back with `get_page` and confirm the exact dated entry,
@@ -609,18 +618,19 @@ timeline, link, and collision details. Array entries in `createdPages`,
   ],
   "timelineResults": [
     {
-      "index": 0,
-      "page": "<sourceId>:<actual-page-slug>",
+      "pageSlug": "projects/example",
       "date": "2026-08-03",
+      "text": "material dated event",
+      "ref": "sources/granola/example",
+      "refLabel": "meeting capture",
       "status": "pending | applied | failed",
       "error": "null or compact failure"
     }
   ],
   "linkResults": [
     {
-      "index": 0,
-      "from": "<sourceId>:<actual-from-slug>",
-      "to": "<sourceId>:<actual-to-slug>",
+      "from": "meetings/example",
+      "to": "projects/example",
       "type": "discusses",
       "status": "pending | applied | failed",
       "error": "null or compact failure"

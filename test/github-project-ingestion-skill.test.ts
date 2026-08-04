@@ -333,8 +333,26 @@ describe('github-project-ingestion skill', () => {
 
     const examples = [...skill.matchAll(/```json\n([\s\S]*?)\n```/g)];
     const apply = JSON.parse(examples[3]![1]!);
-    expect(apply.timelineResults[0].status).toBe('pending | applied | failed');
-    expect(apply.linkResults[0].status).toBe('pending | applied | failed');
+    expect(apply.timelineResults).toEqual([
+      {
+        pageSlug: 'projects/example',
+        date: '2026-08-03',
+        text: 'material dated event',
+        ref: 'sources/github/example',
+        refLabel: 'pull request capture',
+        status: 'pending | applied | failed',
+        error: 'null or compact failure',
+      },
+    ]);
+    expect(apply.linkResults).toEqual([
+      {
+        from: 'sources/github/example',
+        to: 'projects/example',
+        type: 'documents',
+        status: 'pending | applied | failed',
+        error: 'null or compact failure',
+      },
+    ]);
   });
 
   test('rejects timeline refs and link sources outside the frozen plan', () => {
