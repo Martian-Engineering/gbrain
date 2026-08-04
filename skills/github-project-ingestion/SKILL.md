@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.2.0
+version: 1.3.0
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -70,10 +70,15 @@ a source-bound remote Minion.
   initiative page.
 - Search and read before creating or updating pages. Never invent an identity,
   infer a person from a GitHub handle alone, or create an empty entity stub.
-- Cite every derived claim with a single-line `[Source: ...]` citation whose
-  first reference is a wikilink to the exact `sources/` capture page, followed
-  by plain-text qualifiers — the GitHub repository, object URL or document
-  path, and upstream revision date or commit — for example
+- Treat capture-page and derived-page provenance differently. On the exact
+  capture page, never cite or link to `capturePageSlug` itself. Attribute
+  capture-page prose directly to GitHub using the repository, object URL or
+  document path, exact commit or revision, and upstream date. Include one
+  clickable upstream GitHub link in the capture page's Source section, outside
+  any `[Source: ...]` citation. On every other page, cite each GitHub-derived
+  claim with a single-line `[Source: ...]` citation whose first reference is a
+  wikilink to the exact `sources/` capture page, followed by plain-text
+  repository, object or path, and revision qualifiers — for example
   `[Source: [[sources/github/<id>|pull request #80 capture]], 2026-07-07]`.
 - Reference pages anywhere in page content with `[[slug|label]]` wikilinks,
   never relative Markdown links. A citation bracket contains only wikilinks
@@ -131,6 +136,10 @@ non-empty `admissionScope` in propose and apply modes. In apply mode, require
 `slug`, `effect`, `title`, and `bodyMarkdown`, and `effect` is `create` or
 `update`. Update entries contain the full intended `bodyMarkdown`, never a diff.
 The plan's `capturePageSlug` must appear in `proposedPages`.
+The planned capture page must contain a clickable upstream GitHub URL and must
+not cite or link to its own slug. Reject an invalid frozen plan before any
+mutation; do not treat approval as permission to write structurally invalid
+provenance.
 
 Treat omitted `proposedTimelineEntries` and `proposedLinks` as empty arrays.
 `proposedTimelineEntries` may contain at most 40 entries. Each entry contains
@@ -209,10 +218,11 @@ representability gate is only a backstop for a required mutation the extended
 plan cannot express, and it also applies to normal-mode
 partial-disqualification proposals.
 
-The capture page still states that Lore's local Markdown artifact is the
-complete normalized record. Its title and body must not name or describe the
-excluded material or the admission scope. Scope provenance exists only in the
-top-level proposal receipt.
+The capture page still states: `Lore's local artifact package is the complete
+source record. This page is its brain-facing provenance and synthesis record.`
+Its title and body must not name or describe the excluded material or the
+admission scope. Scope provenance exists only in the top-level proposal
+receipt.
 
 Serialize the complete `scoped_proposal` receipt as JSON and measure its UTF-8
 byte length. The receipt, including `proposedTimelineEntries` and
@@ -246,8 +256,9 @@ Record the actual source-qualified slug in `createdPages` or `updatedPages` and
 set the page result to `written` immediately after a successful mutation. Then
 confirm the read-back title and body match the frozen entry, subject only to a
 recorded collision adjustment. Also confirm the written page does not
-contradict `admissionScope`; the capture page must retain its local-mirror
-provenance statement without naming the exclusion. Add the page to
+contradict `admissionScope`; the capture page must retain its provenance and
+synthesis statement, clickable upstream GitHub URL, and direct GitHub
+attribution without citing or linking to itself. Add the page to
 `verifiedPages` and set the result to `applied` only after these checks.
 
 Initialize one `pageResults` entry per proposed page in proposal order. Its
@@ -360,20 +371,38 @@ feature or initiative slugs. Inspect pages from `priorAttempt` first on retries.
 Create or update the one traceable capture page at exactly the prompt-supplied
 `capturePageSlug`. Copy that slug character-for-character into every tool call
 that targets the capture page — never retype, re-case, or re-derive it from
-`artifactId` or any other identity. Include:
+`artifactId` or any other identity.
+
+Keep machine audit identity in frontmatter and do not duplicate it in the
+human-readable body. Frontmatter contains:
 
 - provider, repository, artifact kind, artifact ID, canonical external ID,
   capture external ID, revision, predecessor, upstream order, and source URL;
 - title or document path, occurrence time, resolver revision, historical flag,
   and tombstone state;
-- enough manifest metadata to identify and audit the local artifact;
-- a concise source-grounded account of the complete issue thread, pull-request
-  discussion, or document revision;
-- an explicit statement that Lore's local Markdown artifact is the complete
-  normalized record.
+- only the manifest metadata needed to identify and audit the local artifact.
 
-Read this page back and verify every identity and revision field before
-continuing.
+Keep the human-readable body concise. Include:
+
+- a Source section naming the repository, issue, pull request, or document path,
+  exact revision or commit, upstream date, and one normal Markdown link to the
+  exact GitHub object or document revision;
+- a concise source-grounded account of the complete issue thread, pull-request
+  discussion, or document revision, with each factual paragraph attributed
+  directly to GitHub rather than to this capture page;
+- the durable-work relationship when phase 3 resolved one, or the specific
+  unresolved relationship when it did not;
+- the exact statement `Lore's local artifact package is the complete source
+  record. This page is its brain-facing provenance and synthesis record.`
+
+Do not write a resolver assessment, routing rationale, prompt field names,
+Minion mechanics, receipt details, or review-control state into the capture body.
+Those belong to Lore's ingestion ledger. Never cite or link the capture page to
+itself. A capture cannot establish its own provenance.
+
+Read this page back and verify every identity and revision field, the clickable
+upstream URL, the direct GitHub attribution, the concise body anatomy, and the
+absence of self-citations before continuing.
 
 ### 5. Update durable feature or initiative knowledge
 
@@ -444,14 +473,18 @@ People belong in `people/`, organizations in `companies/`, ongoing work in
 
 ### 7. Verify and report
 
-1. Read back the capture page, any feature or initiative page, and every entity
-   page written.
-2. Verify canonical and capture identities, revision order, citations, current
-   state, and the link to the exact source capture.
-3. Check `get_backlinks` for every meaningful explicit reference.
-4. Run `validate_links` on every updated feature or initiative page and repair
+1. Read back the capture page; confirm it contains the exact upstream identity
+   and clickable GitHub URL, and confirm it contains no citation or wikilink to
+   its own slug.
+2. Read back any feature or initiative page and every entity page written;
+   verify every GitHub-derived claim on every other written page cites the
+   exact source capture.
+3. Verify canonical and capture identities, revision order, current state, and
+   the link to the exact source capture.
+4. Check `get_backlinks` for every meaningful explicit reference.
+5. Run `validate_links` on every updated feature or initiative page and repair
    missing references. Keep ambiguous identities as plain text.
-5. Confirm every receipt page exists under the authenticated source and uses a
+6. Confirm every receipt page exists under the authenticated source and uses a
    source-qualified identifier.
 
 Return `succeeded` only when every required write and verification passes.
@@ -476,6 +509,12 @@ duplication.
 - Recording material dated changes in the page body instead of timeline
   entries.
 - Skipping timeline entries because a capture is historical.
+- Citing or linking `capturePageSlug` from within the capture page itself. A
+  capture cannot establish its own provenance.
+- Writing resolver analysis, routing rationale, prompt field names, Minion
+  mechanics, receipt details, or review-control state into the capture body.
+- Describing the brain-facing synthesis page as the verbatim or complete local
+  artifact.
 - Citing with relative Markdown links, or nesting Markdown links inside a
   `[Source: ...]` citation bracket.
 - Calling `add_timeline_entry` without a `ref` to the exact `sources/`

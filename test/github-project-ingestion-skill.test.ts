@@ -38,7 +38,7 @@ const expectedPrefixes = [
 
 describe('github-project-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.2.0');
+    expect(skill).toContain('version: 1.3.0');
     expect(getSkillAgentBindings(skillsDir, 'github-project-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -125,9 +125,18 @@ describe('github-project-ingestion skill', () => {
     );
   });
 
-  test('requires resolvable [Source:] citations built on capture wikilinks', () => {
+  test('separates capture-page provenance from derived-page citations', () => {
     expect(skill).toMatch(
-      /first reference is a wikilink to the exact `sources\/` capture page/,
+      /On the exact\s+capture page, never cite or link to `capturePageSlug` itself/,
+    );
+    expect(skill).toMatch(
+      /Attribute\s+capture-page prose directly to GitHub using the repository, object URL or\s+document path, exact commit or revision, and upstream date/,
+    );
+    expect(skill).toMatch(
+      /Include one\s+clickable upstream GitHub link in the capture page's Source section/,
+    );
+    expect(skill).toMatch(
+      /On every other page, cite each GitHub-derived\s+claim with a single-line `\[Source: \.\.\.\]` citation whose first reference is a\s+wikilink to the exact `sources\/` capture page/,
     );
     expect(skill).toContain(
       '`[Source: [[sources/github/<id>|pull request #80 capture]], 2026-07-07]`',
@@ -137,6 +146,36 @@ describe('github-project-ingestion skill', () => {
     );
     expect(skill).toMatch(
       /Citing with relative Markdown links, or nesting Markdown links inside a\s+`\[Source: \.\.\.\]` citation bracket\./,
+    );
+  });
+
+  test('defines the capture as concise provenance and synthesis, not the raw record', () => {
+    expect(skill).toMatch(
+      /Lore's local artifact package is the complete\s+source record\. This page is its brain-facing provenance and synthesis record\./,
+    );
+    expect(skill).not.toMatch(
+      /local Markdown artifact is the\s+complete normalized record/,
+    );
+    expect(skill).toMatch(
+      /Keep machine audit identity in frontmatter and do not duplicate it in the\s+human-readable body/,
+    );
+    expect(skill).toMatch(
+      /Do not write a resolver assessment, routing rationale, prompt field names,\s+Minion mechanics, receipt details, or review-control state into the capture body/,
+    );
+  });
+
+  test('verifies direct capture provenance and rejects capture self-citations', () => {
+    expect(skill).toMatch(
+      /confirm it contains the exact upstream identity\s+and clickable GitHub URL/,
+    );
+    expect(skill).toMatch(
+      /confirm it contains no citation or wikilink to\s+its own slug/,
+    );
+    expect(skill).toMatch(
+      /verify every GitHub-derived claim on every other written page cites the\s+exact source capture/,
+    );
+    expect(skill).toMatch(
+      /Citing or linking `capturePageSlug` from within the capture page itself/,
     );
   });
 
@@ -174,7 +213,7 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toMatch(/[Rr]eturn `failed`\s+with an operational summary/);
     expect(skill).toContain('Never truncate or split a proposal');
     expect(skill).toMatch(/must not\s+name or describe the excluded material/);
-    expect(skill).toMatch(/local Markdown artifact is the\s+complete normalized record/);
+    expect(skill).toMatch(/brain-facing provenance and synthesis record/);
     expect(skill).toContain('"status": "scoped_proposal"');
     expect(skill).toContain('"effect": "create | update"');
     expect(skill).toContain('"bodyMarkdown": "complete intended page body"');
