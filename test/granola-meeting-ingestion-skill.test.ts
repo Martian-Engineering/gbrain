@@ -39,6 +39,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
+    expect(skill).toContain('version: 1.3.0');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -75,7 +76,7 @@ describe('granola-meeting-ingestion skill', () => {
   });
 
   test('returns the Lore ingestion receipt without deterministic effects', () => {
-    expect(skill).toContain('"status": "succeeded | needs_attention | failed"');
+    expect(skill).toContain('"status": "succeeded | failed"');
     expect(skill).toContain('"artifactId": "copied exactly from the prompt"');
     expect(skill).toContain('"sourceId": "verified source id"');
     expect(skill).toContain('"createdPages":');
@@ -93,6 +94,138 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"unresolved":');
     expect(skill).not.toContain('effect list');
     expect(skill).not.toContain('content hash');
+  });
+
+  test('supports a zero-mutation scoped proposal with a bounded complete plan', () => {
+    expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
+    expect(skill).toContain('admissionScope: <required in propose and apply modes>');
+    expect(skill).toContain('In `propose` mode, do not call any mutating tool');
+    expect(skill).toMatch(/`put_page`,\s+`add_link`, or `add_timeline_entry`/);
+    expect(skill).toContain('complete set of pages that `apply` will write');
+    expect(skill).toContain('full intended `bodyMarkdown`, never a diff');
+    expect(skill).toContain('262,144 UTF-8 bytes');
+    expect(skill).toMatch(/[Rr]eturn `failed`\s+with an operational summary/);
+    expect(skill).toContain('Never truncate or split a proposal');
+    expect(skill).toMatch(/must not\s+name or describe the excluded material/);
+    expect(skill).toMatch(/local Markdown artifact is the\s+complete verbatim record/);
+    expect(skill).toContain('"status": "scoped_proposal"');
+    expect(skill).toContain('"effect": "create | update"');
+    expect(skill).toContain('"bodyMarkdown": "complete intended page body"');
+  });
+
+  test('carries bounded timeline and link mutations in the scoped proposal', () => {
+    expect(skill).toContain(
+      'proposedTimelineEntries: <optional frozen timeline entries in apply mode>',
+    );
+    expect(skill).toContain('proposedLinks: <optional frozen typed links in apply mode>');
+    expect(skill).toMatch(/`proposedTimelineEntries` may contain at most 40 entries/);
+    expect(skill).toMatch(/`proposedLinks` may contain at most 40 entries/);
+    expect(skill).toMatch(/strict `YYYY-MM-DD` date/);
+    expect(skill).toMatch(/`ref` must equal the plan's\s+`capturePageSlug`/);
+    expect(skill).toMatch(/`from` must\s+equal a slug in `proposedPages`/);
+    expect(skill).toMatch(
+      /No proposed page, timeline entry, or link may derive from excluded material/,
+    );
+    expect(skill).toMatch(
+      /timeline entries only for material dated events with the\s+capture-page reference/,
+    );
+    expect(skill).toMatch(
+      /typed links only for\s+relationships that the planned Markdown does not express accurately/,
+    );
+    expect(skill).toMatch(
+      /receipt, including `proposedTimelineEntries` and\s+`proposedLinks`, must not exceed 262,144 UTF-8 bytes/,
+    );
+    expect(skill).toContain('"proposedTimelineEntries": [');
+    expect(skill).toContain('"refLabel": "meeting capture"');
+    expect(skill).toContain('"proposedLinks": [');
+    expect(skill).toContain('"type": "discusses"');
+    expect(skill).toMatch(
+      /cannot be\s+represented by `proposedPages`, `proposedTimelineEntries`, or `proposedLinks`/,
+    );
+
+    const [proposalJson] = [...skill.matchAll(/```json\n([\s\S]*?)\n```/g)];
+    const proposal = JSON.parse(proposalJson![1]!);
+    expect(proposal.proposedTimelineEntries).toEqual([
+      {
+        pageSlug: 'projects/example',
+        date: '2026-08-03',
+        text: 'material dated event',
+        ref: 'sources/granola/example',
+        refLabel: 'meeting capture',
+      },
+    ]);
+    expect(proposal.proposedLinks).toEqual([
+      { from: 'meetings/example', to: 'projects/example', type: 'discusses' },
+    ]);
+  });
+
+  test('splits partial disqualification from classed needs-attention outcomes', () => {
+    expect(skill).toContain('partial disqualification');
+    expect(skill).toMatch(/[Dd]erive `admissionScope` only from the resolver/);
+    expect(skill).toContain('return `scoped_proposal` directly');
+    expect(skill).toMatch(/Do not mutate before returning that\s+proposal/);
+    expect(skill).toContain('"reason_class": "resolver_ambiguity | operational"');
+    expect(skill).toMatch(/Every `needs_attention`\s+receipt must include `reason_class`/);
+  });
+
+  test('applies only the frozen plan with resumable page and collision results', () => {
+    expect(skill).toContain('proposedPages: <required frozen proposal pages in apply mode>');
+    expect(skill).toMatch(/write the supplied title\s+and full body exactly/);
+    expect(skill).toContain('slug collision discovered at write time');
+    expect(skill).toMatch(/No other plan\s+adjustment is allowed/);
+    expect(skill).toMatch(/does not\s+contradict `admissionScope`/);
+    expect(skill).toMatch(/Skip a prior `applied` result only after\s+read-back/);
+    expect(skill).toContain('"pageResults":');
+    expect(skill).toContain('"status": "pending | written | applied | failed"');
+    expect(skill).toContain('immediately after a successful mutation');
+    expect(skill).toMatch(/Resume a prior `written`\s+result at its recorded actual slug/);
+    expect(skill).toContain('"slugAdjustments":');
+    expect(skill).toContain('"reason": "slug_collision"');
+  });
+
+  test('applies frozen timeline and link mutations after pages with resumable results', () => {
+    expect(skill).toMatch(
+      /Do not begin\s+timeline or link mutations until every proposed page is applied/,
+    );
+    expect(skill).toMatch(
+      /map `pageSlug` to `slug`, `text` to `summary`, and `refLabel` to `ref_label`/,
+    );
+    expect(skill).toMatch(/map `type` to `link_type`/);
+    expect(skill).toMatch(
+      /apply every recorded slug adjustment to\s+`pageSlug`, `ref`, `from`, and `to`/,
+    );
+    expect(skill).toMatch(
+      /Read the\s+actual timeline target back with `get_page` and confirm the exact dated entry/,
+    );
+    expect(skill).toMatch(/Verify the exact edge with both\s+`get_links` and `get_backlinks`/);
+    expect(skill).toContain('"timelineResults": [');
+    expect(skill).toContain('"linkResults": [');
+    expect(skill).toContain('"status": "pending | applied | failed"');
+    expect(skill).toMatch(/Retry\s+only `pending` and `failed` timeline or link results/);
+    expect(skill).toMatch(
+      /Before retrying a\s+`pending` or `failed` timeline result, read the target page and check for the\s+exact frozen entry/,
+    );
+    expect(skill).toMatch(
+      /When that entry is already visible, mark the result\s+`applied` without calling `add_timeline_entry` again/,
+    );
+    expect(skill).toMatch(
+      /Skip a prior `applied`\s+mutation only after its read-back\s+verification still passes/,
+    );
+
+    const examples = [...skill.matchAll(/```json\n([\s\S]*?)\n```/g)];
+    const apply = JSON.parse(examples[3]![1]!);
+    expect(apply.timelineResults[0].status).toBe('pending | applied | failed');
+    expect(apply.linkResults[0].status).toBe('pending | applied | failed');
+  });
+
+  test('rejects timeline refs and link sources outside the frozen plan', () => {
+    expect(skill).toMatch(
+      /Returning a timeline entry whose `ref` is not the planned capture page/,
+    );
+    expect(skill).toMatch(
+      /Returning a link whose `from` slug is absent from `proposedPages`/,
+    );
+    expect(skill).toMatch(/Reject an invalid frozen plan before any\s+mutation/);
   });
 
   test('requires rich meeting enrichment before reporting success', () => {
