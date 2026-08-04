@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.1.0
+version: 1.2.0
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -12,6 +12,7 @@ tools:
   - get_page
   - list_pages
   - resolve_slugs
+  - get_links
   - get_backlinks
   - put_page
   - add_link
@@ -51,11 +52,11 @@ a source-bound remote Minion.
   returns a complete `scoped_proposal` without mutation.
 - An omitted `mode` preserves the normal write path. `mode: propose` performs
   the normal analysis, search, and deduplication but performs zero mutations.
-  `mode: apply` executes only the prompt-supplied frozen page plan.
-- No proposed page may derive a claim from material excluded by
-  `admissionScope`. The capture page retains its local-mirror provenance
-  statement but must not name or describe the excluded material. The scope
-  appears only in the receipt because Lore owns scope provenance.
+  `mode: apply` executes only the prompt-supplied frozen plan.
+- No proposed page, timeline entry, or link may derive from excluded material.
+  The capture page retains its local-mirror provenance statement but must not
+  name or describe the excluded material. The scope appears only in the
+  receipt because Lore owns scope provenance.
 - Treat Lore's local Markdown mirror as the complete source of record. Create a
   traceable `sources/` page for the exact capture, then propagate only durable
   knowledge into an existing or clearly established feature or initiative.
@@ -98,6 +99,8 @@ capturePageSlug: <exact slug of the sources/ capture page>
 mode: <propose | apply | omit for normal mode>
 admissionScope: <required in propose and apply modes>
 proposedPages: <required frozen proposal pages in apply mode>
+proposedTimelineEntries: <optional frozen timeline entries in apply mode>
+proposedLinks: <optional frozen typed links in apply mode>
 canonicalExternalId: <stable upstream object identity>
 captureExternalId: <exact captured revision identity>
 revision: <content revision>
@@ -127,6 +130,16 @@ non-empty `admissionScope` in propose and apply modes. In apply mode, require
 `proposedPages` to be the frozen array accepted by Lore; each entry has exactly
 `slug`, `effect`, `title`, and `bodyMarkdown`, and `effect` is `create` or
 `update`. Update entries contain the full intended `bodyMarkdown`, never a diff.
+The plan's `capturePageSlug` must appear in `proposedPages`.
+
+Treat omitted `proposedTimelineEntries` and `proposedLinks` as empty arrays.
+`proposedTimelineEntries` may contain at most 40 entries. Each entry contains
+exactly `pageSlug`, `date`, `text`, and `ref`, with optional `refLabel`; `date`
+is a strict `YYYY-MM-DD` date, and `ref` must equal the plan's
+`capturePageSlug`. `proposedLinks` may contain at most 40 entries. Each entry
+contains exactly non-empty `from`, `to`, and `type` strings, and `from` must
+equal a slug in `proposedPages`. Reject an invalid frozen plan before any
+mutation.
 
 ## Modes
 
@@ -168,9 +181,9 @@ return `failed`.
 Perform the same boundary checks, resolver analysis, search, reads,
 deduplication, upstream-object resolution, identity resolution, and page
 drafting as normal mode. Apply `admissionScope` as a fail-closed exclusion: no
-title, claim, citation, link, summary, feature update, or dossier update may
-derive from excluded material. Do not repeat, paraphrase, or identify the
-exclusion inside any proposed page.
+title, claim, citation, timeline entry, link, summary, feature update, or
+dossier update may derive from excluded material. Do not repeat, paraphrase,
+or identify the exclusion inside any proposed mutation.
 
 In `propose` mode, do not call any mutating tool, including `put_page`,
 `add_link`, or `add_timeline_entry`. Read-only discovery and verification are
@@ -179,15 +192,22 @@ provider that includes the exact capture and every feature, initiative, or
 entity page that the scoped ingestion requires. Each update entry contains the
 full intended `bodyMarkdown`, never a diff.
 
-The proposal schema authorizes page writes only. If correct scoped ingestion
-requires an `add_link`, `add_timeline_entry`, or other mutation that cannot be
-represented completely by `proposedPages`, do not issue an incomplete
-proposal. Return `failed` with an operational summary and zero mutations rather
-than omit that mutation. This representability gate also applies to a
-normal-mode partial-disqualification proposal. Prefer expressing relationships
-and timeline evidence through page Markdown, as the workflow already directs,
-so this gate fires only when a required mutation genuinely has no page-content
-representation.
+Populate `proposedTimelineEntries` with the exact timeline mutations the normal
+workflow requires: timeline entries only for material dated events with the
+capture-page reference. Populate `proposedLinks` with typed links only for
+relationships that the planned Markdown does not express accurately. Enforce
+the same admission scope across all three arrays. Validate each timeline
+entry's date and capture-page `ref`, each link's planned `from`, and both
+40-entry caps before returning the proposal. Omit either optional array when it
+has no entries.
+
+The three plan arrays cover page writes, structured timeline rows, and typed
+links. If correct scoped ingestion requires another mutation that cannot be
+represented by `proposedPages`, `proposedTimelineEntries`, or `proposedLinks`,
+return `failed` with an operational summary and zero mutations. This
+representability gate is only a backstop for a required mutation the extended
+plan cannot express, and it also applies to normal-mode
+partial-disqualification proposals.
 
 The capture page still states that Lore's local Markdown artifact is the
 complete normalized record. Its title and body must not name or describe the
@@ -195,18 +215,19 @@ excluded material or the admission scope. Scope provenance exists only in the
 top-level proposal receipt.
 
 Serialize the complete `scoped_proposal` receipt as JSON and measure its UTF-8
-byte length. The receipt must not exceed 262,144 UTF-8 bytes. Return `failed`
-with an operational summary and no mutations when it exceeds that limit or the
-size cannot be established. Never truncate or split a proposal.
+byte length. The receipt, including `proposedTimelineEntries` and
+`proposedLinks`, must not exceed 262,144 UTF-8 bytes. Return `failed` with an
+operational summary and no mutations when it exceeds that limit or the size
+cannot be established. Never truncate or split a proposal.
 
 ### Apply mode
 
-Treat `admissionScope` and `proposedPages` as frozen approved input. Do not
-reanalyze the artifact, add or omit pages, change an effect, enrich a body, or
-derive any new mutation. For each plan entry in order, write the supplied title
-and full body exactly with `put_page`, then read the page back before marking it
-applied. Do not call `add_link` or `add_timeline_entry`; the frozen proposal
-contains every mutation authorized for this mode.
+Treat `admissionScope`, `proposedPages`, `proposedTimelineEntries`, and
+`proposedLinks` as frozen approved input. Do not reanalyze the artifact, add or
+omit a mutation, change a field, enrich a body, or derive any new mutation. For
+each page entry in order, write the supplied title and full body exactly with
+`put_page`, then read the page back before marking it applied. Do not begin
+timeline or link mutations until every proposed page is applied.
 
 The only permitted plan change is a mechanical slug adjustment for a `create`
 slug collision discovered at write time. Before the first write, read every
@@ -241,7 +262,42 @@ result at its recorded actual slug; verify it first, rewrite the exact frozen
 entry at that slug only if it does not match, then verify again. Retry failed
 and pending entries. This is the resumable apply boundary.
 Always include `pageResults` for every proposed page and include
-`slugAdjustments` as an empty array when no collision occurred.
+`slugAdjustments` as an empty array when no collision occurred. Always
+include `timelineResults` and `linkResults`, as empty arrays when the plan
+proposed no timeline entries or links.
+
+After all pages are applied, apply every recorded slug adjustment to
+`pageSlug`, `ref`, `from`, and `to` whenever the frozen value equals an adjusted
+planned slug. This mechanical mapping is the only permitted change to a
+timeline entry or link.
+
+Initialize one `timelineResults` entry per proposed timeline entry and one
+`linkResults` entry per proposed link, preserving proposal order. Each status
+is `pending` until attempted, `applied` after mutation and verification, or
+`failed` with a compact error after either step fails. For each timeline entry
+in order, call `add_timeline_entry` exactly once with the mapped frozen values:
+map `pageSlug` to `slug`, `text` to `summary`, and `refLabel` to `ref_label`;
+pass `date` and `ref` unchanged except for the recorded slug mapping. Read the
+actual timeline target back with `get_page` and confirm the exact dated entry,
+text, capture-page reference, and optional label are visible before marking it
+applied.
+
+After all timeline entries are applied, call `add_link` for each proposed link
+in order with its mapped `from` and `to`; map `type` to `link_type` and do not
+invent context or provenance fields. Verify the exact edge with both
+`get_links` and `get_backlinks` before marking it applied. Stop after the first
+failed timeline or link mutation and leave all later mutation results pending.
+
+On retry, inspect `timelineResults` and `linkResults` in `priorAttempt`. Retry
+only `pending` and `failed` timeline or link results. Before retrying a
+`pending` or `failed` timeline result, read the target page and check for the
+exact frozen entry. When that entry is already visible, mark the result
+`applied` without calling `add_timeline_entry` again; call it only when the
+entry is absent. Skip a prior `applied` mutation only after its read-back
+verification still passes; otherwise retry the exact frozen mutation. Always
+include both result arrays in an apply receipt, using empty arrays when the
+plan omitted that mutation kind. Never execute a page, timeline entry, or link
+absent from the frozen plan.
 
 ## Phases
 
@@ -429,6 +485,11 @@ duplication.
 - Deleting a canonical page when a tombstone arrives.
 - Advancing Lore checkpoints or changing Review eligibility.
 - Mutating in propose mode or returning an incomplete or truncated proposal.
+- Returning a timeline entry whose `ref` is not the planned capture page.
+- Returning a link whose `from` slug is absent from `proposedPages`.
+- Omitting a required material event from `proposedTimelineEntries`.
+- Applying timeline entries or links before the frozen pages, or applying a
+  mutation absent from the frozen plan.
 - Reinterpreting an approved plan or changing it for anything except a
   write-time create-slug collision.
 - Naming excluded material or `admissionScope` inside a destination page.
@@ -453,6 +514,28 @@ For propose mode or normal-mode partial disqualification:
       "effect": "create | update",
       "title": "complete intended page title",
       "bodyMarkdown": "complete intended page body"
+    },
+    {
+      "slug": "projects/example",
+      "effect": "create | update",
+      "title": "complete intended project title",
+      "bodyMarkdown": "complete intended project body"
+    }
+  ],
+  "proposedTimelineEntries": [
+    {
+      "pageSlug": "projects/example",
+      "date": "2026-08-03",
+      "text": "material dated event",
+      "ref": "sources/github/example",
+      "refLabel": "pull request capture"
+    }
+  ],
+  "proposedLinks": [
+    {
+      "from": "sources/github/example",
+      "to": "projects/example",
+      "type": "documents"
     }
   ],
   "unresolved": []
@@ -486,9 +569,9 @@ For a normal write result:
 }
 ```
 
-For an apply result, keep the normal page arrays and add resumable page and
-collision details. Array entries in `createdPages`, `updatedPages`, and
-`verifiedPages` remain source-qualified identifiers only.
+For an apply result, keep the normal page arrays and add resumable page,
+timeline, link, and collision details. Array entries in `createdPages`,
+`updatedPages`, and `verifiedPages` remain source-qualified identifiers only.
 
 ```json
 {
@@ -515,12 +598,31 @@ collision details. Array entries in `createdPages`, `updatedPages`, and
       "reason": "slug_collision"
     }
   ],
+  "timelineResults": [
+    {
+      "index": 0,
+      "page": "<sourceId>:<actual-page-slug>",
+      "date": "2026-08-03",
+      "status": "pending | applied | failed",
+      "error": "null or compact failure"
+    }
+  ],
+  "linkResults": [
+    {
+      "index": 0,
+      "from": "<sourceId>:<actual-from-slug>",
+      "to": "<sourceId>:<actual-to-slug>",
+      "type": "documents",
+      "status": "pending | applied | failed",
+      "error": "null or compact failure"
+    }
+  ],
   "unresolved": ["specific unresolved completion defects"]
 }
 ```
 
 ## Tools Used
 
-Use schema inspection, search, query, page reads, slug resolution, backlinks,
-page writes, typed links, timeline entries, and link validation exactly as
-declared in frontmatter. Do not request any other tool.
+Use schema inspection, search, query, page reads, slug resolution, links,
+backlinks, page writes, typed links, timeline entries, and link validation
+exactly as declared in frontmatter. Do not request any other tool.
