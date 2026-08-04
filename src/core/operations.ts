@@ -1247,10 +1247,11 @@ const replace_page_text: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write/update a page (markdown with frontmatter). Incoming ## Timeline bullets are imported into structured timeline rows and never replace existing timeline history; page reads compose the section from those rows. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Write/update a page (markdown with frontmatter). Pass the exact expected_content_hash returned by get_page to reject a stale update without mutation; omit it only for an intentional unconditional write. Replaying content that is already current succeeds as a no-op. Incoming ## Timeline bullets are imported into structured timeline rows and never replace existing timeline history; page reads compose the section from those rows. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
+    expected_content_hash: { type: 'string', required: false, description: 'Exact lowercase content_hash from get_page. When supplied, a different current hash fails with stale_page before mutation.' },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -1265,6 +1266,16 @@ const put_page: Operation = {
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
+    const expectedContentHash = p.expected_content_hash;
+    if (
+      expectedContentHash !== undefined
+      && (typeof expectedContentHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedContentHash))
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'expected_content_hash must be a 64-character lowercase hex hash.',
+      );
+    }
 
     // v0.39.3.0 CV6 trust gate for provenance write-through (WARN-8).
     // Only trusted LOCAL callers (ctx.remote === false — capture CLI,
@@ -1362,6 +1373,15 @@ const put_page: Operation = {
         existingSuppressions,
       );
       if (matchedClaims.length > 0) {
+        if (
+          typeof expectedContentHash === 'string'
+          && existingIncludingDeleted?.content_hash !== expectedContentHash
+        ) {
+          throw stalePageOperationError(
+            expectedContentHash,
+            existingIncludingDeleted?.content_hash ?? null,
+          );
+        }
         return {
           slug,
           status: 'skipped',
@@ -1377,26 +1397,40 @@ const put_page: Operation = {
       existingIncludingDeleted?.compiled_truth ?? '',
       candidateContent,
     );
-    const result = await importFromContent(ctx.engine, slug, content, {
-      noEmbed,
-      writeContext: pageWriteContextForOperation(ctx),
-      // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
-      // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
-      // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
-      remote: ctx.remote !== false,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
-      // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
-      // inferType behavior when undefined).
-      ...(activePack ? { activePack } : {}),
-      // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
-      // computed above; ingested_at is server-stamped at the engine layer.
-      // Null-valued fields signal "no provenance write this call" and the
-      // engine's COALESCE-preserve UPDATE keeps the prior first-write
-      // record intact (CV12 audit-trail survival).
-      source_kind: provenanceKind,
-      source_uri: provenanceUri,
-      ingested_via: provenanceVia,
-    });
+    let result: Awaited<ReturnType<typeof importFromContent>>;
+    try {
+      result = await importFromContent(ctx.engine, slug, content, {
+        noEmbed,
+        writeContext: pageWriteContextForOperation(ctx),
+        // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
+        // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
+        // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
+        remote: ctx.remote !== false,
+        ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+        ...(typeof expectedContentHash === 'string'
+          ? { expectedContentHash }
+          : {}),
+        // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
+        // inferType behavior when undefined).
+        ...(activePack ? { activePack } : {}),
+        // v0.39.3.0 provenance write-through (WARN-8). Trust-filtered values
+        // computed above; ingested_at is server-stamped at the engine layer.
+        // Null-valued fields signal "no provenance write this call" and the
+        // engine's COALESCE-preserve UPDATE keeps the prior first-write
+        // record intact (CV12 audit-trail survival).
+        source_kind: provenanceKind,
+        source_uri: provenanceUri,
+        ingested_via: provenanceVia,
+      });
+    } catch (error) {
+      if (error instanceof StalePageError) {
+        throw stalePageOperationError(
+          error.expectedContentHash,
+          error.currentContentHash,
+        );
+      }
+      throw error;
+    }
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
@@ -1660,6 +1694,23 @@ const put_page: Operation = {
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };
+
+/** Convert engine compare-and-swap failures to the public operation shape. */
+function stalePageOperationError(
+  expectedContentHash: string,
+  currentContentHash: string | null,
+): OperationError {
+  return new OperationError(
+    'stale_page',
+    'Page content changed after it was read.',
+    'Read the current page and retry the intended update against its new content hash.',
+    undefined,
+    {
+      expected_content_hash: expectedContentHash,
+      current_content_hash: currentContentHash,
+    },
+  );
+}
 
 /**
  * Historical page ingestion is a distinct trusted surface rather than extra

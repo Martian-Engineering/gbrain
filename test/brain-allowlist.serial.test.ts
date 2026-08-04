@@ -120,9 +120,12 @@ describe('buildBrainTools', () => {
   test('put_page schema is namespace-wrapped per subagent', () => {
     const tools42 = buildBrainTools({ subagentId: 42, engine, config });
     const putPage42 = tools42.find(t => t.name === 'brain_put_page');
-    const slug42 = ((putPage42!.input_schema as any).properties as any).slug;
+    const properties42 = (putPage42!.input_schema as any).properties as any;
+    const slug42 = properties42.slug;
     expect(slug42.pattern).toBe('^wiki/agents/42/.+');
     expect(slug42.description).toContain('wiki/agents/42/');
+    expect(properties42.expected_content_hash).toMatchObject({ type: 'string' });
+    expect((putPage42!.input_schema as any).required).not.toContain('expected_content_hash');
 
     const tools7 = buildBrainTools({ subagentId: 7, engine, config });
     const putPage7 = tools7.find(t => t.name === 'brain_put_page');

@@ -592,16 +592,17 @@ export async function importFromContent(
   };
 
   const existing = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
-  if (
-    opts.expectedContentHash !== undefined
-    && existing?.content_hash !== opts.expectedContentHash
-  ) {
-    throw new StalePageError(
-      opts.expectedContentHash,
-      existing?.content_hash ?? null,
-    );
-  }
+  const staleConditionalReplay = opts.expectedContentHash !== undefined
+    && existing?.content_hash !== opts.expectedContentHash;
   if (existing?.content_hash === hash && !opts.forceRechunk) {
+    // Timeline rows are excluded from the page hash, so same page content
+    // cannot prove that a stale request's secondary mutation already landed.
+    if (staleConditionalReplay && incomingTimeline.present) {
+      throw new StalePageError(
+        opts.expectedContentHash!,
+        existing.content_hash,
+      );
+    }
     const timelineImport = incomingTimeline.present
       ? await importTimelineSection(
           engine,
@@ -617,6 +618,12 @@ export async function importFromContent(
       parsedPage,
       ...(timelineImport ? { timeline_import: timelineImport } : {}),
     };
+  }
+  if (staleConditionalReplay) {
+    throw new StalePageError(
+      opts.expectedContentHash,
+      existing?.content_hash ?? null,
+    );
   }
 
   // v0.41.13 (#1309) — identity-based cross-slug dedup pre-check.

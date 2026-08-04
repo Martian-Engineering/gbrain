@@ -217,6 +217,9 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('"status": "scoped_proposal"');
     expect(skill).toContain('"effect": "create | update"');
     expect(skill).toContain('"bodyMarkdown": "complete intended page body"');
+    expect(skill).toContain('"baseMarkdown": "exact reviewed page body for updates, null for creates"');
+    expect(skill).toContain('"expectedContentHash": "exact get_page content_hash for updates, null for creates"');
+    expect(skill).toContain('Omit both fields for a create');
   });
 
   test('carries bounded timeline and link mutations in the scoped proposal', () => {
@@ -282,11 +285,21 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toMatch(/does not\s+contradict `admissionScope`/);
     expect(skill).toMatch(/Skip a prior `applied` result only after\s+read-back/);
     expect(skill).toContain('"pageResults":');
-    expect(skill).toContain('"status": "pending | written | applied | failed"');
+    expect(skill).toContain(
+      '"status": "pending | written | applied | rebased | already_applied | refresh_required | failed"',
+    );
     expect(skill).toContain('immediately after a successful mutation');
     expect(skill).toMatch(/Resume a prior `written`\s+result at its recorded actual slug/);
     expect(skill).toContain('"slugAdjustments":');
     expect(skill).toContain('"reason": "slug_collision"');
+    expect(skill).toContain('pass its `expectedContentHash` as');
+    expect(skill).toContain('Before the first write, read every approved target page');
+    expect(skill).toContain('additions-only three-way rebase');
+    expect(skill).toMatch(/Never use a model to regenerate, reinterpret, or improve the approved body/);
+    expect(skill).toContain('refresh_required');
+    expect(skill).toContain('already_applied');
+    expect(skill).toContain('rebased');
+    expect(skill).toContain('appliedContentHash');
   });
 
   test('applies frozen timeline and link mutations after pages with resumable results', () => {

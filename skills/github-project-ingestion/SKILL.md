@@ -132,9 +132,11 @@ incomplete. Do not fetch, truncate, split, or reconstruct missing input.
 
 An absent `mode` selects normal mode. Reject any other mode value. Require a
 non-empty `admissionScope` in propose and apply modes. In apply mode, require
-`proposedPages` to be the frozen array accepted by Lore; each entry has exactly
-`slug`, `effect`, `title`, and `bodyMarkdown`, and `effect` is `create` or
-`update`. Update entries contain the full intended `bodyMarkdown`, never a diff.
+`proposedPages` to be the frozen array accepted by Lore. Create entries have
+exactly `slug`, `effect`, `title`, and `bodyMarkdown`. Update entries add
+exactly `baseMarkdown` and `expectedContentHash`. Update entries contain the
+full intended `bodyMarkdown`, never a diff, plus the exact reviewed page body
+and content hash returned by `get_page`.
 The plan's `capturePageSlug` must appear in `proposedPages`.
 The planned capture page must contain a clickable upstream GitHub URL and must
 not cite or link to its own slug. Reject an invalid frozen plan before any
@@ -199,7 +201,9 @@ In `propose` mode, do not call any mutating tool, including `put_page`,
 allowed. Return the complete set of pages that `apply` will write. For this
 provider that includes the exact capture and every feature, initiative, or
 entity page that the scoped ingestion requires. Each update entry contains the
-full intended `bodyMarkdown`, never a diff.
+full intended `bodyMarkdown`, never a diff. Copy the exact body and
+`content_hash` from the `get_page` read used to draft each update into
+`baseMarkdown` and `expectedContentHash`. Omit both fields for a create.
 
 Populate `proposedTimelineEntries` with the exact timeline mutations the normal
 workflow requires: timeline entries only for material dated events with the
@@ -234,10 +238,33 @@ cannot be established. Never truncate or split a proposal.
 
 Treat `admissionScope`, `proposedPages`, `proposedTimelineEntries`, and
 `proposedLinks` as frozen approved input. Do not reanalyze the artifact, add or
-omit a mutation, change a field, enrich a body, or derive any new mutation. For
-each page entry in order, write the supplied title and full body exactly with
-`put_page`, then read the page back before marking it applied. Do not begin
+omit a mutation, change a field, enrich a body, or derive any new mutation.
+Before the first write, read every approved target page and compare it with the
+frozen plan. A create must still be absent, apart from the mechanical collision
+adjustment below. An update must either match its `expectedContentHash` or pass
+the deterministic additions-only rebase rules below. If any page cannot
+proceed, return `refresh_required` without writing any page from this attempt.
+For each page entry in order, write the supplied title and full body exactly with
+`put_page`. For an update, pass its `expectedContentHash` as
+`expected_content_hash`; creates omit that parameter. Then read the page back
+before marking it applied. Do not begin
 timeline or link mutations until every proposed page is applied.
+
+If an update returns `stale_page`, read the current page and compare exactly
+three texts: `baseMarkdown`, the approved `bodyMarkdown`, and the current body.
+Never use a model to regenerate, reinterpret, or improve the approved body.
+Attempt an additions-only three-way rebase only when the complete diff from
+`baseMarkdown` to `bodyMarkdown` consists solely of inserted lines and every
+insertion anchor remains unique and unchanged in the current body. Apply those
+exact inserted lines at those exact anchors, without rewriting any current
+line, and call `put_page` with the rebased full body and the newly read
+`currentContentHash` as `expected_content_hash`. Mark the verified result
+`rebased`. If the current body already equals the approved body, mark it
+`already_applied` after verification. If the approved diff deletes or replaces
+text, an anchor changed or became ambiguous, the page disappeared, or the
+conditional rebase is stale again, make no mutation and mark the result
+`refresh_required`. Model regeneration is a new proposal and always requires a
+new human decision.
 
 The only permitted plan change is a mechanical slug adjustment for a `create`
 slug collision discovered at write time. Before the first write, read every
@@ -263,8 +290,12 @@ attribution without citing or linking to itself. Add the page to
 
 Initialize one `pageResults` entry per proposed page in proposal order. Its
 status is `pending` until attempted, `written` after the write but before
-successful verification, `applied` after read-back and scope verification, and
-`failed` with a compact error after a failed write. A verification failure
+successful verification, `applied`, `rebased`, or `already_applied` after the
+corresponding read-back and scope verification, `refresh_required` when the
+approved update cannot be applied safely, and `failed` with a compact error
+after another failed write. Copy the frozen update hash into
+`expectedContentHash`, use null for creates, and record the verified final page
+hash in `appliedContentHash` only after read-back. A verification failure
 leaves the result `written` with a compact error. Stop after the first failed or
 unverified result and leave later entries pending. On retry, inspect
 `priorAttempt`. Skip a prior `applied` result only after read-back confirms its
@@ -550,15 +581,17 @@ For propose mode or normal-mode partial disqualification:
   "proposedPages": [
     {
       "slug": "sources/github/example",
-      "effect": "create | update",
+      "effect": "create",
       "title": "complete intended page title",
       "bodyMarkdown": "complete intended page body"
     },
     {
       "slug": "projects/example",
-      "effect": "create | update",
+      "effect": "update",
       "title": "complete intended project title",
-      "bodyMarkdown": "complete intended project body"
+      "bodyMarkdown": "complete intended project body",
+      "baseMarkdown": "exact reviewed page body for updates, null for creates",
+      "expectedContentHash": "exact get_page content_hash for updates, null for creates"
     }
   ],
   "proposedTimelineEntries": [
@@ -626,7 +659,9 @@ timeline, link, and collision details. Array entries in `createdPages`,
       "proposedSlug": "sources/github/example",
       "appliedPage": "<sourceId>:<actual-slug> | null",
       "effect": "create | update",
-      "status": "pending | written | applied | failed",
+      "status": "pending | written | applied | rebased | already_applied | refresh_required | failed",
+      "expectedContentHash": "reviewed hash for updates, null for creates",
+      "appliedContentHash": "verified final hash or null",
       "error": "null or compact failure"
     }
   ],

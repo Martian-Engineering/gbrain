@@ -270,6 +270,34 @@ describe('claim suppression operation contract', () => {
       .toContain('The launch is Friday.');
   });
 
+  test('a stale conditional write cannot exit through the suppression backstop', async () => {
+    const slug = 'wiki/personal/patterns/stale-suppression';
+    await putPage(slug, 'The launch is Friday.');
+    const reviewed = await engine.getPage(slug, { sourceId: 'default' });
+    await operationsByName.suppress_claim.handler(ctx(), {
+      slug,
+      claim_text: 'The launch is Friday.',
+    });
+    const current = await engine.getPage(slug, { sourceId: 'default' });
+
+    await expect(operationsByName.put_page.handler(ctx({
+      remote: true,
+      viaSubagent: true,
+      subagentId: 7,
+      allowedSlugPrefixes: ['wiki/personal/patterns/*'],
+    }), {
+      slug,
+      content: '---\ntitle: Blocked\n---\n\nThe launch is Friday.',
+      expected_content_hash: reviewed!.content_hash,
+    })).rejects.toMatchObject({
+      code: 'stale_page',
+      details: {
+        expected_content_hash: reviewed!.content_hash,
+        current_content_hash: current!.content_hash,
+      },
+    });
+  });
+
   test('later put_page rewrites preserve the canonical suppression fence', async () => {
     const slug = 'wiki/personal/reflections/preserved';
     await putPage(slug, 'The old prose contains a false launch date.');
