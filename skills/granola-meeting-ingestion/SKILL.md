@@ -233,6 +233,9 @@ frozen plan. A create must still be absent, apart from the mechanical collision
 adjustment below. An update must either match its `expectedContentHash` or pass
 the deterministic additions-only rebase rules below. If any page cannot
 proceed, return `refresh_required` without writing any page from this attempt.
+An early `refresh_required` return must still include one `pageResults`,
+`timelineResults`, and `linkResults` entry per frozen mutation in proposal
+order. Leave every unattempted result `pending` with a null error.
 For each page entry in order, write the supplied title and full body exactly with
 `put_page`. For an update, pass its `expectedContentHash` as
 `expected_content_hash`; for a create, pass `expected_content_hash: null` so

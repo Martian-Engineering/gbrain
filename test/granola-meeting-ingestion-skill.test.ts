@@ -258,6 +258,15 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toMatch(/Reject an invalid frozen plan before any\s+mutation/);
   });
 
+  test('keeps early refresh receipts complete without attempting mutations', () => {
+    expect(skill).toMatch(
+      /An early `refresh_required` return must still include one `pageResults`,\s+`timelineResults`, and `linkResults` entry per frozen mutation in proposal\s+order/,
+    );
+    expect(skill).toMatch(
+      /Leave every unattempted result `pending` with a null error/,
+    );
+  });
+
   test('requires canonical slugs before proposing or applying a plan', () => {
     expect(skill).toMatch(
       /Every slug in `proposedPages`,\s+`proposedTimelineEntries`, and `proposedLinks` must be canonical/,
