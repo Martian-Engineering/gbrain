@@ -136,8 +136,11 @@ exactly `pageSlug`, `date`, `text`, and `ref`, with optional `refLabel`; `date`
 is a strict `YYYY-MM-DD` date, and `ref` must equal the plan's
 `capturePageSlug`. `proposedLinks` may contain at most 40 entries. Each entry
 contains exactly non-empty `from`, `to`, and `type` strings, and `from` must
-equal a slug in `proposedPages`. Reject an invalid frozen plan before any
-mutation.
+equal a slug in `proposedPages`. Every slug in `proposedPages`,
+`proposedTimelineEntries`, and `proposedLinks` must be canonical: at most 255
+characters, using lowercase ASCII alphanumeric or CJK characters plus hyphens
+in non-empty forward-slash-separated segments. Reject a non-canonical slug
+before returning a proposal. Reject an invalid frozen plan before any mutation.
 
 ## Modes
 

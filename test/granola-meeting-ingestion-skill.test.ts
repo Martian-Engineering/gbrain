@@ -258,6 +258,17 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toMatch(/Reject an invalid frozen plan before any\s+mutation/);
   });
 
+  test('requires canonical slugs before proposing or applying a plan', () => {
+    expect(skill).toMatch(
+      /Every slug in `proposedPages`,\s+`proposedTimelineEntries`, and `proposedLinks` must be canonical/,
+    );
+    expect(skill).toMatch(
+      /lowercase ASCII alphanumeric or CJK characters plus hyphens\s+in non-empty forward-slash-separated segments/,
+    );
+    expect(skill).toMatch(/at most 255\s+characters/);
+    expect(skill).toMatch(/Reject a non-canonical slug\s+before returning a proposal/);
+  });
+
   test('requires rich meeting enrichment before reporting success', () => {
     expect(skill).toContain('Every unambiguous attendee must have a substantive `people/` dossier');
     expect(skill).toContain('Every substantive organization, project, concept, and durable decision');
