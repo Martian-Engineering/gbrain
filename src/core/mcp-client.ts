@@ -132,7 +132,13 @@ export function extractToolErrorCode(message: string): string | undefined {
   try {
     const parsed = JSON.parse(message);
     if (parsed && typeof parsed === 'object') {
-      const code = (parsed as any).error?.code ?? (parsed as any).code;
+      const error = (parsed as { error?: unknown }).error;
+      const nestedCode = error && typeof error === 'object'
+        ? (error as { code?: unknown }).code
+        : undefined;
+      const code = nestedCode
+        ?? (typeof error === 'string' ? error : undefined)
+        ?? (parsed as { code?: unknown }).code;
       if (typeof code === 'string') return code;
     }
   } catch { /* not json; fall through */ }

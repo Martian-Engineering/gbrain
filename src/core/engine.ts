@@ -36,7 +36,7 @@ export class StalePageError extends Error {
   readonly code = 'stale_page';
 
   constructor(
-    public readonly expectedContentHash: string,
+    public readonly expectedContentHash: string | null,
     public readonly currentContentHash: string | null,
   ) {
     super('Page changed after it was read; fetch the current page before editing it.');
@@ -49,7 +49,7 @@ export interface PutPageOptions {
   sourceId?: string;
   writeContext?: PageWriteContext;
   /** Opaque optimistic-concurrency token obtained from the prior page read. */
-  expectedContentHash?: string;
+  expectedContentHash?: string | null;
 }
 
 /**

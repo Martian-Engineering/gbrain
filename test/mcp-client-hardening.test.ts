@@ -114,6 +114,11 @@ describe('extractToolErrorCode', () => {
     expect(extractToolErrorCode(msg)).toBe('rate_limit_exceeded');
   });
 
+  test('parses the operation error envelope used by gbrain tools', () => {
+    const msg = JSON.stringify({ error: 'page_not_found', message: 'Page not found' });
+    expect(extractToolErrorCode(msg)).toBe('page_not_found');
+  });
+
   test('falls back to substring detection for missing_scope-shaped messages', () => {
     // Regex is `scope.+(insufficient|required)` — requires "scope" BEFORE
     // the keyword. Inputs designed to hit each alternative branch.

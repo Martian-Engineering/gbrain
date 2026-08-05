@@ -74,6 +74,7 @@ async function putThroughOperation(
   } as OperationContext, {
     slug,
     content: `---\ntype: note\ntitle: ${slug}\n---\nSemantic prose.`,
+    ...(context.remote ? { expected_content_hash: null } : {}),
     ...extraParams,
   });
 }
@@ -211,6 +212,7 @@ describe('server-owned put_page write intent', () => {
       batch_id: expect.objectContaining({ required: true }),
       slug: expect.objectContaining({ required: true }),
       content: expect.objectContaining({ required: true }),
+      expected_content_hash: expect.objectContaining({ remoteRequired: true, nullable: true }),
     }));
     expect(operationsByName.put_historical_page.params).not.toHaveProperty('actor');
     expect(operationsByName.put_historical_page.params).not.toHaveProperty('write_intent');
@@ -236,6 +238,7 @@ describe('server-owned put_page write intent', () => {
       batch_id: 'archive-2026-07',
       slug: 'history/admin-import',
       content: '---\ntype: note\ntitle: Admin import\n---\nHistorical semantic prose.',
+      expected_content_hash: null,
       actor: 'human:spoofed',
       write_intent: 'user_edit',
     });
@@ -254,6 +257,50 @@ describe('server-owned put_page write intent', () => {
       admission: 'deferred',
       batch_id: 'archive-2026-07',
     }]);
+  });
+
+  test('historical admin writes update against the reviewed page baseline', async () => {
+    const operationContext = {
+      engine,
+      config: { engine: 'pglite' },
+      logger: { info() {}, warn() {}, error() {} },
+      dryRun: false,
+      remote: true,
+      sourceId: 'default',
+      auth: {
+        token: 'fixture-auth-value',
+        clientId: 'historical-loader',
+        scopes: ['admin'],
+        sourceId: 'default',
+      },
+    } as OperationContext;
+    const firstContent = '---\ntype: note\ntitle: Admin import\n---\nOriginal historical prose.';
+    const updatedContent = '---\ntype: note\ntitle: Admin import\n---\nUpdated historical prose.';
+
+    await operationsByName.put_historical_page.handler(operationContext, {
+      source_id: 'default',
+      batch_id: 'archive-2026-07',
+      slug: 'history/admin-update',
+      content: firstContent,
+      expected_content_hash: null,
+    });
+    const reviewed = await engine.getPage('history/admin-update');
+
+    await operationsByName.put_historical_page.handler(operationContext, {
+      source_id: 'default',
+      batch_id: 'archive-2026-08',
+      slug: 'history/admin-update',
+      content: updatedContent,
+      expected_content_hash: reviewed!.content_hash,
+    });
+
+    expect((await engine.getPage('history/admin-update'))?.compiled_truth)
+      .toContain('Updated historical prose.');
+    expect(await latestReceipt('history/admin-update')).toMatchObject({
+      actor: 'mcp:historical-loader',
+      write_intent: 'backfill',
+      batch_id: 'archive-2026-08',
+    });
   });
 
   test('historical admin writes reject a source outside the authenticated write grant', async () => {

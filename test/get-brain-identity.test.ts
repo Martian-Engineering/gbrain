@@ -68,6 +68,7 @@ describe('get_brain_identity op', () => {
       engine: 'postgres' | 'pglite';
       page_count: number;
       chunk_count: number;
+      write_source_id: string | null;
       last_sync_iso: string | null;
     };
 
@@ -75,6 +76,7 @@ describe('get_brain_identity op', () => {
     expect(result.engine).toBe('pglite');
     expect(result.page_count).toBe(0);
     expect(result.chunk_count).toBe(0);
+    expect(result.write_source_id).toBe('default');
     expect(result.last_sync_iso).toBe(null);
   });
 
@@ -113,6 +115,7 @@ describe('get_brain_identity op', () => {
       'page_count',
       'update_available',
       'version',
+      'write_source_id',
     ]);
   });
 

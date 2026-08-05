@@ -12,28 +12,11 @@
 
 import { describe, test, expect } from 'bun:test';
 import { operations } from '../../src/core/operations.ts';
+import { buildToolDefs } from '../../src/mcp/tool-defs.ts';
 
 describe('E2E: MCP Tool Generation', () => {
   test('operations generate valid MCP tool definitions', () => {
-    // This replicates exactly what server.ts does in the tools/list handler
-    const tools = operations.map(op => ({
-      name: op.name,
-      description: op.description,
-      inputSchema: {
-        type: 'object' as const,
-        properties: Object.fromEntries(
-          Object.entries(op.params).map(([k, v]) => [k, {
-            type: v.type === 'array' ? 'array' : v.type,
-            ...(v.description ? { description: v.description } : {}),
-            ...(v.enum ? { enum: v.enum } : {}),
-            ...(v.items ? { items: { type: v.items.type } } : {}),
-          }]),
-        ),
-        required: Object.entries(op.params)
-          .filter(([, v]) => v.required)
-          .map(([k]) => k),
-      },
-    }));
+    const tools = buildToolDefs(operations);
 
     expect(tools.length).toBe(operations.length);
     expect(tools.length).toBeGreaterThanOrEqual(30);

@@ -7,7 +7,7 @@ export function printToolsJson() {
     parameters: Object.fromEntries(
       Object.entries(op.params).map(([k, v]) => [
         k,
-        `${v.type}${v.required ? '' : '?'}`,
+        `${v.type}${v.nullable ? '|null' : ''}${v.required || v.remoteRequired ? '' : '?'}`,
       ]),
     ),
   }));

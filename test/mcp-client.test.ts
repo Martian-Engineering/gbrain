@@ -267,6 +267,21 @@ describe('callRemoteTool — error surfaces', () => {
       expect((e as RemoteMcpError).reason).toBe('tool_error');
     }
   });
+
+  test('tool errors preserve a top-level gbrain operation error code', async () => {
+    mcpResponseFor = () => ({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ error: 'page_not_found', message: 'Page not found' }),
+      }],
+      isError: true,
+    });
+
+    await expect(callRemoteTool(makeConfig(), 'get_page', {})).rejects.toMatchObject({
+      reason: 'tool_error',
+      detail: { code: 'page_not_found' },
+    });
+  });
 });
 
 describe('unpackToolResult', () => {

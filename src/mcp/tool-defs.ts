@@ -29,7 +29,7 @@ export interface McpToolDef {
  */
 export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
   return {
-    type: p.type === 'array' ? 'array' : p.type,
+    type: p.nullable ? [p.type, 'null'] : (p.type === 'array' ? 'array' : p.type),
     ...(p.description ? { description: p.description } : {}),
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
@@ -37,18 +37,23 @@ export function paramDefToSchema(p: ParamDef): Record<string, unknown> {
   };
 }
 
+/** Build the untrusted MCP/subagent JSON Schema for one operation. */
+export function operationParamsToInputSchema(op: Operation): McpToolDef['inputSchema'] {
+  return {
+    type: 'object',
+    properties: Object.fromEntries(
+      Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
+    ),
+    required: Object.entries(op.params)
+      .filter(([, v]) => v.required || v.remoteRequired)
+      .map(([k]) => k),
+  };
+}
+
 export function buildToolDefs(ops: Operation[]): McpToolDef[] {
   return ops.map(op => ({
     name: op.name,
     description: op.description,
-    inputSchema: {
-      type: 'object' as const,
-      properties: Object.fromEntries(
-        Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
-      ),
-      required: Object.entries(op.params)
-        .filter(([, v]) => v.required)
-        .map(([k]) => k),
-    },
+    inputSchema: operationParamsToInputSchema(op),
   }));
 }

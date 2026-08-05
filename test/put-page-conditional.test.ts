@@ -63,13 +63,89 @@ Alice works at ${company}.
 }
 
 describe('conditional put_page', () => {
-  test('publishes an optional expected content hash', () => {
+  test('publishes a remote-required nullable expected content hash', () => {
     const operation = operationsByName.put_page;
 
     expect(operation.params.expected_content_hash).toMatchObject({
       type: 'string',
       required: false,
+      remoteRequired: true,
+      nullable: true,
     });
+  });
+
+  test('rejects an omitted baseline from remote callers before writing', async () => {
+    await expect(operationsByName.put_page.handler(context(), {
+      slug: 'people/alice-example',
+      content: pageContent('Acme'),
+    })).rejects.toMatchObject({
+      code: 'invalid_params',
+      message: 'expected_content_hash is required for remote put_page calls; pass null to create a page.',
+    });
+
+    expect(await engine.getPage('people/alice-example')).toBeNull();
+  });
+
+  test('creates only when a null baseline target is absent', async () => {
+    await operationsByName.put_page.handler(context(), {
+      slug: 'people/alice-example',
+      content: pageContent('Acme'),
+      expected_content_hash: null,
+    });
+
+    expect((await engine.getPage('people/alice-example'))?.compiled_truth)
+      .toContain('Alice works at Acme.');
+  });
+
+  test('rejects a null baseline when the source-bound page already exists', async () => {
+    await importFromContent(engine, 'people/alice-example', pageContent('Acme'), {
+      noEmbed: true,
+      sourceId: 'default',
+    });
+
+    await expect(operationsByName.put_page.handler(context(), {
+      slug: 'people/alice-example',
+      content: pageContent('Widget Co'),
+      expected_content_hash: null,
+    })).rejects.toMatchObject({
+      code: 'page_exists',
+      message: 'Page already exists: people/alice-example',
+    });
+
+    expect((await engine.getPage('people/alice-example'))?.compiled_truth)
+      .toContain('Alice works at Acme.');
+  });
+
+  test('rejects a same-content create collision at the importer boundary', async () => {
+    const content = pageContent('Acme');
+    await importFromContent(engine, 'people/alice-example', content, {
+      noEmbed: true,
+      sourceId: 'default',
+    });
+
+    await expect(importFromContent(engine, 'people/alice-example', content, {
+      noEmbed: true,
+      sourceId: 'default',
+      expectedContentHash: null,
+    })).rejects.toMatchObject({
+      code: 'stale_page',
+      expectedContentHash: null,
+    });
+  });
+
+  test('retains omitted-baseline unconditional writes for trusted local callers', async () => {
+    const local = { ...context(), remote: false };
+    await operationsByName.put_page.handler(local, {
+      slug: 'people/alice-example',
+      content: pageContent('Acme'),
+    });
+    await operationsByName.put_page.handler(local, {
+      slug: 'people/alice-example',
+      content: pageContent('Widget Co'),
+    });
+
+    expect((await engine.getPage('people/alice-example'))?.compiled_truth)
+      .toContain('Alice works at Widget Co.');
   });
 
   test('rejects a malformed expected content hash before writing', async () => {

@@ -124,8 +124,8 @@ describe('buildBrainTools', () => {
     const slug42 = properties42.slug;
     expect(slug42.pattern).toBe('^wiki/agents/42/.+');
     expect(slug42.description).toContain('wiki/agents/42/');
-    expect(properties42.expected_content_hash).toMatchObject({ type: 'string' });
-    expect((putPage42!.input_schema as any).required).not.toContain('expected_content_hash');
+    expect(properties42.expected_content_hash).toMatchObject({ type: ['string', 'null'] });
+    expect((putPage42!.input_schema as any).required).toContain('expected_content_hash');
 
     const tools7 = buildBrainTools({ subagentId: 7, engine, config });
     const putPage7 = tools7.find(t => t.name === 'brain_put_page');
@@ -146,7 +146,11 @@ describe('buildBrainTools', () => {
     const putPage = tools.find(t => t.name === 'brain_put_page');
     const ctx: ToolCtx = { engine, jobId: 1, remote: true };
     const res = await putPage!.execute(
-      { slug: 'wiki/agents/42/notes', content: '---\ntitle: Notes\n---\nbody' },
+      {
+        slug: 'wiki/agents/42/notes',
+        content: '---\ntitle: Notes\n---\nbody',
+        expected_content_hash: null,
+      },
       ctx,
     );
     expect(res).toBeTruthy();
@@ -214,7 +218,11 @@ describe('buildBrainTools', () => {
     const putPage = tools.find(t => t.name === 'brain_put_page');
     const ctx: ToolCtx = { engine, jobId: 1, remote: true };
     await putPage!.execute(
-      { slug: 'wiki/personal/reflections/2026-07-17-scoped', content: '---\ntitle: Scoped\n---\nbody' },
+      {
+        slug: 'wiki/personal/reflections/2026-07-17-scoped',
+        content: '---\ntitle: Scoped\n---\nbody',
+        expected_content_hash: null,
+      },
       ctx,
     );
     const rows = await engine.executeRaw<{ source_id: string }>(
@@ -239,6 +247,7 @@ describe('buildBrainTools', () => {
       {
         slug: 'people/injected',
         content: '---\ntitle: Injected Target\n---\n\nCanonical page.',
+        expected_content_hash: null,
       },
       ctx,
     );
@@ -257,6 +266,7 @@ describe('buildBrainTools', () => {
           '- 2026-07-30: Injected event',
           '```',
         ].join('\n'),
+        expected_content_hash: null,
       },
       ctx,
     ) as {

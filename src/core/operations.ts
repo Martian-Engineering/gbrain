@@ -342,6 +342,10 @@ export function validateFilename(name: string): void {
 export interface ParamDef {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
   required?: boolean;
+  /** Require this parameter on untrusted MCP and subagent tool schemas only. */
+  remoteRequired?: boolean;
+  /** Publish this scalar as a JSON Schema union with null. */
+  nullable?: boolean;
   description?: string;
   default?: unknown;
   enum?: string[];
@@ -1247,11 +1251,11 @@ const replace_page_text: Operation = {
 
 const put_page: Operation = {
   name: 'put_page',
-  description: 'Write/update a page (markdown with frontmatter). Pass the exact expected_content_hash returned by get_page to reject a stale update without mutation; omit it only for an intentional unconditional write. Replaying content that is already current succeeds as a no-op. Incoming ## Timeline bullets are imported into structured timeline rows and never replace existing timeline history; page reads compose the section from those rows. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
+  description: 'Write/update a page (markdown with frontmatter). Remote callers must pass expected_content_hash: use the exact hash returned by get_page for an update, or null for a create that must still be absent. Trusted local callers may omit it only for an intentional unconditional write. Replaying content that is already current succeeds as a no-op. Incoming ## Timeline bullets are imported into structured timeline rows and never replace existing timeline history; page reads compose the section from those rows. Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug', trace: { kind: 'page' } },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
-    expected_content_hash: { type: 'string', required: false, description: 'Exact lowercase content_hash from get_page. When supplied, a different current hash fails with stale_page before mutation.' },
+    expected_content_hash: { type: 'string', required: false, remoteRequired: true, nullable: true, description: 'Remote callers: exact lowercase content_hash from get_page for updates, or null for create-only. Trusted local callers may omit for an unconditional write.' },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -1267,8 +1271,15 @@ const put_page: Operation = {
   handler: async (ctx, p) => {
     const slug = p.slug as string;
     const expectedContentHash = p.expected_content_hash;
+    if (ctx.remote !== false && expectedContentHash === undefined) {
+      throw new OperationError(
+        'invalid_params',
+        'expected_content_hash is required for remote put_page calls; pass null to create a page.',
+      );
+    }
     if (
       expectedContentHash !== undefined
+      && expectedContentHash !== null
       && (typeof expectedContentHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedContentHash))
     ) {
       throw new OperationError(
@@ -1328,6 +1339,9 @@ const put_page: Operation = {
         `Page is soft-deleted: ${slug}`,
         'Call restore_page for this slug before updating it.',
       );
+    }
+    if (expectedContentHash === null && existingIncludingDeleted) {
+      throw new OperationError('page_exists', `Page already exists: ${slug}`);
     }
 
     // Skip embedding when the AI gateway has no embedding provider configured.
@@ -1407,7 +1421,7 @@ const put_page: Operation = {
         // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
         remote: ctx.remote !== false,
         ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
-        ...(typeof expectedContentHash === 'string'
+        ...(typeof expectedContentHash === 'string' || expectedContentHash === null
           ? { expectedContentHash }
           : {}),
         // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
@@ -1424,6 +1438,9 @@ const put_page: Operation = {
       });
     } catch (error) {
       if (error instanceof StalePageError) {
+        if (error.expectedContentHash === null) {
+          throw new OperationError('page_exists', `Page already exists: ${slug}`);
+        }
         throw stalePageOperationError(
           error.expectedContentHash,
           error.currentContentHash,
@@ -1726,6 +1743,7 @@ const put_historical_page: Operation = {
     batch_id: { type: 'string', required: true, description: 'Stable historical ingestion batch id' },
     slug: put_page.params.slug,
     content: put_page.params.content,
+    expected_content_hash: put_page.params.expected_content_hash,
   },
   mutating: true,
   scope: 'admin',
@@ -1750,6 +1768,7 @@ const put_historical_page: Operation = {
     }, {
       slug: p.slug,
       content: p.content,
+      expected_content_hash: p.expected_content_hash,
     });
   },
 };
@@ -4285,7 +4304,7 @@ const get_health: Operation = {
  */
 const get_brain_identity: Operation = {
   name: 'get_brain_identity',
-  description: 'Brain identity + counters for thin-client banner. Returns version, engine kind, and page/chunk counts. Read-scope.',
+  description: 'Brain identity + counters for thin-client banner. Returns version, engine kind, page/chunk counts, and the authenticated client write source. Read-scope.',
   params: {},
   handler: async (ctx) => {
     const stats = await ctx.engine.getStats();
@@ -4309,6 +4328,7 @@ const get_brain_identity: Operation = {
       engine: ctx.engine.kind,
       page_count: stats.page_count,
       chunk_count: stats.chunk_count,
+      write_source_id: ctx.sourceId ?? ctx.auth?.sourceId ?? null,
       last_sync_iso: null as string | null,
       update_available,
       latest_version,

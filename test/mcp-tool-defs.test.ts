@@ -29,6 +29,8 @@ import type { ParamDef } from '../src/core/operations.ts';
 // wire automatically.
 type ParamDefLike = {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  nullable?: boolean;
+  remoteRequired?: boolean;
   description?: string;
   enum?: string[];
   default?: unknown;
@@ -36,7 +38,7 @@ type ParamDefLike = {
 };
 function referenceParamDefToSchema(p: ParamDefLike): Record<string, unknown> {
   return {
-    type: p.type === 'array' ? 'array' : p.type,
+    type: p.nullable ? [p.type, 'null'] : (p.type === 'array' ? 'array' : p.type),
     ...(p.description ? { description: p.description } : {}),
     ...(p.enum ? { enum: p.enum } : {}),
     ...(p.default !== undefined ? { default: p.default } : {}),
@@ -53,7 +55,7 @@ function legacyInlineMap(ops: typeof operations) {
         Object.entries(op.params).map(([k, v]) => [k, referenceParamDefToSchema(v)]),
       ),
       required: Object.entries(op.params)
-        .filter(([, v]) => v.required)
+        .filter(([, v]) => v.required || v.remoteRequired)
         .map(([k]) => k),
     },
   }));
@@ -68,6 +70,14 @@ describe('buildToolDefs', () => {
 
   test('preserves operation count', () => {
     expect(buildToolDefs(operations).length).toBe(operations.length);
+  });
+
+  test('requires a nullable put_page baseline on the remote MCP surface', () => {
+    const putPage = buildToolDefs(operations).find(def => def.name === 'put_page');
+
+    expect(putPage!.inputSchema.properties.expected_content_hash)
+      .toMatchObject({ type: ['string', 'null'] });
+    expect(putPage!.inputSchema.required).toContain('expected_content_hash');
   });
 
   test('includes the assign_take_proposal contract after resolution', () => {

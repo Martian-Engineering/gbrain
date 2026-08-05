@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import { operations, operationsByName } from '../src/core/operations.ts';
 import type { Operation } from '../src/core/operations.ts';
+import { buildToolDefs } from '../src/mcp/tool-defs.ts';
 
 describe('operations contract parity', () => {
   test('every operation has a unique name', () => {
@@ -71,18 +72,7 @@ describe('operations contract parity', () => {
   });
 
   test('MCP tool definitions can be generated from operations', () => {
-    const tools = operations.map(op => ({
-      name: op.name,
-      inputSchema: {
-        type: 'object',
-        properties: Object.fromEntries(
-          Object.entries(op.params).map(([k, v]) => [k, { type: v.type }]),
-        ),
-        required: Object.entries(op.params)
-          .filter(([, v]) => v.required)
-          .map(([k]) => k),
-      },
-    }));
+    const tools = buildToolDefs(operations);
 
     // Every operation generates a valid tool definition
     for (const tool of tools) {

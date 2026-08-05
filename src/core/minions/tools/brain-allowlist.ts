@@ -26,7 +26,7 @@ import type { BrainEngine } from '../../engine.ts';
 import type { GBrainConfig } from '../../config.ts';
 import { operations } from '../../operations.ts';
 import type { Operation, OperationContext } from '../../operations.ts';
-import { paramDefToSchema } from '../../../mcp/tool-defs.ts';
+import { operationParamsToInputSchema } from '../../../mcp/tool-defs.ts';
 import { validateSourceId } from '../../utils.ts';
 import type { ToolCtx, ToolDef } from '../types.ts';
 
@@ -159,13 +159,7 @@ function sanitizeToolName(opName: string): string {
  * narrows to a subset of JSONSchema types.
  */
 function paramsToInputSchema(op: Operation): Record<string, unknown> {
-  return {
-    type: 'object' as const,
-    properties: Object.fromEntries(
-      Object.entries(op.params).map(([k, v]) => [k, paramDefToSchema(v)]),
-    ),
-    required: Object.entries(op.params).filter(([, v]) => v.required).map(([k]) => k),
-  };
+  return operationParamsToInputSchema(op);
 }
 
 /**

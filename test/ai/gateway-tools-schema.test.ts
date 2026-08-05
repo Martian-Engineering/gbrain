@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { generateText, jsonSchema } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { toAISDKTools, toModelMessages, type ChatMessage } from '../../src/core/ai/gateway.ts';
+import { operationsByName } from '../../src/core/operations.ts';
+import { __testing as brainToolTesting } from '../../src/core/minions/tools/brain-allowlist.ts';
 
 // v0.42 AI SDK v6 fix — the regression guard that the original bug evaded.
 // Every gateway/toolLoop test stubs the chat transport, which short-circuits
@@ -55,6 +57,32 @@ describe('gateway tool schema + message shape (real AI SDK v6)', () => {
     // model actually received — proving ModelMessage conversion accepted it.
     const prompt = model.doGenerateCalls[0]!.prompt as any[];
     expect(prompt.some((m) => m.role === 'tool')).toBe(true);
+  });
+
+  it('passes the subagent put_page baseline contract through the real AI SDK', async () => {
+    const model = mockModel();
+    const inputSchema = brainToolTesting.namespacedPutPageSchema(
+      operationsByName.put_page,
+      42,
+      ['people/'],
+    );
+    const tools = toAISDKTools([{
+      name: 'brain_put_page',
+      description: operationsByName.put_page.description,
+      inputSchema,
+    }]);
+
+    await generateText({
+      model: model as any,
+      tools: tools as any,
+      messages: [{ role: 'user', content: 'Create people/alice-example.' }],
+    });
+
+    const providerTool = (model.doGenerateCalls[0]!.tools as any[])
+      .find(tool => tool.name === 'brain_put_page');
+    expect(providerTool.inputSchema.properties.expected_content_hash.type)
+      .toEqual(['string', 'null']);
+    expect(providerTool.inputSchema.required).toContain('expected_content_hash');
   });
 
   it('REGRESSION: the bare { jsonSchema } object (pre-fix shape) is rejected by v6', async () => {

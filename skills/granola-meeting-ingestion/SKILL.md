@@ -232,8 +232,9 @@ the deterministic additions-only rebase rules below. If any page cannot
 proceed, return `refresh_required` without writing any page from this attempt.
 For each page entry in order, write the supplied title and full body exactly with
 `put_page`. For an update, pass its `expectedContentHash` as
-`expected_content_hash`; creates omit that parameter. Then read the page back
-before marking it applied. Do not begin
+`expected_content_hash`; for a create, pass `expected_content_hash: null` so
+the write fails rather than overwriting a page that appeared after review.
+Then read the page back before marking it applied. Do not begin
 timeline or link mutations until every proposed page is applied.
 
 If an update returns `stale_page`, read the current page and compare exactly

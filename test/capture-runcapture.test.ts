@@ -22,8 +22,82 @@
 import { describe, test, expect } from 'bun:test';
 import { __testing as captureTesting } from '../src/commands/capture.ts';
 import { computeContentHash } from '../src/core/ingestion/types.ts';
+import { RemoteMcpError } from '../src/core/mcp-client.ts';
 
-const { detectBinaryNullByte, normalizeForHash, maybeRewriteSourceFkError } = captureTesting;
+const {
+  detectBinaryNullByte,
+  normalizeForHash,
+  maybeRewriteSourceFkError,
+  remoteCaptureBaseline,
+} = captureTesting;
+
+const thinConfig = {
+  engine: 'postgres' as const,
+  remote_mcp: {
+    issuer_url: 'https://brain.example.test',
+    mcp_url: 'https://brain.example.test/mcp',
+    oauth_client_id: 'capture-test',
+    oauth_client_secret: 'secret',
+  },
+};
+
+function toolResult(value: unknown): unknown {
+  return { content: [{ type: 'text', text: JSON.stringify(value) }] };
+}
+
+describe('thin-client conditional capture baseline', () => {
+  test('uses the current page hash for an update', async () => {
+    const hash = 'a'.repeat(64);
+    const calls: Array<{ toolName: string; args: Record<string, unknown> }> = [];
+    const caller = async (
+      _config: unknown,
+      toolName: string,
+      args: Record<string, unknown> = {},
+    ) => {
+      calls.push({ toolName, args });
+      return toolName === 'get_brain_identity'
+        ? toolResult({ write_source_id: 'client-source' })
+        : toolResult({ content_hash: hash });
+    };
+
+    expect(await remoteCaptureBaseline(thinConfig, 'inbox/existing', caller)).toBe(hash);
+    expect(calls).toEqual([
+      { toolName: 'get_brain_identity', args: {} },
+      {
+        toolName: 'get_page',
+        args: { slug: 'inbox/existing', source_id: 'client-source' },
+      },
+    ]);
+  });
+
+  test('uses null only when get_page reports page_not_found', async () => {
+    const caller = async (_config: unknown, toolName: string) => {
+      if (toolName === 'get_brain_identity') {
+        return toolResult({ write_source_id: 'client-source' });
+      }
+      throw new RemoteMcpError('tool_error', 'missing', { code: 'page_not_found' });
+    };
+
+    expect(await remoteCaptureBaseline(thinConfig, 'inbox/new', caller)).toBeNull();
+  });
+
+  test('uses a create-only baseline when a write-only client cannot read', async () => {
+    const caller = async () => {
+      throw new RemoteMcpError('tool_error', 'read scope required', { code: 'missing_scope' });
+    };
+
+    expect(await remoteCaptureBaseline(thinConfig, 'inbox/new', caller)).toBeNull();
+  });
+
+  test('does not convert other read failures into create permission', async () => {
+    const caller = async () => {
+      throw new RemoteMcpError('tool_error', 'forbidden', { code: 'permission_denied' });
+    };
+
+    await expect(remoteCaptureBaseline(thinConfig, 'inbox/unknown', caller))
+      .rejects.toMatchObject({ detail: { code: 'permission_denied' } });
+  });
+});
 
 describe('CV10 — binary file guard (detectBinaryNullByte)', () => {
   test('returns -1 on plain ASCII', () => {

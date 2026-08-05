@@ -33,7 +33,7 @@
 import { readFileSync } from 'node:fs';
 import matter from 'gray-matter';
 import type { BrainEngine } from '../core/engine.ts';
-import { loadConfig, isThinClient } from '../core/config.ts';
+import { loadConfig, isThinClient, type GBrainConfig } from '../core/config.ts';
 import { callRemoteTool, unpackToolResult, RemoteMcpError } from '../core/mcp-client.ts';
 import { computeContentHash } from '../core/ingestion/types.ts';
 import { operations } from '../core/operations.ts';
@@ -379,6 +379,47 @@ function printReceipt(result: CaptureResult, quiet: boolean, json: boolean): voi
   console.log(`  captured_at:   ${result.captured_at}`);
 }
 
+/** Read the remote revision, falling back to an atomic create for write-only clients. */
+async function remoteCaptureBaseline(
+  config: GBrainConfig,
+  slug: string,
+  caller = callRemoteTool,
+): Promise<string | null> {
+  try {
+    const identityRaw = await caller(
+      config,
+      'get_brain_identity',
+      {},
+      { timeoutMs: 30_000 },
+    );
+    const identity = unpackToolResult<{ write_source_id?: unknown }>(identityRaw);
+    if (typeof identity.write_source_id !== 'string' || identity.write_source_id.length === 0) {
+      throw new RemoteMcpError('parse', 'Remote identity returned an invalid write_source_id');
+    }
+    const raw = await caller(
+      config,
+      'get_page',
+      { slug, source_id: identity.write_source_id },
+      { timeoutMs: 30_000 },
+    );
+    const page = unpackToolResult<{ content_hash?: unknown }>(raw);
+    if (typeof page.content_hash !== 'string' || !/^[a-f0-9]{64}$/.test(page.content_hash)) {
+      throw new RemoteMcpError('parse', 'Remote get_page returned an invalid content_hash');
+    }
+    return page.content_hash;
+  } catch (error) {
+    if (error instanceof RemoteMcpError && error.reason === 'tool_error') {
+      // A write-only client cannot inspect an existing page, but it can still
+      // attempt a safe create. put_page will reject that attempt when the slug
+      // already exists, so this fallback never becomes an unconditional write.
+      if (error.detail?.code === 'page_not_found' || error.detail?.code === 'missing_scope') {
+        return null;
+      }
+    }
+    throw error;
+  }
+}
+
 export async function runCapture(engine: BrainEngine | null, args: string[]): Promise<void> {
   const parsed = parseArgs(args);
   if ('help' in parsed) {
@@ -497,10 +538,11 @@ export async function runCapture(engine: BrainEngine | null, args: string[]): Pr
   if (isThinClient(cfg)) {
     let raw: unknown;
     try {
+      const expectedContentHash = await remoteCaptureBaseline(cfg!, slug);
       raw = await callRemoteTool(
         cfg!,
         'put_page',
-        { slug, content: fullContent },
+        { slug, content: fullContent, expected_content_hash: expectedContentHash },
         { timeoutMs: 30_000 },
       );
     } catch (e) {
@@ -639,4 +681,5 @@ export const __testing = {
   detectBinaryNullByte,
   normalizeForHash,
   maybeRewriteSourceFkError,
+  remoteCaptureBaseline,
 };

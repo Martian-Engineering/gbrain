@@ -247,7 +247,7 @@ export async function importFromContent(
     noEmbed?: boolean;
     sourceId?: string;
     /** Opaque page hash that must still be current when the transaction writes. */
-    expectedContentHash?: string;
+    expectedContentHash?: string | null;
     /** Server-owned attribution forwarded atomically with the page mutation. */
     writeContext?: PageWriteContext;
     /**
@@ -593,7 +593,10 @@ export async function importFromContent(
 
   const existing = await engine.getPage(slug, sourceId ? { sourceId } : undefined);
   const staleConditionalReplay = opts.expectedContentHash !== undefined
-    && existing?.content_hash !== opts.expectedContentHash;
+    && (existing?.content_hash ?? null) !== opts.expectedContentHash;
+  if (opts.expectedContentHash === null && existing) {
+    throw new StalePageError(null, existing.content_hash ?? null);
+  }
   if (existing?.content_hash === hash && !opts.forceRechunk) {
     // Timeline rows are excluded from the page hash, so same page content
     // cannot prove that a stale request's secondary mutation already landed.
@@ -799,7 +802,7 @@ export async function importFromContent(
   const txOpts = {
     ...(sourceId ? { sourceId } : {}),
     ...(opts.writeContext ? { writeContext: opts.writeContext } : {}),
-    ...(opts.expectedContentHash
+    ...(opts.expectedContentHash !== undefined
       ? { expectedContentHash: opts.expectedContentHash }
       : {}),
   };
