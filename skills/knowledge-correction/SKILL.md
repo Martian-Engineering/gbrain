@@ -92,6 +92,10 @@ skill files from the server filesystem.
 
 ## Filing and Page Creation
 
+> **Convention:** The self-contained rules below specialize
+> `skills/conventions/quality.md` and `skills/_brain-filing-rules.md` for
+> correction work.
+
 - File by primary subject: people in `people/`, companies in `companies/`,
   meetings in `meetings/`, projects in `projects/`, and reusable mental models
   in `concepts/`. Do not file subject knowledge under a source-format directory.

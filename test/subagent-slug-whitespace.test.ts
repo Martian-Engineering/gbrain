@@ -39,11 +39,11 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
   };
 }
 
-const SUBAGENT_CTX = {
+const SUBAGENT_CTX: Partial<OperationContext> = {
   viaSubagent: true,
   subagentId: 42,
   allowedSlugPrefixes: ['sources/'],
-} as const;
+};
 
 describe('subagent slug whitespace rejection (lore-04c)', () => {
   test('rejects a space inside the slug (observed Minion failure mode)', async () => {

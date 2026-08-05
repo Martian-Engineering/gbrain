@@ -621,7 +621,7 @@ export async function importFromContent(
   }
   if (staleConditionalReplay) {
     throw new StalePageError(
-      opts.expectedContentHash,
+      opts.expectedContentHash!,
       existing?.content_hash ?? null,
     );
   }
