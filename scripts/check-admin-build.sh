@@ -33,3 +33,14 @@ bun install --silent >/dev/null 2>&1 || bun install
 # Build runs `tsc -b && vite build`. Output to admin/dist/. Exit non-zero
 # on TS error, missing symbol, or Vite bundling error.
 bun run build
+
+# The server imports the generated asset manifest at startup. Keep this in the
+# same check as the Vite build so the hashed bundle and manifest cannot race in
+# the parallel verifier or drift into separate commits.
+cd ..
+bun run scripts/build-admin-embedded.ts >/dev/null
+if ! git diff --exit-code -- admin/dist src/admin-embedded.ts; then
+  echo "[check:admin-build] generated admin assets are not committed" >&2
+  echo "  Fix: bun run build:admin, then commit admin/dist and src/admin-embedded.ts." >&2
+  exit 1
+fi
