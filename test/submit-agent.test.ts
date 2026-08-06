@@ -630,4 +630,339 @@ describe('get_agent_job owner-scoped receipt', () => {
       get_agent_job.handler(makeCtx({ clientId: 'other' }), { id: row.id }),
     ).rejects.toThrow(/not owned/i);
   });
+
+  it('attributes unbound jobs to the runtime default source', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'put-default', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'concepts/example', content: '# Example' }),
+        JSON.stringify({
+          slug: 'concepts/example',
+          status: 'created_or_updated',
+          content_hash: 'b'.repeat(64),
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.source_id).toBe('default');
+    expect(owned.execution_evidence.operations).toEqual([
+      expect.objectContaining({ source_id: 'default' }),
+    ]);
+  });
+
+  it('returns bounded authoritative write evidence without raw content or errors', async () => {
+    await seedClient('lore', { bound_tools: ['get_page', 'put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, result, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, $2::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [
+        JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' }),
+        JSON.stringify({ result: JSON.stringify({ status: 'succeeded' }) }),
+      ],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES
+         ($1, 1, 'put-1', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, NULL, 0),
+         ($1, 2, 'get-1', 'brain_get_page', $4::jsonb, 'complete', $5::jsonb, NULL, 0),
+         ($1, 3, 'timeline-1', 'brain_add_timeline_entry', $6::jsonb, 'complete', $7::jsonb, NULL, 0),
+         ($1, 4, 'link-1', 'brain_add_link', $8::jsonb, 'complete', $9::jsonb, NULL, 0),
+         ($1, 5, 'put-2', 'brain_put_page', $10::jsonb, 'failed', NULL, 'private database detail', 0),
+         ($1, 6, 'unlink-1', 'brain_remove_link', $11::jsonb, 'complete', $12::jsonb, NULL, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          slug: 'concepts/example',
+          content: '# private proposed page',
+          expected_content_hash: 'a'.repeat(64),
+        }),
+        JSON.stringify({ slug: 'concepts/example', status: 'created_or_updated' }),
+        JSON.stringify({ slug: 'concepts/example' }),
+        JSON.stringify({
+          slug: 'concepts/example',
+          source_id: 'default',
+          content_hash: 'b'.repeat(64),
+          compiled_truth: '# private landed page',
+        }),
+        JSON.stringify({
+          slug: 'concepts/example',
+          date: '2026-08-06',
+          summary: 'A bounded event.',
+          ref: 'sources/example',
+        }),
+        JSON.stringify({ status: 'ok', inserted: true }),
+        JSON.stringify({
+          from: 'concepts/example',
+          to: 'sources/example',
+          link_type: 'supports',
+          context: 'private link context',
+        }),
+        JSON.stringify({ status: 'ok' }),
+        JSON.stringify({
+          slug: 'concepts/failed-example',
+          content: '# must not escape',
+          expected_content_hash: 'c'.repeat(64),
+        }),
+        JSON.stringify({
+          from: 'concepts/example',
+          to: 'sources/example',
+          link_type: 'supports',
+        }),
+        JSON.stringify({ status: 'ok' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence).toEqual({
+      schema_version: 1,
+      availability: 'complete',
+      truncated: false,
+      unsupported_mutation_count: 0,
+      allowed_recovery_actions: [
+        'finalize_verified_success',
+        'continue_approved_work',
+        'refresh_proposal',
+        'close_without_remaining_writes',
+      ],
+      source_id: 'default',
+      operations: [
+        {
+          sequence: 0,
+          operation: 'put_page',
+          execution_status: 'complete',
+          source_id: 'default',
+          slug: 'concepts/example',
+          expected_content_hash: 'a'.repeat(64),
+          content_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          applied_content_hash: 'b'.repeat(64),
+          outcome: 'changed',
+        },
+        {
+          sequence: 1,
+          operation: 'get_page',
+          execution_status: 'complete',
+          source_id: 'default',
+          slug: 'concepts/example',
+          observed_content_hash: 'b'.repeat(64),
+        },
+        {
+          sequence: 2,
+          operation: 'add_timeline_entry',
+          execution_status: 'complete',
+          source_id: 'default',
+          slug: 'concepts/example',
+          timeline_payload_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          outcome: 'inserted',
+        },
+        {
+          sequence: 3,
+          operation: 'add_link',
+          execution_status: 'complete',
+          source_id: 'default',
+          from: 'concepts/example',
+          to: 'sources/example',
+          link_type: 'supports',
+          link_payload_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          outcome: 'applied',
+        },
+        {
+          sequence: 4,
+          operation: 'put_page',
+          execution_status: 'failed',
+          source_id: 'default',
+          slug: 'concepts/failed-example',
+          expected_content_hash: 'c'.repeat(64),
+          content_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          applied_content_hash: null,
+          outcome: 'unknown',
+        },
+        {
+          sequence: 5,
+          operation: 'remove_link',
+          execution_status: 'complete',
+          source_id: 'default',
+          from: 'concepts/example',
+          to: 'sources/example',
+          link_type: 'supports',
+          link_payload_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+          outcome: 'applied',
+        },
+      ],
+    });
+    expect(
+      owned.execution_evidence.operations[3].link_payload_sha256,
+    ).not.toBe(
+      owned.execution_evidence.operations[5].link_payload_sha256,
+    );
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain('private');
+  });
+
+  it('does not attribute a skipped duplicate hash to the requested slug', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'put-duplicate', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          slug: 'concepts/requested',
+          content: '# Requested',
+          expected_content_hash: null,
+        }),
+        JSON.stringify({
+          slug: 'concepts/existing-duplicate',
+          status: 'skipped',
+          content_hash: 'b'.repeat(64),
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.operations).toEqual([expect.objectContaining({
+      slug: 'concepts/requested',
+      applied_content_hash: null,
+      outcome: 'unknown',
+    })]);
+  });
+
+  it('does not use a same-slug read from another source as write-back proof', async () => {
+    await seedClient('lore', { bound_tools: ['put_page', 'get_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES
+         ($1, 1, 'put-default', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0),
+         ($1, 2, 'get-foreign', 'brain_get_page', $4::jsonb, 'complete', $5::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'concepts/example', content: '# Example' }),
+        JSON.stringify({ slug: 'concepts/example', status: 'created_or_updated' }),
+        JSON.stringify({ slug: 'concepts/example' }),
+        JSON.stringify({
+          slug: 'concepts/example',
+          source_id: 'other',
+          content_hash: 'b'.repeat(64),
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.operations).toEqual([
+      expect.objectContaining({
+        operation: 'put_page',
+        source_id: 'default',
+        applied_content_hash: null,
+      }),
+      expect.objectContaining({
+        operation: 'get_page',
+        source_id: 'other',
+        observed_content_hash: 'b'.repeat(64),
+      }),
+    ]);
+  });
+
+  it('keeps evidence incomplete while the parent job can still execute tools', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'put-active', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'concepts/example', content: '# Example' }),
+        JSON.stringify({ status: 'created_or_updated' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.availability).toBe('incomplete');
+    expect(owned.execution_evidence.allowed_recovery_actions).toEqual([]);
+  });
+
+  it('keeps evidence incomplete when an unsupported mutating tool ran', async () => {
+    await seedClient('lore', { bound_tools: ['put_page', 'delete_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'delete-unsupported', 'brain_delete_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'concepts/private-deletion' }),
+        JSON.stringify({ status: 'ok' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence).toMatchObject({
+      availability: 'incomplete',
+      unsupported_mutation_count: 1,
+      allowed_recovery_actions: [
+        'refresh_proposal',
+        'close_without_remaining_writes',
+      ],
+    });
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain('private-deletion');
+  });
 });
