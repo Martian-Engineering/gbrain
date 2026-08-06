@@ -68,8 +68,11 @@ export async function readAgentJobExecutionEvidence(
     mutatingToolNames.has(row.tool_name) && !isTrackedTool(row.tool_name)
   ).length;
   const pending = boundedRows.some((row) => row.status === 'pending');
+  const incompleteMutation = operations.some((operation) =>
+    completedMutationLacksProof(operation)
+  );
   const terminal = ['completed', 'failed', 'dead', 'cancelled'].includes(jobStatus);
-  const availability = truncated || pending || unsupportedMutationCount > 0
+  const availability = truncated || pending || incompleteMutation || unsupportedMutationCount > 0
     ? 'incomplete'
     : operations.length === 0
       ? 'unavailable'
@@ -91,6 +94,25 @@ export async function readAgentJobExecutionEvidence(
     source_id: sourceId,
     operations,
   };
+}
+
+// A completed mutation is authoritative only when its durable row proves both
+// the requested identity and the server-observed outcome.
+function completedMutationLacksProof(operation: Record<string, unknown>): boolean {
+  if (operation.execution_status !== 'complete') return false;
+  if (operation.operation === 'put_page') {
+    return typeof operation.applied_content_hash !== 'string' ||
+      operation.outcome === 'unknown';
+  }
+  if (operation.operation === 'add_timeline_entry') {
+    return typeof operation.timeline_payload_sha256 !== 'string' ||
+      operation.outcome === 'unknown';
+  }
+  if (operation.operation === 'add_link' || operation.operation === 'remove_link') {
+    return typeof operation.link_payload_sha256 !== 'string' ||
+      operation.outcome !== 'applied';
+  }
+  return false;
 }
 
 // Older durable put_page outputs predate the returned content hash. A later
@@ -204,7 +226,7 @@ function evidenceForRow(
     ...base,
     from: stringValue(input.from),
     to: stringValue(input.to),
-    link_type: stringValue(input.link_type),
+    link_type: canonicalLinkType(input.link_type, row.tool_name),
     link_payload_sha256: sha256(canonicalLinkPayload(input, row.tool_name)),
     outcome: row.status === 'complete' && output.status === 'ok'
       ? 'applied'
@@ -285,17 +307,23 @@ function canonicalLinkPayload(
   input: Record<string, unknown>,
   toolName: string,
 ): string | null {
+  const from = stringValue(input.from);
+  const to = stringValue(input.to);
+  if (from === null || to === null) return null;
   const values = [
-    input.from,
-    input.to,
-    input.link_type,
+    from,
+    to,
+    canonicalLinkType(input.link_type, toolName),
     optionalString(input.context),
     optionalString(input.link_source) ??
       (toolName === 'brain_add_link' ? 'manual' : null),
   ];
-  return values.slice(0, 3).every((value) => typeof value === 'string')
-    ? JSON.stringify(values)
-    : null;
+  return JSON.stringify(values);
+}
+
+function canonicalLinkType(value: unknown, toolName: string): string | null {
+  if (typeof value === 'string') return value;
+  return toolName === 'brain_add_link' ? '' : null;
 }
 
 function optionalString(value: unknown): string | null {

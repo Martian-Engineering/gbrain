@@ -857,6 +857,50 @@ describe('get_agent_job owner-scoped receipt', () => {
     })]);
   });
 
+  it('fingerprints omitted link types according to each mutation contract', async () => {
+    await seedClient('lore', { bound_tools: ['add_link', 'remove_link'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES
+         ($1, 1, 'link-default', 'brain_add_link', $2::jsonb, 'complete', $3::jsonb, 0),
+         ($1, 2, 'unlink-wildcard', 'brain_remove_link', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ from: 'concepts/example', to: 'sources/example' }),
+        JSON.stringify({ status: 'ok' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.availability).toBe('complete');
+    expect(owned.execution_evidence.operations).toEqual([
+      expect.objectContaining({
+        operation: 'add_link',
+        link_type: '',
+        link_payload_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+      expect.objectContaining({
+        operation: 'remove_link',
+        link_type: null,
+        link_payload_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
+    expect(owned.execution_evidence.operations[0].link_payload_sha256).not.toBe(
+      owned.execution_evidence.operations[1].link_payload_sha256,
+    );
+  });
+
   it('does not use a same-slug read from another source as write-back proof', async () => {
     await seedClient('lore', { bound_tools: ['put_page', 'get_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
@@ -901,6 +945,10 @@ describe('get_agent_job owner-scoped receipt', () => {
         observed_content_hash: 'b'.repeat(64),
       }),
     ]);
+    expect(owned.execution_evidence.availability).toBe('incomplete');
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'finalize_verified_success',
+    );
   });
 
   it('keeps evidence incomplete while the parent job can still execute tools', async () => {
