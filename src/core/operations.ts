@@ -1399,6 +1399,7 @@ const put_page: Operation = {
         return {
           slug,
           status: 'skipped',
+          content_hash: existingIncludingDeleted?.content_hash ?? null,
           suppression_backstop: {
             action: 'skipped_page_write',
             slug,
@@ -1699,6 +1700,7 @@ const put_page: Operation = {
       status: result.status === 'imported' || (result.timeline_import && result.status === 'skipped')
         ? 'created_or_updated'
         : result.status,
+      content_hash: composedPage?.content_hash ?? null,
       chunks: result.chunks,
       ...(autoLinks ? { auto_links: autoLinks } : {}),
       ...(autoTimeline ? { auto_timeline: autoTimeline } : {}),
@@ -5621,11 +5623,29 @@ const get_agent_job: Operation = {
         receipt = null;
       }
     }
+    const { readAgentJobExecutionEvidence } = await import(
+      './minions/agent-job-evidence.ts'
+    );
+    const sourceId = typeof job.data.source_id === 'string'
+      ? job.data.source_id
+      : 'default';
+    const executionEvidence = await readAgentJobExecutionEvidence(
+      ctx.engine,
+      job.id,
+      sourceId,
+      job.status,
+      new Set(
+        operations
+          .filter((operation) => operation.mutating)
+          .map((operation) => `brain_${operation.name}`),
+      ),
+    );
     return {
       id: job.id,
       status: job.status,
       progress: job.progress,
       receipt,
+      execution_evidence: executionEvidence,
       result_text: typeof raw === 'string' ? raw : null,
       error: job.error_text,
       created_at: job.created_at,
