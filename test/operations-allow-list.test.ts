@@ -109,6 +109,7 @@ describe('put_page — trusted-workspace allow-list', () => {
     await expect(put_page.handler(ctx, {
       slug: 'wiki/finance/secret',
       content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
     })).rejects.toMatchObject({
       code: 'permission_denied',
     });
@@ -123,8 +124,56 @@ describe('put_page — trusted-workspace allow-list', () => {
     await expect(put_page.handler(ctx, {
       slug: 'wiki/people/garry-tan',
       content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
     })).rejects.toMatchObject({
       code: 'permission_denied',
+    });
+  });
+
+  test('accepts only the exact capture slug while preserving derived-page families', async () => {
+    const exactCapture = 'sources/github/01kz95fjck9qm6ztfd5vhxr9pk';
+    const ctx = makeCtx({
+      dryRun: true,
+      allowedSlugPrefixes: [exactCapture, 'people/', 'projects/'],
+    });
+    await expect(put_page.handler(ctx, {
+      slug: exactCapture,
+      content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
+    })).resolves.toMatchObject({
+      dry_run: true,
+      slug: exactCapture,
+    });
+    await expect(put_page.handler(ctx, {
+      slug: 'projects/signalcore-discovery-agent',
+      content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
+    })).resolves.toMatchObject({
+      dry_run: true,
+      slug: 'projects/signalcore-discovery-agent',
+    });
+  });
+
+  test.each([
+    'sources/github/01kz95fjck9qm6z...',
+    'sources/github/01kz95fjck9qm6z tfd5vhxr9pk',
+    'sources/github/01kz95fjck9qm6ztfd5vhxr9p',
+    'sources/github/01kz95fjck9qm6ztfd5vhxr9px',
+    'sources/github/01kz95fjck9qm6ztfd5vhxr9pk-2',
+  ])('rejects malformed capture variant %s before writing', async (slug) => {
+    const ctx = makeCtx({
+      dryRun: true,
+      allowedSlugPrefixes: [
+        'sources/github/01kz95fjck9qm6ztfd5vhxr9pk',
+        'projects/',
+      ],
+    });
+    await expect(put_page.handler(ctx, {
+      slug,
+      content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
+    })).rejects.toMatchObject({
+      code: expect.stringMatching(/invalid_params|permission_denied/),
     });
   });
 });
@@ -140,6 +189,7 @@ describe('put_page — legacy namespace check (regression guard)', () => {
     await expect(put_page.handler(ctx, {
       slug: 'wiki/personal/reflections/2026-04-25-foo',
       content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
     })).rejects.toMatchObject({
       code: 'permission_denied',
     });
@@ -150,6 +200,7 @@ describe('put_page — legacy namespace check (regression guard)', () => {
     await expect(put_page.handler(ctx, {
       slug: 'wiki/personal/reflections/2026-04-25-foo',
       content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
     })).rejects.toMatchObject({
       code: 'permission_denied',
     });
@@ -160,6 +211,7 @@ describe('put_page — legacy namespace check (regression guard)', () => {
     await expect(put_page.handler(ctx, {
       slug: 'wiki/agents/42/foo',
       content: '---\ntitle: x\n---\nbody',
+      expected_content_hash: null,
     })).rejects.toMatchObject({
       code: 'permission_denied',
     });
