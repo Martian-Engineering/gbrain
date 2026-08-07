@@ -26,6 +26,8 @@ import { operationsByName } from '../src/core/operations.ts';
 
 const submit_agent = operationsByName['submit_agent'];
 const get_agent_job = operationsByName['get_agent_job'];
+const get_agent_job_execution_evidence =
+  operationsByName['get_agent_job_execution_evidence'];
 if (!submit_agent) {
   throw new Error('submit_agent op missing from operations registry — test fixture invalid');
 }
@@ -1120,5 +1122,127 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
       'retry_filing_from_current_state',
     );
+  });
+});
+
+describe('get_agent_job_execution_evidence admin fallback', () => {
+  it('is an admin-only operation with exact owner and source inputs', () => {
+    expect(get_agent_job_execution_evidence).toBeDefined();
+    if (!get_agent_job_execution_evidence) return;
+
+    expect(get_agent_job_execution_evidence.scope).toBe('admin');
+    expect(get_agent_job_execution_evidence.mutating).not.toBe(true);
+    expect(get_agent_job_execution_evidence.params).toMatchObject({
+      id: { type: 'number', required: true },
+      owner_client_id: { type: 'string', required: true },
+      source_id: { type: 'string', required: true },
+    });
+  });
+
+  it('rejects a remote caller without admin scope', async () => {
+    expect(get_agent_job_execution_evidence).toBeDefined();
+    if (!get_agent_job_execution_evidence) return;
+
+    await expect(get_agent_job_execution_evidence.handler(
+      makeCtx({ clientId: 'reader', scopes: ['read'] }),
+      { id: 1, owner_client_id: 'retired-owner', source_id: 'company' },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+  });
+
+  it('returns only bounded execution evidence after the owner client is retired', async () => {
+    expect(get_agent_job_execution_evidence).toBeDefined();
+    if (!get_agent_job_execution_evidence) return;
+
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, result, error_text, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, $2::jsonb, $3, 'default', 0, now())
+       RETURNING id`,
+      [
+        JSON.stringify({
+          __owner_client_id: 'retired-owner',
+          source_id: 'company',
+          prompt: 'private original prompt',
+        }),
+        JSON.stringify({ result: 'private model receipt' }),
+        'private parent error',
+      ],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES ($1, 1, 'put-retired', 'brain_put_page', $2::jsonb,
+               'complete', $3::jsonb, 'private tool error', 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          slug: 'projects/example',
+          content: '# private page body',
+          expected_content_hash: null,
+        }),
+        JSON.stringify({
+          slug: 'projects/example',
+          status: 'created_or_updated',
+          content_hash: 'b'.repeat(64),
+        }),
+      ],
+    );
+
+    const result = await get_agent_job_execution_evidence.handler(
+      makeCtx({ clientId: 'admin', scopes: ['admin'] }),
+      {
+        id: row.id,
+        owner_client_id: 'retired-owner',
+        source_id: 'company',
+      },
+    ) as Record<string, unknown>;
+
+    expect(result).toEqual({
+      id: row.id,
+      status: 'completed',
+      execution_evidence: expect.objectContaining({
+        schema_version: 1,
+        source_id: 'company',
+        operations: [expect.objectContaining({
+          operation: 'put_page',
+          slug: 'projects/example',
+          content_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        })],
+      }),
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('private original prompt');
+    expect(serialized).not.toContain('private model receipt');
+    expect(serialized).not.toContain('private page body');
+    expect(serialized).not.toContain('private tool error');
+    expect(serialized).not.toContain('private parent error');
+  });
+
+  it('fails closed when the expected owner or source does not match the job', async () => {
+    expect(get_agent_job_execution_evidence).toBeDefined();
+    if (!get_agent_job_execution_evidence) return;
+
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'dead', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'retired-owner',
+        source_id: 'company',
+      })],
+    );
+    const ctx = makeCtx({ clientId: 'admin', scopes: ['admin'] });
+
+    for (const params of [{
+      id: row.id,
+      owner_client_id: 'different-owner',
+      source_id: 'company',
+    }, {
+      id: row.id,
+      owner_client_id: 'retired-owner',
+      source_id: 'other-company',
+    }]) {
+      await expect(get_agent_job_execution_evidence.handler(ctx, params))
+        .rejects.toMatchObject({ code: 'permission_denied' });
+    }
   });
 });
