@@ -5634,11 +5634,7 @@ const get_agent_job: Operation = {
       job.id,
       sourceId,
       job.status,
-      new Set(
-        operations
-          .filter((operation) => operation.mutating)
-          .map((operation) => `brain_${operation.name}`),
-      ),
+      agentMutatingToolNames(),
     );
     return {
       id: job.id,
@@ -5653,6 +5649,96 @@ const get_agent_job: Operation = {
     };
   },
 };
+
+const get_agent_job_execution_evidence: Operation = {
+  name: 'get_agent_job_execution_evidence',
+  description:
+    'Read privacy-bounded execution evidence for one exact agent job owner and source. ' +
+    'This admin fallback remains usable after the owner OAuth client is retired.',
+  params: {
+    id: {
+      type: 'number',
+      required: true,
+      description: 'Exact agent job ID',
+      trace: { kind: 'job' },
+    },
+    owner_client_id: {
+      type: 'string',
+      required: true,
+      description: 'Exact OAuth client that submitted the job',
+      trace: { kind: 'client' },
+    },
+    source_id: {
+      type: 'string',
+      required: true,
+      description: 'Exact source bound into the submitted job',
+      trace: { kind: 'source' },
+    },
+  },
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false && !hasScope(ctx.auth?.scopes ?? [], 'admin')) {
+      throw new OperationError(
+        'permission_denied',
+        'get_agent_job_execution_evidence requires an authenticated caller with the `admin` scope.',
+      );
+    }
+    const ownerClientId = p.owner_client_id;
+    const expectedSourceId = p.source_id;
+    const jobId = p.id;
+    if (
+      !Number.isSafeInteger(jobId) || Number(jobId) < 1 ||
+      typeof ownerClientId !== 'string' || ownerClientId.length === 0 ||
+      typeof expectedSourceId !== 'string' || expectedSourceId.length === 0
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'Agent job owner and source must be non-empty strings.',
+      );
+    }
+
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const job = await new MinionQueue(ctx.engine).getJob(jobId as number);
+    const actualSourceId = job && typeof job.data.source_id === 'string'
+      ? job.data.source_id
+      : 'default';
+    if (
+      !job || job.name !== 'subagent' ||
+      job.data.__owner_client_id !== ownerClientId ||
+      actualSourceId !== expectedSourceId
+    ) {
+      throw new OperationError(
+        'permission_denied',
+        'Agent job does not match the requested owner and source.',
+      );
+    }
+
+    const { readAgentJobExecutionEvidence } = await import(
+      './minions/agent-job-evidence.ts'
+    );
+    return {
+      id: job.id,
+      status: job.status,
+      execution_evidence: await readAgentJobExecutionEvidence(
+        ctx.engine,
+        job.id,
+        actualSourceId,
+        job.status,
+        agentMutatingToolNames(),
+      ),
+    };
+  },
+};
+
+// Keep the unsupported-mutation detector aligned with the operation registry
+// used to construct every subagent tool surface.
+function agentMutatingToolNames(): ReadonlySet<string> {
+  return new Set(
+    operations
+      .filter((operation) => operation.mutating)
+      .map((operation) => `brain_${operation.name}`),
+  );
+}
 
 const get_job: Operation = {
   name: 'get_job',
@@ -8474,7 +8560,7 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent, get_agent_job,
+  submit_agent, get_agent_job, get_agent_job_execution_evidence,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
