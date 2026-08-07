@@ -209,7 +209,7 @@ function evidenceForRow(
   if (row.tool_name === 'brain_get_page') {
     return {
       ...base,
-      source_id: stringValue(output.source_id),
+      source_id: row.status === 'failed' ? sourceId : stringValue(output.source_id),
       slug: stringValue(input.slug),
       observed_content_hash: hashValue(output.content_hash),
     };

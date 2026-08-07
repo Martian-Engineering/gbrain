@@ -818,6 +818,40 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(JSON.stringify(owned.execution_evidence)).not.toContain('private');
   });
 
+  it('attributes failed reads to the job-bound source', async () => {
+    await seedClient('lore', { bound_tools: ['get_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'private' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES ($1, 1, 'get-missing', 'brain_get_page', $2::jsonb, 'failed', NULL,
+               'private database detail', 0)`,
+      [row.id, JSON.stringify({ slug: 'concepts/missing' })],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.operations).toEqual([
+      expect.objectContaining({
+        operation: 'get_page',
+        execution_status: 'failed',
+        source_id: 'private',
+        slug: 'concepts/missing',
+      }),
+    ]);
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain(
+      'private database detail',
+    );
+  });
+
   it('does not attribute a skipped duplicate hash to the requested slug', async () => {
     await seedClient('lore', { bound_tools: ['put_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
