@@ -137,6 +137,12 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     it('declares an explicit reasoning_effort param', () => {
       expect(submit_agent.params.reasoning_effort).toBeDefined();
     });
+    it('publishes the bounded per-job output budget', () => {
+      expect(submit_agent.params.max_output_tokens).toMatchObject({
+        type: 'number',
+        description: expect.stringContaining('1-32768'),
+      });
+    });
     it('publishes non-corpus-mutating staged proposal operations', () => {
       expect(submit_agent.params.proposal_artifact_id).toBeDefined();
       expect(submit_agent.params.proposal_capture_page_slug).toBeDefined();
@@ -591,6 +597,70 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       })).rejects.toThrow(/does not support reasoning_effort/i);
     });
 
+    it.each([0, -1, 1.5, 32_769, Number.NaN, Number.POSITIVE_INFINITY, null, '32768'])(
+      'rejects invalid max_output_tokens=%p before enqueue',
+      async (maxOutputTokens) => {
+        await seedClient('cursor', {
+          bound_tools: ['search'],
+          bound_source_id: 'default',
+          bound_slug_prefixes: ['wiki/'],
+        });
+        const ctx = makeCtx({ clientId: 'cursor' });
+
+        await expect(callSubmitAgent(ctx, {
+          prompt: 'go',
+          max_output_tokens: maxOutputTokens,
+        })).rejects.toMatchObject({
+          code: 'invalid_params',
+          message: expect.stringMatching(/max_output_tokens.*integer.*1.*32768/i),
+        });
+        const rows = await engine.executeRaw<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM minion_jobs
+            WHERE data->>'__owner_client_id' = 'cursor'`,
+        );
+        expect(rows[0]?.n).toBe(0);
+        expect(fs.readdirSync(tmpAuditDir)).toEqual([]);
+      },
+    );
+
+    it('uses the configured output budget when max_output_tokens is omitted', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      await engine.setConfig('agent.max_output_tokens', '5000');
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const result = await callSubmitAgent(ctx, { prompt: 'go' });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(5_000);
+    });
+
+    it('uses the explicit max_output_tokens for prompt admission and durable execution', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      await engine.setConfig('agent.max_output_tokens', '8192');
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-5.6-terra',
+        max_output_tokens: 32_768,
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(32_768);
+    });
+
     it('inserts a subagent job + writes audit row', async () => {
       await seedClient('cursor', {
         bound_tools: ['search', 'get_page'],
@@ -696,7 +766,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         bound_max_concurrent: 3,
       });
       await engine.setConfig('mcp.publish_skills', 'true');
-      await engine.setConfig('agent.max_output_tokens', '32768');
+      await engine.setConfig('agent.max_output_tokens', '8192');
       const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
 
@@ -704,6 +774,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         prompt: 'p'.repeat(128 * 1024),
         skill_name: 'github-project-ingestion',
         model: 'openai:gpt-5.6-terra',
+        max_output_tokens: 32_768,
         allowed_tools: tools,
         proposal_artifact_id: 'artifact-128k',
         proposal_capture_page_slug: 'sources/example',

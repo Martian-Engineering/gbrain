@@ -15,6 +15,7 @@ export interface SubagentInitialPromptBudgetArgs {
   prompt: string;
   userSystem?: string;
   model?: string;
+  maxOutputTokens?: number;
   allowedTools: string[];
   allowedSlugPrefixes: string[];
   sourceId?: string;
@@ -37,7 +38,7 @@ export async function resolveSubagentInitialPromptBudget(
     fallback: TIER_DEFAULTS.subagent,
   });
   const maxOutputTokens = resolveSubagentMaxOutputTokens(
-    undefined,
+    args.maxOutputTokens,
     await args.engine.getConfig('agent.max_output_tokens').catch(() => null),
   );
   const registry = buildBrainTools({

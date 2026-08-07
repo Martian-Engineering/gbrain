@@ -51,6 +51,10 @@ import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import { matchesSlugAllowList, slugFenceContains } from './slug-allow-list.ts';
 import { PROPOSAL_ADMISSION_SCOPE_MAX_CHARS } from './minions/agent-job-proposals.ts';
+import {
+  isValidSubagentMaxOutputTokens,
+  MAX_SUBAGENT_MAX_OUTPUT_TOKENS,
+} from './minions/subagent-limits.ts';
 export { matchesSlugAllowList } from './slug-allow-list.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
@@ -5315,6 +5319,10 @@ const submit_agent: Operation = {
     allowed_tools: { type: 'array', description: 'Subset of bound_tools the agent may invoke', items: { type: 'string' } },
     allowed_slug_prefixes: { type: 'array', description: 'Subset of bound_slug_prefixes for put_page writes', items: { type: 'string' } },
     max_turns: { type: 'number', description: 'Max LLM turns (default 20, hard cap 100)' },
+    max_output_tokens: {
+      type: 'number',
+      description: 'Per-turn output token budget (integer 1-32768; defaults to server configuration)',
+    },
     queue: { type: 'string', description: 'Queue name (default "default")' },
     idempotency_key: {
       type: 'string',
@@ -5489,6 +5497,17 @@ const submit_agent: Operation = {
         `submit_agent: model "${p.model}" does not support reasoning_effort "${p.reasoning_effort}".`,
       );
     }
+    const rawMaxOutputTokens = p.max_output_tokens;
+    let requestedMaxOutputTokens: number | undefined;
+    if (rawMaxOutputTokens !== undefined) {
+      if (!isValidSubagentMaxOutputTokens(rawMaxOutputTokens)) {
+        throw new OperationError(
+          'invalid_params',
+          `submit_agent: max_output_tokens must be an integer from 1 to ${MAX_SUBAGENT_MAX_OUTPUT_TOKENS}.`,
+        );
+      }
+      requestedMaxOutputTokens = rawMaxOutputTokens;
+    }
     if (boundSlugPrefixes !== null) {
       for (const sp of requestedSlugPrefixes) {
         if (!boundSlugPrefixes.some(bp => slugFenceContains(bp, sp))) {
@@ -5556,6 +5575,7 @@ const submit_agent: Operation = {
         prompt,
         userSystem: skillBody,
         model: typeof p.model === 'string' ? p.model : undefined,
+        maxOutputTokens: requestedMaxOutputTokens,
         allowedTools: requestedTools,
         allowedSlugPrefixes: requestedSlugPrefixes,
         sourceId: boundSource ?? undefined,
@@ -5597,6 +5617,7 @@ const submit_agent: Operation = {
         bound_max_concurrent: boundMaxConcurrent,
         model: typeof p.model === 'string' ? p.model : '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
+        max_output_tokens: requestedMaxOutputTokens ?? null,
         skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
         proposal_artifact_id: proposalArtifactId || null,
         proposal_capture_page_slug: proposalCapturePageSlug || null,
