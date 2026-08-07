@@ -110,6 +110,19 @@ describe('buildBrainTools', () => {
     }
   });
 
+  test('carries mutation semantics separately from crash-replay idempotence', () => {
+    const tools = buildBrainTools({ subagentId: 1, engine, config });
+    for (const tool of tools) {
+      const shortName = tool.name.replace(/^brain_/, '');
+      const operation = operations.find(candidate => candidate.name === shortName);
+      expect(tool.mutating).toBe(operation?.mutating === true);
+    }
+
+    const putPage = tools.find(tool => tool.name === 'brain_put_page');
+    expect(putPage?.idempotent).toBe(true);
+    expect(putPage?.mutating).toBe(true);
+  });
+
   test('tools carry the op description verbatim', () => {
     const tools = buildBrainTools({ subagentId: 1, engine, config });
     const getPage = tools.find(t => t.name === 'brain_get_page');

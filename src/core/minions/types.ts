@@ -559,6 +559,8 @@ export interface ToolDef {
   description: string;
   input_schema: Record<string, unknown>;
   idempotent: boolean;
+  /** Whether execution can change durable state; distinct from idempotence. */
+  mutating?: boolean;
   execute(input: unknown, ctx: ToolCtx): Promise<unknown>;
   /**
    * v0.41 Approach C: one-line hint surfaced verbatim in the subagent

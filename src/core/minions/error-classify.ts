@@ -29,7 +29,7 @@
  */
 
 export type ErrorCluster =
-  | 'prompt_too_long'      // Anthropic 400 "prompt is too long"
+  | 'prompt_too_long'      // Provider context-window exhaustion
   | 'tool_schema_mismatch' // model called tool with invalid arg shape
   | 'tool_crash'           // tool.execute threw an Error (real bug)
   | 'tool_unavailable'     // tool not in registry for this subagent
@@ -54,6 +54,15 @@ export const RECOVERABLE_CLUSTERS = new Set<ErrorCluster>([
   'malformed_json',
 ]);
 
+/** Match context-limit messages across native and OpenAI-compatible providers. */
+export function isContextLimitMessage(message: string): boolean {
+  return /\bprompt_too_long\b/i.test(message)
+    || /prompt is too long/i.test(message)
+    || /context\s+(?:window|length)\b.{0,100}\b(?:exceed|exceeded|limit|maximum|too\s+(?:large|long))/i.test(message)
+    || /\b(?:input|request|prompt)\b.{0,100}\b(?:exceed|exceeded|exceeds|over)\b.{0,100}\bcontext\s+(?:window|length)\b/i.test(message)
+    || /\bmaximum\s+context\s+(?:window|length)\b/i.test(message);
+}
+
 /**
  * Classify a `last_error` string into a stable bucket. NULL / empty
  * input returns 'unknown'. Conservative — defaults to 'unknown' rather
@@ -67,8 +76,8 @@ export function classifyJobError(lastError: string | null | undefined): ErrorClu
   // gbrain-internal errors first (most specific).
   if (/rate lease ".*" full/i.test(lastError)) return 'rate_lease_full';
 
-  // Anthropic 400 prompt too long.
-  if (/prompt is too long/i.test(lastError) || /context.*length/i.test(lastError)) {
+  // Provider-neutral context-window exhaustion.
+  if (isContextLimitMessage(lastError)) {
     return 'prompt_too_long';
   }
 

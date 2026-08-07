@@ -199,6 +199,7 @@ function buildReadOnlyToolRegistry(ctx: OperationContext): ToolRegistry {
     });
     handlers.set(toolName, {
       idempotent: true, // All read-only ops are idempotent by construction.
+      mutating: false,
       execute: async (input: unknown) => {
         return op.handler(ctx, (input as Record<string, unknown>) ?? {});
       },

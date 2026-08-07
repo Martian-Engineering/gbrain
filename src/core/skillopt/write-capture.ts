@@ -84,6 +84,7 @@ export function buildWriteCaptureRegistry(engine: BrainEngine): WriteCaptureRegi
     });
     baseHandlers.set(toolName, {
       idempotent: true,
+      mutating: false,
       execute: async (input: unknown) => op.handler(ctx, (input as Record<string, unknown>) ?? {}),
     });
   }
@@ -109,6 +110,7 @@ export function buildWriteCaptureRegistry(engine: BrainEngine): WriteCaptureRegi
   });
   handlers.set('brain_put_page', {
     idempotent: true,
+    mutating: true,
     execute: async (input: unknown) => {
       const i = (input as Record<string, unknown>) ?? {};
       const slug = String(i.slug ?? '');
@@ -138,6 +140,7 @@ export function buildWriteCaptureRegistry(engine: BrainEngine): WriteCaptureRegi
   });
   handlers.set('brain_submit_job', {
     idempotent: true,
+    mutating: true,
     execute: async (input: unknown) => {
       const i = (input as Record<string, unknown>) ?? {};
       const name = String(i.name ?? '');
@@ -166,6 +169,7 @@ export function buildWriteCaptureRegistry(engine: BrainEngine): WriteCaptureRegi
   });
   handlers.set('brain_file_upload', {
     idempotent: true,
+    mutating: true,
     execute: async (input: unknown) => {
       const i = (input as Record<string, unknown>) ?? {};
       const filePath = String(i.path ?? '');

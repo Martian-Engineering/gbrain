@@ -55,6 +55,8 @@ import { classifyCapabilities } from '../../ai/capabilities.ts';
 import { isReasoningEffort } from '../../ai/types.ts';
 import { supportsReasoningEffort } from '../../ai/model-resolver.ts';
 import { randomUUIDv7 } from 'bun';
+import { isContextLimitMessage } from '../error-classify.ts';
+import { ToolLoopContextProjectionError } from '../../ai/tool-loop-context.ts';
 
 // ── Defaults ────────────────────────────────────────────────
 
@@ -878,6 +880,8 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
   for (const t of toolDefs) {
     toolHandlers.set(t.name, {
       idempotent: t.idempotent === true,
+      // Unknown/custom ToolDefs stay fail-closed for context compaction.
+      mutating: t.mutating !== false,
       async execute(input: unknown, signal: AbortSignal): Promise<unknown> {
         return await t.execute(input, {
           engine,
@@ -979,7 +983,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
   };
 
   // Run the loop.
-  const result = await gatewayToolLoop({
+  const result = await runGatewayToolLoopWithoutUnsafeRetry({
     model,
     system: systemPrompt,
     initialMessages,
@@ -1109,6 +1113,19 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       cache_create: result.totalUsage.cache_creation_tokens,
     },
   };
+}
+
+/** Context-limit retries cannot safely replay a transcript after tool effects. */
+async function runGatewayToolLoopWithoutUnsafeRetry(
+  opts: Parameters<typeof gatewayToolLoop>[0],
+): ReturnType<typeof gatewayToolLoop> {
+  try {
+    return await gatewayToolLoop(opts);
+  } catch (error) {
+    if (!(error instanceof ToolLoopContextProjectionError) && !isPromptTooLongError(error)) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new UnrecoverableError(`prompt_too_long: ${message}`);
+  }
 }
 
 interface ReconcileArgs {
@@ -1551,16 +1568,11 @@ export class RateLeaseUnavailableError extends Error {
 }
 
 /**
- * Detect Anthropic SDK errors that indicate the input prompt exceeded the
- * model's context window. Two recognized shapes:
- *   - `Anthropic.APIError` with `.status === 400` and message containing
- *     "prompt is too long" (current SDK wording, observed in production
- *     as `prompt is too long: 1707509 tokens > 1000000 maximum`).
- *   - Any error whose message includes "prompt is too long" (defensive
- *     against SDK-wrap shape changes).
- *
- * Case-insensitive on the phrase. Also matches `request_too_large` and
- * `invalid_request_error` types when accompanied by the same message.
+ * Detect provider errors that indicate the input prompt exceeded the model's
+ * context window. The message matcher covers native and OpenAI-compatible
+ * wording; the status/type fallback handles SDK wrappers with missing text.
+ * This is unrecoverable at the job boundary because replaying the same
+ * transcript can repeat already-completed tool effects.
  *
  * Exported for unit testing.
  */
@@ -1571,7 +1583,7 @@ export function isPromptTooLongError(err: unknown): boolean {
   const inner = (err as { error?: { message?: unknown } })?.error?.message;
   const candidates = [msg, inner].filter((s): s is string => typeof s === 'string');
   for (const c of candidates) {
-    if (/prompt is too long/i.test(c)) return true;
+    if (isContextLimitMessage(c)) return true;
   }
   // Anthropic SDK wraps with .status; 400 + 'invalid_request_error' /
   // 'request_too_large' types both indicate the same class. Only treat

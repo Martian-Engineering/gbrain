@@ -24,7 +24,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import { makeSubagentHandler } from '../../src/core/minions/handlers/subagent.ts';
-import type { MinionJobContext, ToolDef, ToolCtx } from '../../src/core/minions/types.ts';
+import { UnrecoverableError, type MinionJobContext, type ToolDef, type ToolCtx } from '../../src/core/minions/types.ts';
 import {
   __setChatTransportForTests,
   configureGateway,
@@ -404,6 +404,54 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     const result = await handler(ctx);
     expect(result.result).toBe('gpt-5 says hi');
     expect(result.stop_reason).toBe('end_turn');
+  });
+
+  it('does not retry an OpenAI context overflow after a durable tool effect', async () => {
+    let turn = 0;
+    __setChatTransportForTests(async () => {
+      turn++;
+      if (turn === 1) {
+        return {
+          text: '',
+          blocks: [{
+            type: 'tool-call',
+            toolCallId: 'write-before-overflow',
+            toolName: 'put_page',
+            input: { slug: 'wiki/example', content: 'durable' },
+          }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 100, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'openai:gpt-5.6-luna',
+          providerId: 'openai',
+        } satisfies ChatResult;
+      }
+      throw new Error('Your input exceeds the context window of this model.');
+    });
+
+    const handler = buildHandler(makeStubTools([]));
+    const { jobId, ctx } = await makeFakeJob({
+      prompt: 'write the page, then continue',
+      model: 'openai:gpt-5.6-luna',
+      allowed_tools: ['put_page'],
+    });
+
+    let thrown: unknown;
+    try {
+      await handler(ctx);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(UnrecoverableError);
+    expect((thrown as Error).message).toContain('prompt_too_long');
+    expect(turn).toBe(2);
+
+    const toolRows = await engine.executeRaw<{ status: string; output: unknown }>(
+      `SELECT status, output FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(toolRows).toHaveLength(1);
+    expect(toolRows[0]!.status).toBe('complete');
+    expect(toolRows[0]!.output).toEqual({ saved: true });
   });
 
   it('write-ordering invariant: assistant message persisted BEFORE tool pending row', async () => {
