@@ -26,6 +26,9 @@ import { operationsByName } from '../src/core/operations.ts';
 
 const submit_agent = operationsByName['submit_agent'];
 const get_agent_job = operationsByName['get_agent_job'];
+const stage_ingestion_proposal_page = operationsByName['stage_ingestion_proposal_page'];
+const finalize_ingestion_proposal = operationsByName['finalize_ingestion_proposal'];
+const get_agent_job_proposal = operationsByName['get_agent_job_proposal'];
 const get_agent_job_execution_evidence =
   operationsByName['get_agent_job_execution_evidence'];
 if (!submit_agent) {
@@ -133,6 +136,15 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     });
     it('declares an explicit reasoning_effort param', () => {
       expect(submit_agent.params.reasoning_effort).toBeDefined();
+    });
+    it('publishes non-corpus-mutating staged proposal operations', () => {
+      expect(submit_agent.params.proposal_artifact_id).toBeDefined();
+      expect(submit_agent.params.proposal_admission_scope).toBeDefined();
+      expect(stage_ingestion_proposal_page?.scope).toBe('agent');
+      expect(stage_ingestion_proposal_page?.mutating).toBe(false);
+      expect(finalize_ingestion_proposal?.scope).toBe('agent');
+      expect(finalize_ingestion_proposal?.mutating).toBe(false);
+      expect(get_agent_job_proposal?.scope).toBe('agent');
     });
   });
 
@@ -362,6 +374,36 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
+    it('requires and persists the proposal artifact and admission-scope binding together', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_artifact_id: 'artifact-1',
+      })).rejects.toThrow(/must be supplied together/);
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_admission_scope: 'Include delivery notes.',
+      })).rejects.toThrow(/must be supplied together/);
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_artifact_id: 'artifact-1',
+        proposal_admission_scope: 'Include delivery notes.',
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row.data.proposal_artifact_id).toBe('artifact-1');
+      expect(row.data.proposal_admission_scope).toBe('Include delivery notes.');
+      expect(row.data.source_id).toBe('company');
+    });
+
     it('deduplicates a client idempotency key before enforcing concurrency', async () => {
       await seedClient('cursor', {
         bound_tools: ['search'],
@@ -1122,6 +1164,93 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
       'retry_filing_from_current_state',
     );
+  });
+});
+
+describe('staged proposal operation contract', () => {
+  it('stages only inside the bound job, finalizes compactly, and retrieves by exact owner and digest', async () => {
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'lore',
+        source_id: 'company',
+        proposal_artifact_id: 'artifact-1',
+        proposal_admission_scope: 'Include delivery notes.',
+      })],
+    );
+    const agentCtx = { ...makeCtx({ clientId: 'lore' }), viaSubagent: true, jobId: row.id };
+    const staged = await stage_ingestion_proposal_page!.handler(agentCtx, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include delivery notes.',
+      sequence: 1,
+      total_pages: 1,
+      page: {
+        slug: 'sources/example',
+        effect: 'create',
+        title: 'Example',
+        bodyMarkdown: '# Example',
+      },
+    }) as any;
+    const manifest = await finalize_ingestion_proposal!.handler(agentCtx, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include delivery notes.',
+      total_pages: 1,
+      page_digests: [{ sequence: 1, digest: staged.digest }],
+      summary: 'Ready for review.',
+      proposed_timeline_entries: [],
+      proposed_links: [],
+      unresolved: [],
+    }) as any;
+
+    expect(manifest).toEqual({
+      status: 'staged_proposal',
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include delivery notes.',
+      summary: 'Ready for review.',
+      pageDigests: [{ sequence: 1, slug: 'sources/example', digest: staged.digest }],
+      proposalDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    });
+
+    const retrieved = await get_agent_job_proposal!.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id, proposal_digest: manifest.proposalDigest },
+    ) as any;
+    expect(retrieved).toEqual({
+      id: row.id,
+      proposal_digest: manifest.proposalDigest,
+      page_digests: manifest.pageDigests,
+      plan: {
+        artifactId: 'artifact-1',
+        sourceId: 'company',
+        admissionScope: 'Include delivery notes.',
+        summary: 'Ready for review.',
+        proposedPages: [{
+          slug: 'sources/example',
+          effect: 'create',
+          title: 'Example',
+          bodyMarkdown: '# Example',
+        }],
+        proposedTimelineEntries: [],
+        proposedLinks: [],
+        unresolved: [],
+      },
+    });
+    await expect(get_agent_job_proposal!.handler(
+      makeCtx({ clientId: 'other' }),
+      { id: row.id, proposal_digest: manifest.proposalDigest },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+    await expect(stage_ingestion_proposal_page!.handler(makeCtx({ clientId: 'lore' }), {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include delivery notes.',
+      sequence: 1, total_pages: 1, page: {},
+    })).rejects.toMatchObject({ code: 'permission_denied' });
   });
 });
 

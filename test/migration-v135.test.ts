@@ -19,7 +19,7 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.disconnect();
   });
 
-  test('registers refs, per-page event dedup, and search repair as the latest migration', () => {
+  test('registers refs, per-page event dedup, and search repair', () => {
     const migration = MIGRATIONS.find(entry => entry.version === 135);
     expect(migration).toMatchObject({
       name: 'timeline_entry_refs',
@@ -30,7 +30,7 @@ describe('migration v135 — timeline reference columns', () => {
     expect(migration?.sql).toContain('DROP INDEX IF EXISTS idx_timeline_event_dedup');
     expect(migration?.sql).toContain('page_id, event_page_id, date');
     expect(typeof migration?.handler).toBe('function');
-    expect(LATEST_VERSION).toBe(135);
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(135);
   });
 
   test('adds refs, widens event dedup, and preserves row-backed timeline search', async () => {
@@ -81,7 +81,7 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.setConfig('version', '134');
 
     const first = await runMigrations(engine);
-    expect(first).toEqual({ applied: 1, current: 135 });
+    expect(first).toEqual({ applied: 2, current: 136 });
     const columns = await engine.executeRaw<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable
          FROM information_schema.columns
@@ -120,6 +120,6 @@ describe('migration v135 — timeline reference columns', () => {
 
     await engine.setConfig('version', '134');
     const second = await runMigrations(engine);
-    expect(second).toEqual({ applied: 1, current: 135 });
+    expect(second).toEqual({ applied: 2, current: 136 });
   }, 30_000);
 });

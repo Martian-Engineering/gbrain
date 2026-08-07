@@ -57,6 +57,7 @@ import { supportsReasoningEffort } from '../../ai/model-resolver.ts';
 import { randomUUIDv7 } from 'bun';
 import { isContextLimitMessage } from '../error-classify.ts';
 import { ToolLoopContextProjectionError } from '../../ai/tool-loop-context.ts';
+import { assertProposalToolTurnPersistable } from '../agent-job-proposals.ts';
 
 // ── Defaults ────────────────────────────────────────────────
 
@@ -400,6 +401,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         };
       }
       if (pendingToolUses.length > 0) {
+        assertProposalToolTurnPersistable(pendingToolUses);
         const synthesizedResults: ContentBlock[] = [];
         for (const use of pendingToolUses) {
           const prior = priorToolByUseId.get(use.id);
@@ -653,6 +655,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       });
 
       const blocks = assistantMsg.content as ContentBlock[];
+
+      // Enforce proposal page count and byte limits before the assistant turn
+      // makes its raw tool inputs durable in subagent_messages.
+      assertProposalToolTurnPersistable(blocks);
 
       // 3. Persist the assistant message BEFORE tool dispatch so replay
       //    sees a consistent state.
@@ -1198,6 +1204,7 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
     const toolCalls = msg.blocks.filter(
       (b): b is Extract<ChatBlock, { type: 'tool-call' }> => b.type === 'tool-call',
     );
+    assertProposalToolTurnPersistable(toolCalls);
     if (toolCalls.length === 0) continue;
 
     // Skip if a following tool-result user turn exists AT ALL. A fully-answered

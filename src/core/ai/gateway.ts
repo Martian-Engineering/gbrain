@@ -57,6 +57,7 @@ import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.
 import { loadConfig } from '../config.ts';
 import { buildGatewayConfig } from './build-gateway-config.ts';
 import { compactToolLoopMessages, resolveToolLoopMessageBudget } from './tool-loop-context.ts';
+import { assertProposalToolTurnPersistable } from '../minions/agent-job-proposals.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
@@ -3429,6 +3430,10 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
       });
       throw err;
     }
+
+    // Proposal stage calls carry exact page bodies. Reject over-limit or
+    // multi-stage turns before onAssistantTurn persists the raw tool inputs.
+    assertProposalToolTurnPersistable(chatResult.blocks);
 
     totalUsage.input_tokens += chatResult.usage.input_tokens;
     totalUsage.output_tokens += chatResult.usage.output_tokens;

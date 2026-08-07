@@ -66,6 +66,10 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'get_ingest_log',
   'validate_links',
   'get_active_schema_pack',
+  // Exact ingestion proposals are staged in a job-owned evidence ledger.
+  // Neither operation mutates corpus pages, links, takes, or timeline state.
+  'stage_ingestion_proposal_page',
+  'finalize_ingestion_proposal',
   'put_page',
   // Scoped body-text edit (lore-1f3.3). Fenced exactly like put_page via
   // enforceSubagentSlugFence, and CAS-guarded by expected_content_hash so an
@@ -126,6 +130,8 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
   validate_links: 'Validate explicit references on one page after a repair. Read-only.',
   get_active_schema_pack: 'Read the active source schema-pack identity before a schema-sensitive repair.',
+  stage_ingestion_proposal_page: 'In ingestion propose mode, stage exactly one complete page proposal per agent turn before finalizing the compact manifest.',
+  finalize_ingestion_proposal: 'After every proposed page is staged, validate and freeze the ordered manifest before returning the staged_proposal receipt.',
   put_page: 'Write a markdown page to the gbrain DATABASE (NOT the local filesystem). Page becomes searchable + linkable. Slug must match the agent\'s allowed namespace.',
   replace_page_text: 'Replace an exact literal in one page\'s authored body. Use over put_page for targeted text edits; requires the page\'s current content_hash and exact match count from get_page. Slug must match the agent\'s allowed namespace.',
   suppress_claim: 'Record a user-refuted prose claim on an existing page without editing its prose. Slug must match the agent\'s allowed namespace.',

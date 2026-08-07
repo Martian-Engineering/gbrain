@@ -20,6 +20,8 @@ const expectedTools = [
   'resolve_slugs',
   'get_links',
   'get_backlinks',
+  'stage_ingestion_proposal_page',
+  'finalize_ingestion_proposal',
   'put_page',
   'add_link',
   'add_timeline_entry',
@@ -98,20 +100,24 @@ describe('granola-meeting-ingestion skill', () => {
   test('supports a zero-mutation scoped proposal with a bounded complete plan', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
     expect(skill).toContain('admissionScope: <required in propose and apply modes>');
-    expect(skill).toContain('In `propose` mode, do not call any mutating tool');
+    expect(skill).toContain('In `propose` mode, do not call any corpus-mutating tool');
     expect(skill).toMatch(/`put_page`,\s+`add_link`, or `add_timeline_entry`/);
     expect(skill).toContain('complete set of pages that `apply` will write');
     expect(skill).toContain('full intended `bodyMarkdown`, never a diff');
     expect(skill).toContain('262,144 UTF-8 bytes');
     expect(skill).toMatch(/[Rr]eturn `failed`\s+with an operational summary/);
-    expect(skill).toContain('Never truncate or split a proposal');
+    expect(skill).toMatch(/Never truncate or split a\s+proposal/);
     expect(skill).toMatch(/must not\s+name or describe the excluded material/);
     expect(skill).toMatch(/local Markdown artifact is the\s+complete verbatim record/);
-    expect(skill).toContain('"status": "scoped_proposal"');
+    expect(skill).toContain('"status": "staged_proposal"');
+    expect(skill).toContain('"pageDigests": [');
+    expect(skill).toContain('"proposalDigest": "64 lowercase hex characters"');
+    expect(skill).toContain('brain_stage_ingestion_proposal_page');
+    expect(skill).toContain('Stage only one page per turn');
+    expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('"effect": "create | update"');
-    expect(skill).toContain('"bodyMarkdown": "complete intended page body"');
-    expect(skill).toContain('"baseMarkdown": "exact reviewed page body for updates, null for creates"');
-    expect(skill).toContain('"expectedContentHash": "exact get_page content_hash for updates, null for creates"');
+    expect(skill).toContain('Create entries have');
+    expect(skill).toMatch(/Update entries add\s+exactly `baseMarkdown` and `expectedContentHash`/);
     expect(skill).toContain('Omit both fields for a create');
   });
 
@@ -135,7 +141,7 @@ describe('granola-meeting-ingestion skill', () => {
       /typed links only for\s+relationships that the planned Markdown does not express accurately/,
     );
     expect(skill).toMatch(
-      /receipt, including `proposedTimelineEntries` and\s+`proposedLinks`, must not exceed 262,144 UTF-8 bytes/,
+      /compact manifest over 262,144 UTF-8 bytes/,
     );
     expect(skill).toContain('"proposedTimelineEntries": [');
     expect(skill).toContain('"refLabel": "meeting capture"');
@@ -164,10 +170,36 @@ describe('granola-meeting-ingestion skill', () => {
   test('splits partial disqualification from classed needs-attention outcomes', () => {
     expect(skill).toContain('partial disqualification');
     expect(skill).toMatch(/[Dd]erive `admissionScope` only from the resolver/);
-    expect(skill).toContain('return `scoped_proposal` directly');
+    expect(skill).toContain('return `staged_proposal` directly');
     expect(skill).toMatch(/Do not mutate before returning that\s+proposal/);
     expect(skill).toContain('"reason_class": "resolver_ambiguity | operational"');
     expect(skill).toMatch(/Every `needs_attention`\s+receipt must include `reason_class`/);
+  });
+
+  test('verifies Lore artifact integrity without treating context projection as loss', () => {
+    expect(skill).toContain('artifactIntegrity: # required normal/propose; omitted apply');
+    expect(skill).toContain('complete: true');
+    expect(skill).toContain('manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }');
+    expect(skill).toMatch(/`artifactIntegrity\.complete` is not exactly `true`/);
+    expect(skill).toMatch(/Apply mode intentionally\s+omits `artifactIntegrity`/);
+    expect(skill).toMatch(/exactly 64 lowercase hexadecimal characters/);
+    expect(skill).toMatch(/authenticated OAuth caller deterministically\s+verified these values/);
+    expect(skill).toMatch(/treat\s+the well-formed envelope as authoritative/);
+    expect(skill).toMatch(/Do not attempt to recalculate,\s+estimate, or second-guess hashes or byte counts/);
+    expect(skill).not.toContain('Recompute each SHA-256');
+    expect(skill).toMatch(/Working-context projection or omission\s+markers[\s\S]*never treat them as proof\s+that the original artifact is incomplete/);
+  });
+
+  test('accepts only the bounded error-redacted prior-attempt projection', () => {
+    expect(skill).toContain('priorAttempt: # optional; omitted for a clean no-write propose attempt');
+    for (const field of [
+      'failureCode:', 'terminalFailureClass:', 'receiptStatus:', 'createdPages:',
+      'updatedPages:', 'verifiedPages:', 'pageResults:', 'slugAdjustments:',
+      'timelineResults:', 'linkResults:',
+    ]) expect(skill).toContain(field);
+    expect(skill).toMatch(/never contains a top-level summary, unresolved list, raw error, or a nested\s+result `error`/);
+    expect(skill).toMatch(/Durable GBrain state remains authoritative/);
+    expect(skill).toMatch(/never skip a\s+mutation based on the projection alone/);
   });
 
   test('applies only the frozen plan with resumable page and collision results', () => {

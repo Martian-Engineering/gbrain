@@ -81,6 +81,31 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('prompt_injection_suspected');
   });
 
+  test('uses Lore artifact integrity as the transport-completeness authority', () => {
+    expect(skill).toContain('artifactIntegrity:');
+    expect(skill).toContain('complete: true');
+    expect(skill).toContain('manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }');
+    expect(skill).toMatch(/`artifactIntegrity\.complete` flag is not exactly `true`/);
+    expect(skill).toMatch(/authenticated OAuth caller deterministically verified these\s+values/);
+    expect(skill).toMatch(/treat the well-formed\s+envelope as authoritative/);
+    expect(skill).toMatch(/Do not attempt to recalculate, estimate, or\s+second-guess hashes or byte counts/);
+    expect(skill).not.toContain('Recompute each SHA-256');
+    expect(skill).toMatch(/Working-context projection or omission\s+markers[\s\S]*never treat them as proof that the original artifact is incomplete/);
+    expect(skill).not.toContain('artifact is visibly incomplete');
+  });
+
+  test('accepts only the bounded error-redacted prior-attempt projection', () => {
+    expect(skill).toContain('priorAttempt: # optional; omitted when there is no prior write evidence');
+    for (const field of [
+      'failureCode:', 'terminalFailureClass:', 'receiptStatus:', 'createdPages:',
+      'updatedPages:', 'verifiedPages:', 'pageResults:', 'slugAdjustments:',
+      'timelineResults:', 'linkResults:',
+    ]) expect(skill).toContain(field);
+    expect(skill).toMatch(/never contains a top-level summary, unresolved list, raw error, or a nested\s+result `error`/);
+    expect(skill).toMatch(/Durable GBrain state remains authoritative/);
+    expect(skill).toMatch(/never skip a\s+mutation based on the projection alone/);
+  });
+
   test('consolidates only on exact stable identity', () => {
     expect(skill).toContain('Search and read before every create');
     expect(skill).toContain('Search for the exact Gmail thread ID');

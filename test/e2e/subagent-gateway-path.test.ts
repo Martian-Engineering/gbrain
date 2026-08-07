@@ -171,6 +171,90 @@ function buildHandler(toolRegistry: ToolDef[]) {
 describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gateway.toolLoop)', () => {
   afterAll(() => clearGateway());
 
+  it('rejects an oversized staged page before gateway assistant or tool persistence', async () => {
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [{
+        type: 'tool-call',
+        toolCallId: 'stage-too-large',
+        toolName: 'brain_stage_ingestion_proposal_page',
+        input: { page: { bodyMarkdown: 'x'.repeat(196_608) } },
+      }] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage',
+      input_schema: { type: 'object' },
+      idempotent: true,
+      mutating: false,
+      async execute() { return { ok: true }; },
+    };
+    const handler = buildHandler([tool]);
+    const { jobId, ctx } = await makeFakeJob({ prompt: 'stage', model: 'anthropic:claude-sonnet-4-6' });
+
+    await expect(handler(ctx)).rejects.toThrow(/maximum/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    const executions = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(executions).toHaveLength(0);
+  });
+
+  it('rejects two staged pages before gateway assistant or tool persistence', async () => {
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [
+        {
+          type: 'tool-call',
+          toolCallId: 'stage-1',
+          toolName: 'brain_stage_ingestion_proposal_page',
+          input: { page: 1 },
+        },
+        {
+          type: 'tool-call',
+          toolCallId: 'stage-2',
+          toolName: 'brain_stage_ingestion_proposal_page',
+          input: { page: 2 },
+        },
+      ] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage',
+      input_schema: { type: 'object' },
+      idempotent: true,
+      mutating: false,
+      async execute() { return { ok: true }; },
+    };
+    const handler = buildHandler([tool]);
+    const { jobId, ctx } = await makeFakeJob({ prompt: 'stage twice', model: 'anthropic:claude-sonnet-4-6' });
+
+    await expect(handler(ctx)).rejects.toThrow(/exactly one/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    const executions = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(executions).toHaveLength(0);
+  });
+
   it('happy path 1-turn: gateway returns text, handler returns SubagentResult', async () => {
     __setChatTransportForTests(async () => ({
       text: 'all done',

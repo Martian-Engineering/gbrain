@@ -5967,6 +5967,93 @@ export const MIGRATIONS: Migration[] = [
       await engine.executeRaw(`UPDATE pages SET id = id WHERE search_vector IS NOT NULL`);
     },
   },
+  {
+    version: 136,
+    name: 'agent_job_staged_proposals',
+    // Exact page bodies and optimistic baselines are staged into a job-owned
+    // ledger so bounded final receipts carry only a verified manifest.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS agent_job_proposal_fragments (
+        job_id BIGINT NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+        owner_client_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        admission_scope TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        total_pages INTEGER NOT NULL,
+        page JSONB NOT NULL,
+        page_digest TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (job_id, sequence),
+        CONSTRAINT chk_agent_job_proposal_fragment_sequence
+          CHECK (sequence >= 1 AND total_pages >= sequence),
+        CONSTRAINT chk_agent_job_proposal_fragment_digest
+          CHECK (page_digest ~ '^[a-f0-9]{64}$')
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_fragments_owner
+        ON agent_job_proposal_fragments (owner_client_id, job_id);
+      CREATE TABLE IF NOT EXISTS agent_job_proposals (
+        job_id BIGINT PRIMARY KEY REFERENCES minion_jobs(id) ON DELETE CASCADE,
+        owner_client_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        admission_scope TEXT NOT NULL,
+        total_pages INTEGER NOT NULL CHECK (total_pages >= 1),
+        page_digests JSONB NOT NULL,
+        plan JSONB NOT NULL,
+        proposal_digest TEXT NOT NULL,
+        manifest JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT chk_agent_job_proposal_digest
+          CHECK (proposal_digest ~ '^[a-f0-9]{64}$')
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_job_proposals_owner_digest
+        ON agent_job_proposals (owner_client_id, proposal_digest);
+      ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
+      ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
+    `,
+    sqlFor: {
+      pglite: `
+        CREATE TABLE IF NOT EXISTS agent_job_proposal_fragments (
+          job_id BIGINT NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+          owner_client_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          artifact_id TEXT NOT NULL,
+          admission_scope TEXT NOT NULL,
+          sequence INTEGER NOT NULL,
+          total_pages INTEGER NOT NULL,
+          page JSONB NOT NULL,
+          page_digest TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (job_id, sequence),
+          CONSTRAINT chk_agent_job_proposal_fragment_sequence
+            CHECK (sequence >= 1 AND total_pages >= sequence),
+          CONSTRAINT chk_agent_job_proposal_fragment_digest
+            CHECK (page_digest ~ '^[a-f0-9]{64}$')
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_fragments_owner
+          ON agent_job_proposal_fragments (owner_client_id, job_id);
+        CREATE TABLE IF NOT EXISTS agent_job_proposals (
+          job_id BIGINT PRIMARY KEY REFERENCES minion_jobs(id) ON DELETE CASCADE,
+          owner_client_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          artifact_id TEXT NOT NULL,
+          admission_scope TEXT NOT NULL,
+          total_pages INTEGER NOT NULL CHECK (total_pages >= 1),
+          page_digests JSONB NOT NULL,
+          plan JSONB NOT NULL,
+          proposal_digest TEXT NOT NULL,
+          manifest JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT chk_agent_job_proposal_digest
+            CHECK (proposal_digest ~ '^[a-f0-9]{64}$')
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_job_proposals_owner_digest
+          ON agent_job_proposals (owner_client_id, proposal_digest);
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

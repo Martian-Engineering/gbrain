@@ -5363,6 +5363,14 @@ const submit_agent: Operation = {
       type: 'string',
       description: 'Caller-stable key that returns the same agent job for retries by this OAuth client',
     },
+    proposal_artifact_id: {
+      type: 'string',
+      description: 'Exact ingestion artifact id bound to staged proposal tools for this job',
+    },
+    proposal_admission_scope: {
+      type: 'string',
+      description: 'Exact resolver admission scope bound to staged proposal tools for this job',
+    },
   },
   mutating: true,
   scope: 'agent' as any,
@@ -5446,6 +5454,24 @@ const submit_agent: Operation = {
         'submit_agent: reasoning_effort must be one of none, minimal, low, medium, high, xhigh.',
       );
     }
+    const proposalArtifactId = typeof p.proposal_artifact_id === 'string'
+      ? p.proposal_artifact_id.trim()
+      : '';
+    const proposalAdmissionScope = typeof p.proposal_admission_scope === 'string'
+      ? p.proposal_admission_scope.trim()
+      : '';
+    if ((proposalArtifactId.length > 0) !== (proposalAdmissionScope.length > 0)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal_artifact_id and proposal_admission_scope must be supplied together.',
+      );
+    }
+    if (proposalArtifactId.length > 255 || proposalAdmissionScope.length > 8_000) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal artifact id or admission scope exceeds its bounded length.',
+      );
+    }
     if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {
       throw new OperationError(
         'invalid_params',
@@ -5519,6 +5545,8 @@ const submit_agent: Operation = {
         model: typeof p.model === 'string' ? p.model : '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
         skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
+        proposal_artifact_id: proposalArtifactId || null,
+        proposal_admission_scope: proposalAdmissionScope || null,
       };
     }
 
@@ -5557,6 +5585,10 @@ const submit_agent: Operation = {
     if (typeof p.model === 'string') jobData.model = p.model;
     if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
+    if (proposalArtifactId) {
+      jobData.proposal_artifact_id = proposalArtifactId;
+      jobData.proposal_admission_scope = proposalAdmissionScope;
+    }
     const job = await queue.add(
       'subagent',
       jobData,
@@ -5590,6 +5622,70 @@ const submit_agent: Operation = {
     } catch { /* never block submission */ }
 
     return { id: job.id, name: 'subagent', client_id: clientId };
+  },
+};
+
+const stage_ingestion_proposal_page: Operation = {
+  name: 'stage_ingestion_proposal_page',
+  description: 'Stage one exact page body and optimistic baseline in the current ingestion agent job. This writes job evidence only and never mutates corpus state.',
+  // Operation mutability classifies corpus effects; durable job evidence is
+  // intentionally excluded from corpus-write audit and retry semantics.
+  mutating: false,
+  params: {
+    artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
+    source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time' },
+    sequence: { type: 'number', required: true, description: 'One-based page position' },
+    total_pages: { type: 'number', required: true, description: 'Total number of pages in the proposal' },
+    page: { type: 'object', required: true, description: 'Exact create or update page proposal' },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError('permission_denied', 'stage_ingestion_proposal_page is available only inside an agent job.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.stageAgentJobProposalPage(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+};
+
+const finalize_ingestion_proposal: Operation = {
+  name: 'finalize_ingestion_proposal',
+  description: 'Validate and freeze the complete staged ingestion proposal, returning a compact digest manifest without page bodies.',
+  // Freezing job evidence does not mutate pages, links, takes, or timelines.
+  mutating: false,
+  params: {
+    artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
+    source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time' },
+    total_pages: { type: 'number', required: true, description: 'Total number of staged pages' },
+    page_digests: { type: 'array', required: true, items: { type: 'object' }, description: 'Ordered one-based sequence and digest pairs' },
+    summary: { type: 'string', required: true, description: 'Compact source-grounded proposal summary' },
+    proposed_timeline_entries: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen timeline entries' },
+    proposed_links: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen typed links' },
+    unresolved: { type: 'array', items: { type: 'string' }, description: 'Bounded unresolved items' },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError('permission_denied', 'finalize_ingestion_proposal is available only inside an agent job.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.finalizeAgentJobProposal(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
   },
 };
 
@@ -5647,6 +5743,37 @@ const get_agent_job: Operation = {
       created_at: job.created_at,
       finished_at: job.finished_at,
     };
+  },
+};
+
+const get_agent_job_proposal: Operation = {
+  name: 'get_agent_job_proposal',
+  description: 'Retrieve the complete frozen ingestion proposal for an owned agent job and exact proposal digest.',
+  params: {
+    id: { type: 'number', required: true, description: 'Agent job id returned by submit_agent', trace: { kind: 'job' } },
+    proposal_digest: { type: 'string', required: true, description: 'Exact proposal digest from the compact staged_proposal receipt', trace: { kind: 'proposal' } },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    const clientId = ctx.auth?.clientId;
+    if (!clientId) {
+      throw new OperationError('permission_denied', 'get_agent_job_proposal requires an OAuth client.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.getOwnedAgentJobProposal(
+        ctx.engine,
+        p.id as number,
+        clientId,
+        p.proposal_digest as string,
+      );
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        const code = error.code === 'permission_denied' ? 'permission_denied' : 'invalid_params';
+        throw new OperationError(code, error.message);
+      }
+      throw error;
+    }
   },
 };
 
@@ -8560,7 +8687,8 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent, get_agent_job, get_agent_job_execution_evidence,
+  submit_agent, stage_ingestion_proposal_page, finalize_ingestion_proposal,
+  get_agent_job, get_agent_job_proposal, get_agent_job_execution_evidence,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP

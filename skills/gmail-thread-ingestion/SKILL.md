@@ -83,6 +83,11 @@ Expect one complete task with these fields:
 
 ```yaml
 artifactId: <Lore artifact id>
+artifactIntegrity:
+  complete: true
+  manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
+  contentMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
+  transcriptMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
 capturePageSlug: <fallback sources/ slug for a thread with no existing page>
 canonicalExternalId: <stable Gmail thread identity>
 captureExternalId: <gmail:<account-key>:<thread-id>:<version>>
@@ -100,14 +105,44 @@ attempt: <positive integer>
 manifest: <complete manifest.json object, including admission facts>
 contentMarkdown: <complete provider header and routing Markdown>
 transcriptMarkdown: <complete normalized thread and extracted evidence Markdown>
-priorAttempt: <optional failure or partial-write context>
+priorAttempt: # optional; omitted when there is no prior write evidence
+  attempt: <positive integer>
+  failureCode: <optional bounded failure code>
+  terminalFailureClass: <optional bounded terminal failure class>
+  receiptStatus: <optional bounded receipt status>
+  createdPages: <optional source-qualified page identifiers>
+  updatedPages: <optional source-qualified page identifiers>
+  verifiedPages: <optional source-qualified page identifiers>
+  pageResults: <optional bounded page result ledger without error fields>
+  slugAdjustments: <optional bounded slug adjustment ledger>
+  timelineResults: <optional bounded timeline result ledger without error fields>
+  linkResults: <optional bounded link result ledger without error fields>
 ```
 
 Stop with `failed` before any write when a required field is absent, the
 provider is not `google-gmail`, `canonicalExternalId` is not the package's Gmail
 thread ID, the capture identity or revision does not match the manifest, or the
-artifact is visibly incomplete. Do not fetch, truncate, split, or reconstruct
-missing input.
+`artifactIntegrity.complete` flag is not exactly `true`. This envelope is the
+authority for transport completeness. Working-context projection or omission
+markers from the model provider describe only the current context window;
+never treat them as proof that the original artifact is incomplete. Do not
+fetch, truncate, split, or reconstruct missing input.
+
+Before analysis or writing, require each integrity `sha256` to contain exactly
+64 lowercase hexadecimal characters and each `bytes` to be a non-negative
+integer. The authenticated OAuth caller deterministically verified these
+values against the exact prompt fields before submission; treat the well-formed
+envelope as authoritative. Do not attempt to recalculate, estimate, or
+second-guess hashes or byte counts in model reasoning. Do not reinterpret a
+context-projection marker as an integrity failure when the envelope is well
+formed and `complete` is exactly `true`.
+
+When `priorAttempt` is present, accept only the typed projection shown above.
+It never contains a top-level summary, unresolved list, raw error, or a nested
+result `error`; reject unexpected fields instead of treating them as mail
+evidence. Use the projected ledgers only to select read-back checks and safe
+resume points. Durable GBrain state remains authoritative, so never skip a
+mutation based on the projection alone.
 
 ## Phases
 
