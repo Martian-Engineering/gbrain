@@ -155,10 +155,14 @@ describe('durable agent-job proposal staging', () => {
 
   it('finalizes from the durable ordered manifest after old stage outputs compact away', async () => {
     const jobId = await seedJob();
-    const first = await stage(jobId, 1, 2, createPage('sources/example'));
-    const second = await stage(jobId, 2, 2, createPage('projects/example'));
+    const staged = [
+      await stage(jobId, 1, 4, createPage('sources/example')),
+      await stage(jobId, 2, 4, createPage('projects/example-2')),
+      await stage(jobId, 3, 4, createPage('projects/example-3')),
+      await stage(jobId, 4, 4, createPage('projects/example-4')),
+    ];
     const messages: ChatMessage[] = [{ role: 'user', content: 'Build the exact ingestion proposal.' }];
-    for (const page of [first, second]) {
+    for (const page of staged) {
       messages.push({
         role: 'assistant',
         content: [{
@@ -179,16 +183,18 @@ describe('durable agent-job proposal staging', () => {
       });
     }
     const compacted = compactToolLoopMessages(messages, 2_000, { mutatingToolNames: new Set() });
-    expect(JSON.stringify(compacted)).not.toContain(first.digest);
+    const compactedJson = JSON.stringify(compacted);
+    expect(compactedJson).not.toContain(staged[0]!.digest);
+    expect(compactedJson).toContain(staged[3]!.digest);
 
     const manifest = await finalizeAgentJobProposal(engine, jobId, {
       artifact_id: 'artifact-1',
       source_id: 'company',
       admission_scope: 'Include project delivery notes.',
-      total_pages: 2,
+      total_pages: 4,
       summary: 'Ready after compaction.',
     });
-    expect(manifest.pageDigests).toEqual([first, second]);
+    expect(manifest.pageDigests).toEqual(staged);
   });
 
   it('freezes a previously-null admission scope on the first stage only', async () => {
