@@ -56,6 +56,7 @@ import { AIConfigError, AITransientError, normalizeAIError } from './errors.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
 import { loadConfig } from '../config.ts';
 import { buildGatewayConfig } from './build-gateway-config.ts';
+import { compactToolLoopMessages, resolveToolLoopMessageBudget } from './tool-loop-context.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
@@ -3231,12 +3232,13 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
 // ---- Tool loop (v0.38 — D11 + D6/D7 gateway-native subagent path) ----
 
 /**
- * A tool handler runs a single tool invocation. `idempotent` lets the loop
- * safely re-execute a pending row on crash-replay; non-idempotent tools that
- * crashed mid-execute are surfaced as a hard error.
+ * A tool handler runs a single tool invocation. `idempotent` controls pending
+ * crash replay; `mutating` separately marks effects whose distinct completed
+ * identity must survive provider-context compaction.
  */
 export interface ToolHandler {
   idempotent?: boolean;
+  mutating?: boolean;
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;
 }
 
@@ -3274,6 +3276,8 @@ export interface ToolLoopOpts {
   maxTurns?: number;
   /** Per-turn max output tokens. Default 4096. */
   maxTokens?: number;
+  /** Internal test seam; defaults to the active provider recipe's context window. */
+  contextWindowTokens?: number;
   abortSignal?: AbortSignal;
   /** Native OpenAI reasoning level applied to every turn. */
   reasoningEffort?: ReasoningEffort;
@@ -3353,6 +3357,14 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
   const maxTurns = opts.maxTurns ?? 20;
   const maxTokens = opts.maxTokens ?? defaultMaxOutputTokens(opts.model ?? getChatModel());
   const handlers = opts.toolHandlers;
+  const model = opts.model ?? getChatModel();
+  const messageBudget = resolveToolLoopMessageBudget({
+    model,
+    maxOutputTokens: maxTokens,
+    system: opts.system,
+    tools: opts.tools,
+    contextWindowTokens: opts.contextWindowTokens,
+  });
   const totalUsage: ChatResult['usage'] = {
     input_tokens: 0,
     output_tokens: 0,
@@ -3380,12 +3392,30 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
 
     opts.onHeartbeat?.('turn_start', { turn_idx: turnIdx });
 
+    const balancedMessages = repairToolPairing(messages);
+    const providerMessages = compactToolLoopMessages(balancedMessages, messageBudget, {
+      mutatingToolNames: new Set(
+        opts.tools
+          .filter(tool => opts.toolHandlers.get(tool.name)?.mutating !== false)
+          .map(tool => tool.name),
+      ),
+    });
+    if (providerMessages !== balancedMessages) {
+      opts.onHeartbeat?.('context_compacted', {
+        turn_idx: turnIdx,
+        durable_message_count: messages.length,
+        provider_message_count: providerMessages.length,
+        durable_chars: safeStringify(messages).length,
+        provider_chars: safeStringify(providerMessages).length,
+      });
+    }
+
     let chatResult: ChatResult;
     try {
       chatResult = await chat({
-        model: opts.model,
+        model,
         system: opts.system,
-        messages,
+        messages: providerMessages,
         tools: opts.tools,
         maxTokens,
         abortSignal: opts.abortSignal,

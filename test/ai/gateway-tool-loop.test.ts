@@ -5,8 +5,13 @@ import {
   configureGateway,
   resetGateway,
   type ChatBlock,
+  type ChatMessage,
   type ToolHandler,
 } from '../../src/core/ai/gateway.ts';
+import {
+  compactToolLoopMessages,
+  ToolLoopContextProjectionError,
+} from '../../src/core/ai/tool-loop-context.ts';
 
 describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () => {
   beforeEach(() => {
@@ -241,6 +246,149 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(executed).toBe(false); // replay short-circuit
     expect(result.stopReason).toBe('end');
     expect(result.finalText).toBe('fin');
+  });
+
+  it('bounds a production-sized replay without mutating durable tool evidence', async () => {
+    const task = 'Ingest this artifact and preserve the reviewed receipt contract.';
+    const priorMessages: ChatMessage[] = [{ role: 'user', content: task }];
+    for (let i = 0; i < 90; i++) {
+      priorMessages.push({
+        role: 'assistant' as const,
+        content: [{
+          type: 'tool-call' as const,
+          toolCallId: `tc-${i}`,
+          toolName: i % 3 === 0 ? 'put_page' : 'search',
+          input: { round: i },
+        }],
+      });
+      priorMessages.push({
+        role: 'user' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: `tc-${i}`,
+          toolName: i % 3 === 0 ? 'put_page' : 'search',
+          output: { round: i, body: 'x'.repeat(40_000) },
+        }],
+      });
+    }
+    const originalBytes = JSON.stringify(priorMessages).length;
+    expect(originalBytes).toBeGreaterThan(3_400_000);
+
+    let providerMessages: ChatMessage[] | undefined;
+    __setChatTransportForTests(async (opts) => {
+      providerMessages = opts.messages;
+      return {
+        text: 'completed from bounded context',
+        blocks: [{ type: 'text', text: 'completed from bounded context' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 10_000, output_tokens: 8, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'openai:gpt-5.6-luna',
+        providerId: 'openai',
+      };
+    });
+
+    const result = await toolLoop({
+      model: 'openai:gpt-5.6-luna',
+      initialMessages: [],
+      tools: [
+        { name: 'search', description: 'read', inputSchema: { type: 'object' } },
+        { name: 'put_page', description: 'write', inputSchema: { type: 'object' } },
+      ],
+      toolHandlers: new Map([
+        ['search', { idempotent: true, mutating: false, async execute() { return null; } }],
+        ['put_page', { idempotent: true, mutating: true, async execute() { return null; } }],
+      ]),
+      maxTurns: 100,
+      contextWindowTokens: 20_000,
+      replayState: {
+        priorMessages,
+        priorTools: new Map(),
+        nextTurnIdx: 90,
+        nextMessageIdx: 181,
+      },
+    });
+
+    expect(providerMessages).toBeDefined();
+    expect(JSON.stringify(providerMessages).length).toBeLessThan(30_000);
+    expect(JSON.stringify(providerMessages)).toContain(task);
+    expect(JSON.stringify(providerMessages)).toContain('tc-89');
+    expect(JSON.stringify(providerMessages)).toContain('Distinct mutation evidence');
+    expect(JSON.stringify(providerMessages)).toContain('call_id=tc-0');
+    expect(JSON.stringify(providerMessages)).not.toContain('call_id=tc-1 ');
+
+    const compacted = providerMessages!;
+    for (let i = 0; i < compacted.length; i++) {
+      const message = compacted[i]!;
+      if (message.role !== 'assistant' || typeof message.content === 'string') continue;
+      const calls = message.content.filter(block => block.type === 'tool-call');
+      if (calls.length === 0) continue;
+      const next = compacted[i + 1];
+      expect(next?.role).toBe('user');
+      expect(typeof next?.content).not.toBe('string');
+      const resultIds = new Set(
+        typeof next?.content === 'string'
+          ? []
+          : next?.content.filter(block => block.type === 'tool-result').map(block => block.toolCallId),
+      );
+      for (const call of calls) expect(resultIds.has(call.toolCallId)).toBe(true);
+    }
+
+    expect(JSON.stringify(priorMessages).length).toBe(originalBytes);
+    expect(JSON.stringify(priorMessages[180])).toContain('x'.repeat(40_000));
+    expect(JSON.stringify(result.messages).length).toBeGreaterThan(3_400_000);
+  });
+
+  it('keeps distinct targets and per-call outcomes for omitted mutations', () => {
+    const messages: ChatMessage[] = [{ role: 'user', content: 'Update both pages once.' }];
+    for (const [id, slug, failed] of [
+      ['write-a', 'wiki/alpha', false],
+      ['write-b', 'wiki/beta', true],
+      ['write-c', 'wiki/gamma', false],
+      ['write-d', 'wiki/delta', false],
+      ['write-e', 'wiki/epsilon', false],
+    ] as const) {
+      messages.push({
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: id, toolName: 'put_page', input: { slug, content: 'x'.repeat(4_000) } }],
+      });
+      messages.push({
+        role: 'user',
+        content: [{ type: 'tool-result', toolCallId: id, toolName: 'put_page', output: { body: 'y'.repeat(4_000) }, isError: failed }],
+      });
+    }
+
+    const compacted = compactToolLoopMessages(messages, 2_000, {
+      mutatingToolNames: new Set(['put_page']),
+    });
+    const serialized = JSON.stringify(compacted);
+
+    expect(serialized.length).toBeLessThanOrEqual(2_000);
+    expect(serialized).toContain('Distinct mutation evidence');
+    expect(serialized).toContain('call_id=write-a');
+    expect(serialized).toContain('target=slug:wiki/alpha');
+    expect(serialized).toContain('call_id=write-b');
+    expect(serialized).toContain('target=slug:wiki/beta');
+    expect(serialized).toContain('outcome=failed');
+    expect(serialized).toContain('outcome=failed are unverified');
+    expect(serialized).toContain('write-e');
+  });
+
+  it('fails closed when an oversized parallel round cannot preserve valid pairing', () => {
+    const calls: ChatBlock[] = [];
+    const results: ChatBlock[] = [];
+    for (let i = 0; i < 100; i++) {
+      calls.push({ type: 'tool-call', toolCallId: `write-${i}`, toolName: 'put_page', input: { slug: `wiki/${i}` } });
+      results.push({ type: 'tool-result', toolCallId: `write-${i}`, toolName: 'put_page', output: { ok: true } });
+    }
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Write every page exactly once.' },
+      { role: 'assistant', content: calls },
+      { role: 'user', content: results },
+    ];
+
+    expect(() => compactToolLoopMessages(messages, 2_000, {
+      mutatingToolNames: new Set(['put_page']),
+    })).toThrow(ToolLoopContextProjectionError);
   });
 
   it('refuses replay of non-idempotent pending tool with unrecoverable error', async () => {

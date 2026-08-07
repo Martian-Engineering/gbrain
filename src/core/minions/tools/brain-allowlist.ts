@@ -305,6 +305,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
       description: op.description,
       input_schema: schema,
       idempotent: !NON_IDEMPOTENT_BRAIN_TOOLS.has(op.name),
+      mutating: op.mutating === true,
       // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
       // Keyed by the unprefixed op name. Undefined when no hint is registered.
       usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],

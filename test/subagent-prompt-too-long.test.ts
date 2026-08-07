@@ -24,6 +24,12 @@ describe('isPromptTooLongError', () => {
     expect(isPromptTooLongError(new Error('PROMPT IS TOO LONG'))).toBe(true);
   });
 
+  test('matches OpenAI context-window wording exactly', () => {
+    expect(isPromptTooLongError(
+      new Error('Your input exceeds the context window of this model.'),
+    )).toBe(true);
+  });
+
   test('matches when message is on the inner .error.message field', () => {
     // Mimic Anthropic SDK error wrapping shape.
     const err = {

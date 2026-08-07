@@ -34,6 +34,12 @@ describe('classifyJobError', () => {
     expect(classifyJobError('context length exceeded')).toBe('prompt_too_long');
   });
 
+  test('prompt_too_long — provider-neutral context-window wording', () => {
+    expect(classifyJobError('Your input exceeds the context window of this model.')).toBe('prompt_too_long');
+    expect(classifyJobError('maximum context length is 200000 tokens')).toBe('prompt_too_long');
+    expect(classifyJobError('request exceeded the model context window')).toBe('prompt_too_long');
+  });
+
   test('tool_unavailable — registry config', () => {
     expect(classifyJobError('tool "ghost" is not in the registry for this subagent')).toBe('tool_unavailable');
     expect(classifyJobError('tool "shell" is not available')).toBe('tool_unavailable');
