@@ -7,13 +7,16 @@ import { matchesSlugAllowList } from '../slug-allow-list.ts';
 export const PROPOSAL_STAGE_INPUT_MAX_BYTES = 196_608;
 
 /** Maximum UTF-8 size of one finalized, canonical proposal plan. */
-export const PROPOSAL_AGGREGATE_MAX_BYTES = 786_432;
+export const PROPOSAL_AGGREGATE_MAX_BYTES = 98_304;
+
+/** Maximum UTF-8 size after the canonical plan is embedded as a JSON string. */
+export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 98_304;
 
 /** Maximum UTF-8 size of the compact receipt manifest. */
 export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
 
 /** Maximum number of pages in one finalized proposal. */
-export const PROPOSAL_MAX_PAGES = 100;
+export const PROPOSAL_MAX_PAGES = 32;
 
 /** Maximum characters in the shared Lore/GBrain admission-scope contract. */
 export const PROPOSAL_ADMISSION_SCOPE_MAX_CHARS = 4_000;
@@ -23,7 +26,9 @@ export const FINALIZE_PROPOSAL_TOOL_NAME = 'brain_finalize_ingestion_proposal';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const PAGE_SLUG_RE = /^[\p{L}\p{N}][\p{L}\p{N}-]*(?:\/[\p{L}\p{N}][\p{L}\p{N}-]*)*$/u;
+const CANONICAL_SLUG_CHARS = 'a-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af';
+const PAGE_SLUG_SEGMENT = `[${CANONICAL_SLUG_CHARS}][${CANONICAL_SLUG_CHARS}-]*`;
+const PAGE_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEGMENT}(\\/${PAGE_SLUG_SEGMENT})*$`);
 
 /** Error raised when staged proposal evidence violates its durable contract. */
 export class AgentJobProposalError extends Error {
@@ -383,6 +388,13 @@ export async function finalizeAgentJobProposal(
         `Finalized proposal is ${planBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
       );
     }
+    const escapedPlanBytes = Buffer.byteLength(JSON.stringify(planJson), 'utf8');
+    if (escapedPlanBytes > PROPOSAL_ESCAPED_PLAN_MAX_BYTES) {
+      throw new AgentJobProposalError(
+        'proposal_too_large',
+        `Escaped finalized proposal is ${escapedPlanBytes} UTF-8 bytes; maximum is ${PROPOSAL_ESCAPED_PLAN_MAX_BYTES}.`,
+      );
+    }
     const proposalDigest = digestProposalValue(plan);
     const manifest: FinalizedProposalManifest = {
       status: 'staged_proposal',
@@ -709,9 +721,9 @@ function parseProposalPage(raw: unknown): ScopedProposalPage {
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
   const title = readBoundedString(page.title, 'page.title', 1_000);
-  const bodyMarkdown = readString(page.bodyMarkdown, 'page.bodyMarkdown');
+  const bodyMarkdown = readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
   if (effect === 'create') return { slug, effect, title, bodyMarkdown };
-  const baseMarkdown = readString(page.baseMarkdown, 'page.baseMarkdown');
+  const baseMarkdown = readNonBlankString(page.baseMarkdown, 'page.baseMarkdown');
   const expectedContentHash = readString(page.expectedContentHash, 'page.expectedContentHash');
   if (!SHA256_RE.test(expectedContentHash)) {
     throw new AgentJobProposalError('invalid_page', 'page.expectedContentHash must be a lowercase SHA-256 digest.');
@@ -860,9 +872,17 @@ function readBoundedString(raw: unknown, name: string, maxLength: number): strin
   return value;
 }
 
+function readNonBlankString(raw: unknown, name: string): string {
+  const value = readString(raw, name);
+  if (!value.trim()) {
+    throw new AgentJobProposalError('invalid_string', `${name} must not be blank.`);
+  }
+  return value;
+}
+
 function readCanonicalSlug(raw: unknown, name: string): string {
   const slug = readString(raw, name);
-  if (slug.length > 255 || !PAGE_SLUG_RE.test(slug) || slug !== slug.toLowerCase()) {
+  if (slug.length > 255 || !PAGE_SLUG_RE.test(slug)) {
     throw new AgentJobProposalError('invalid_slug', `${name} is not a canonical page slug.`);
   }
   return slug;

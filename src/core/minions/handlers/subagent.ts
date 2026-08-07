@@ -61,33 +61,14 @@ import {
   assertProposalToolTurnPersistable,
   assertProposalToolTurnPersistableForJob,
 } from '../agent-job-proposals.ts';
+import { resolveSubagentMaxOutputTokens } from '../subagent-limits.ts';
+export { resolveSubagentMaxOutputTokens as resolveMaxOutputTokens } from '../subagent-limits.ts';
 
 // ── Defaults ────────────────────────────────────────────────
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TURNS = 20;
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const DEFAULT_RATE_KEY = 'anthropic:messages';
-
-/**
- * Resolve the per-turn output-token cap (#2778). Per-job data wins, then the
- * `agent.max_output_tokens` config row, then the 8192 default (was a
- * hardcoded 4096 that made pages >~12KB unwritable via put_page). Invalid
- * values (NaN / zero / negative) fall through to the next tier.
- */
-export function resolveMaxOutputTokens(
-  perJob: number | undefined,
-  configRaw: string | null | undefined,
-): number {
-  if (typeof perJob === 'number' && Number.isFinite(perJob) && perJob > 0) {
-    return Math.floor(perJob);
-  }
-  if (typeof configRaw === 'string' && configRaw.trim() !== '') {
-    const n = Number(configRaw);
-    if (Number.isFinite(n) && n > 0) return Math.floor(n);
-  }
-  return DEFAULT_MAX_OUTPUT_TOKENS;
-}
 
 /**
  * Resolve the rate-lease cap from the env var.
@@ -255,7 +236,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     }
     const maxTurns = data.max_turns ?? DEFAULT_MAX_TURNS;
     // #2778: per-turn output cap — data.max_tokens → config → 8192 default.
-    const maxOutputTokens = resolveMaxOutputTokens(
+    const maxOutputTokens = resolveSubagentMaxOutputTokens(
       data.max_tokens,
       await engine.getConfig('agent.max_output_tokens').catch(() => null),
     );
@@ -854,7 +835,7 @@ interface GatewayRunArgs {
   systemPrompt: string;
   toolDefs: ToolDef[];
   maxTurns: number;
-  /** #2778: per-turn output-token cap (resolved by resolveMaxOutputTokens). */
+  /** #2778: per-turn output-token cap resolved from frozen job/config state. */
   maxOutputTokens: number;
 }
 

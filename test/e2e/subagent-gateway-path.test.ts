@@ -257,10 +257,10 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
   it('rejects a cumulative stage overflow before assistant, tool, or fragment persistence', async () => {
     const crossingInput = {
       artifact_id: 'artifact-1', source_id: 'company',
-      admission_scope: 'Derived scope.', sequence: 5, total_pages: 5,
+      admission_scope: 'Derived scope.', sequence: 2, total_pages: 2,
       page: {
-        slug: 'sources/large-5', effect: 'create', title: 'Large',
-        bodyMarkdown: 'x'.repeat(165_000),
+        slug: 'sources/large-2', effect: 'create', title: 'Large',
+        bodyMarkdown: 'x'.repeat(80_000),
       },
     };
     __setChatTransportForTests(async () => ({
@@ -290,13 +290,11 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
         proposal_admission_scope: 'Derived scope.', allowed_slug_prefixes: ['sources/*'],
       },
     });
-    for (let sequence = 1; sequence < 5; sequence++) {
-      await stageAgentJobProposalPage(engine, jobId, {
-        ...crossingInput,
-        sequence,
-        page: { ...crossingInput.page, slug: `sources/large-${sequence}` },
-      });
-    }
+    await stageAgentJobProposalPage(engine, jobId, {
+      ...crossingInput,
+      sequence: 1,
+      page: { ...crossingInput.page, slug: 'sources/large-1' },
+    });
 
     await expect(handler(ctx)).rejects.toThrow(/maximum/i);
     const messages = await engine.executeRaw<{ role: string }>(
@@ -311,7 +309,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(executed).toBe(false);
     expect(messages.map((row) => row.role)).toEqual(['user']);
     expect(executions).toHaveLength(0);
-    expect(fragments.map((row) => Number(row.sequence))).toEqual([1, 2, 3, 4]);
+    expect(fragments.map((row) => Number(row.sequence))).toEqual([1]);
   });
 
   it('happy path 1-turn: gateway returns text, handler returns SubagentResult', async () => {

@@ -235,7 +235,9 @@ intended `bodyMarkdown`, never a diff. Copy the exact body and `content_hash`
 from the `get_page` read used to draft each update into `baseMarkdown` and
 `expectedContentHash`. Omit both fields for a create.
 
-Immediately after reading and constructing each complete page, call
+Before constructing final page bodies, freeze the complete ordered page inventory
+and stable `total_pages`; the inventory may contain at most 32 pages. Once the
+inventory is frozen, read and construct each page in order, then immediately call
 `brain_stage_ingestion_proposal_page` in its own agent turn with the exact
 `artifact_id`, `source_id`, `admission_scope`, one-based `sequence`, stable
 `total_pages`, and page object. Stage only one page per turn. Preserve the
@@ -274,7 +276,8 @@ page-digest manifest from the job's durable fragments, so finalization does not
 depend on old stage outputs remaining in model context. The server rejects
 gaps, duplicate or changed fragments, cross-job evidence, a capture page that
 does not match the exact job binding, mutations outside the job slug fence, a full
-plan over 786,432 UTF-8 bytes, more than 100 pages, a timeline `refLabel` over
+raw or JSON-escaped plan representation over 98,304 UTF-8 bytes, more than 32
+pages, a timeline `refLabel` over
 500 characters, or a compact manifest over 262,144 UTF-8 bytes.
 Return the finalizer's compact manifest as `staged_proposal`; never reproduce
 page bodies or baselines in the final receipt. Never truncate or split a

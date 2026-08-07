@@ -478,7 +478,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         idempotency_key: 'lore-job-01',
       });
       const repeated = await callSubmitAgent(ctx, {
-        prompt: 'correct the selected claim',
+        prompt: 'x'.repeat(500_000),
         idempotency_key: 'lore-job-01',
       });
 
@@ -676,6 +676,80 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(row.data.skill_name).toBe('knowledge-correction');
       expect(row.data.skill_sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(row.data.system).toContain('Knowledge Correction');
+    });
+
+    it('accepts a production-sized 128 KiB prompt with the published GitHub skill on Terra', async () => {
+      const tools = [
+        'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
+        'resolve_slugs', 'get_links', 'get_backlinks',
+        'stage_ingestion_proposal_page', 'finalize_ingestion_proposal',
+        'put_page', 'add_link', 'add_timeline_entry', 'validate_links',
+      ];
+      await seedClient('lore', {
+        bound_tools: tools,
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/', 'projects/', 'people/', 'companies/'],
+        bound_max_concurrent: 3,
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      await engine.setConfig('agent.max_output_tokens', '32768');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'p'.repeat(128 * 1024),
+        skill_name: 'github-project-ingestion',
+        model: 'openai:gpt-5.6-terra',
+        allowed_tools: tools,
+        proposal_artifact_id: 'artifact-128k',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include source-grounded delivery knowledge.',
+      });
+
+      expect(result.id).toBeNumber();
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(32_768);
+    });
+
+    it('rejects an over-budget fresh prompt before creating a job or audit record', async () => {
+      const tools = [
+        'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
+        'resolve_slugs', 'get_links', 'get_backlinks',
+        'stage_ingestion_proposal_page', 'finalize_ingestion_proposal',
+        'put_page', 'add_link', 'add_timeline_entry', 'validate_links',
+      ];
+      await seedClient('lore', {
+        bound_tools: tools,
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/', 'projects/', 'people/', 'companies/'],
+        bound_max_concurrent: 3,
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      await engine.setConfig('agent.max_output_tokens', '32768');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'p'.repeat(300_000),
+        skill_name: 'github-project-ingestion',
+        model: 'openai:gpt-5.6-terra',
+        allowed_tools: tools,
+        proposal_artifact_id: 'artifact-too-large',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include source-grounded delivery knowledge.',
+      })).rejects.toMatchObject({
+        code: 'invalid_params',
+        message: expect.stringMatching(/initial prompt.*too large/i),
+      });
+      const rows = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM minion_jobs
+          WHERE data->>'__owner_client_id' = 'lore'`,
+      );
+      expect(rows[0]?.n).toBe(0);
+      expect(fs.readdirSync(tmpAuditDir)).toEqual([]);
     });
 
     it('refuses an unpublished server skill', async () => {

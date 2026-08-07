@@ -5518,6 +5518,58 @@ const submit_agent: Operation = {
       }
     }
 
+    const prompt = typeof p.prompt === 'string' ? p.prompt : '';
+    if (!prompt) {
+      throw new OperationError('invalid_params', 'submit_agent: prompt must be a non-empty string.');
+    }
+
+    let skillBody: string | undefined;
+    let skillName: string | undefined;
+    let skillSha256: string | undefined;
+    let selectedModel: string | undefined;
+    let selectedMaxOutputTokens: number | undefined;
+    if (!ctx.dryRun) {
+      if (typeof p.skill_name === 'string') {
+        if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
+          throw new OperationError(
+            'permission_denied',
+            'submit_agent: skill_name requires read scope in addition to agent scope.',
+          );
+        }
+        const skillCatalog = await import('./skill-catalog.ts');
+        const publish = await skillCatalog.readMcpPublishSkills(ctx);
+        skillCatalog.assertPublishEnabled(ctx, publish);
+        const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+        const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+        const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
+        const { createHash } = await import('crypto');
+        skillBody = skill.body;
+        skillName = skill.name;
+        skillSha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+      }
+      const { resolveSubagentInitialPromptBudget } = await import(
+        './minions/subagent-prompt-budget.ts'
+      );
+      const promptBudget = await resolveSubagentInitialPromptBudget({
+        engine: ctx.engine,
+        config: ctx.config,
+        prompt,
+        userSystem: skillBody,
+        model: typeof p.model === 'string' ? p.model : undefined,
+        allowedTools: requestedTools,
+        allowedSlugPrefixes: requestedSlugPrefixes,
+        sourceId: boundSource ?? undefined,
+      });
+      selectedModel = promptBudget.model;
+      selectedMaxOutputTokens = promptBudget.maxOutputTokens;
+      if (promptBudget.messageBytes > promptBudget.messageBudgetBytes) {
+        throw new OperationError(
+          'invalid_params',
+          `submit_agent: initial prompt is too large for model ${selectedModel} with the published skill and requested tools (${promptBudget.messageBytes} UTF-8 bytes; maximum ${promptBudget.messageBudgetBytes}).`,
+        );
+      }
+    }
+
     // Concurrency cap: count active+waiting agent jobs for this client.
     const inflight = await sql`
       SELECT COUNT(*)::int AS n
@@ -5559,32 +5611,20 @@ const submit_agent: Operation = {
     const queue = new MinionQueue(ctx.engine);
 
     const jobData: Record<string, unknown> = {
-      prompt: p.prompt as string,
+      prompt,
       max_turns: Math.min((p.max_turns as number) ?? 20, 100),
       allowed_tools: requestedTools,
       allowed_slug_prefixes: requestedSlugPrefixes,
       use_gateway_loop: true,
       __owner_client_id: clientId,
     };
-    if (typeof p.skill_name === 'string') {
-      if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
-        throw new OperationError(
-          'permission_denied',
-          'submit_agent: skill_name requires read scope in addition to agent scope.',
-        );
-      }
-      const skillCatalog = await import('./skill-catalog.ts');
-      const publish = await skillCatalog.readMcpPublishSkills(ctx);
-      skillCatalog.assertPublishEnabled(ctx, publish);
-      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
-      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
-      const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
-      const { createHash } = await import('crypto');
-      jobData.system = skill.body;
-      jobData.skill_name = skill.name;
-      jobData.skill_sha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+    if (skillBody && skillName && skillSha256) {
+      jobData.system = skillBody;
+      jobData.skill_name = skillName;
+      jobData.skill_sha256 = skillSha256;
     }
-    if (typeof p.model === 'string') jobData.model = p.model;
+    if (selectedModel) jobData.model = selectedModel;
+    if (selectedMaxOutputTokens) jobData.max_tokens = selectedMaxOutputTokens;
     if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
     if (proposalArtifactId) {
@@ -5612,7 +5652,7 @@ const submit_agent: Operation = {
       logAgentSubmission({
         client_id: clientId,
         job_id: job.id,
-        model: typeof p.model === 'string' ? p.model : '<default>',
+        model: selectedModel ?? '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : undefined,
         bound_tools: requestedTools,
         bound_source: boundSource,

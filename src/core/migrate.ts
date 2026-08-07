@@ -6010,8 +6010,22 @@ export const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS idx_agent_job_proposals_owner_digest
         ON agent_job_proposals (owner_client_id, proposal_digest);
-      ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
-      ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_roles pr
+           WHERE pg_has_role(current_user, pr.oid, 'USAGE')
+             AND (pr.rolbypassrls OR pr.rolsuper)
+        ) INTO has_bypass;
+        IF NOT has_bypass THEN
+          RAISE EXCEPTION 'v136 agent_job_staged_proposals: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+        END IF;
+        ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
+      END $$;
     `,
     sqlFor: {
       pglite: `

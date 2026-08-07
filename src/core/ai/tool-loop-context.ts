@@ -8,7 +8,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import { get_encoding } from '@dqbd/tiktoken';
 import { getProviderCapabilities } from './capabilities.ts';
+import { splitProviderModelId } from '../model-id.ts';
 import type { ChatBlock, ChatMessage, ChatToolDef } from './gateway.ts';
 
 const CONTEXT_TARGET_FRACTION = 0.7;
@@ -17,6 +19,10 @@ const ESTIMATED_CHARS_PER_TOKEN = 2;
 // One byte per token is intentionally conservative for ASCII, CJK, emoji,
 // and mixed JSON without requiring a model-specific tokenizer at runtime.
 const CONSERVATIVE_BYTES_PER_TOKEN = 1;
+// The tokenizer counts static content exactly, but provider message/tool
+// envelopes are not exposed by the API. Keep a fixed hard-window reserve for
+// that framing rather than treating content tokenization as wire-exact.
+const OPENAI_PROTOCOL_TOKEN_RESERVE = 1_024;
 const FALLBACK_CONTEXT_TOKENS = 128_000;
 const PAYLOAD_LIMITS = [12_000, 4_000, 1_000, 256, 64, 0] as const;
 const MAX_STRUCTURAL_IDENTITY_VALUE_BYTES = 256;
@@ -60,6 +66,17 @@ interface WorkingContextProjectionSource {
   preserveStructuralIdentity: boolean;
 }
 
+let openAiEncoding: ReturnType<typeof get_encoding> | undefined;
+
+function countOpenAiTokens(value: string): number {
+  openAiEncoding ??= get_encoding('o200k_base');
+  return openAiEncoding.encode(value).length;
+}
+
+function isOpenAiModel(model: string): boolean {
+  return splitProviderModelId(model).provider?.toLowerCase() === 'openai';
+}
+
 export interface ToolLoopContextOptions {
   /** Tools whose effects must retain a distinct identity whenever context compacts. */
   mutatingToolNames?: ReadonlySet<string>;
@@ -91,17 +108,31 @@ export function resolveToolLoopMessageBudget(args: {
   }
 
   const targetTokens = Math.floor(contextTokens * CONTEXT_TARGET_FRACTION);
+  const staticTools = safeJson(args.tools);
   const targetMessageTokens = Math.max(0, targetTokens - args.maxOutputTokens);
-  const staticChars = (args.system?.length ?? 0) + safeJson(args.tools).length;
-  const targetBudget = targetMessageTokens * ESTIMATED_CHARS_PER_TOKEN - staticChars;
+  const openAiStaticTokens = isOpenAiModel(args.model)
+    ? countOpenAiTokens(args.system ?? '') + countOpenAiTokens(staticTools)
+    : null;
+  const targetBudget = openAiStaticTokens === null
+    ? targetMessageTokens * ESTIMATED_CHARS_PER_TOKEN
+      - (args.system?.length ?? 0)
+      - staticTools.length
+    : Math.max(0, targetMessageTokens - openAiStaticTokens)
+      * ESTIMATED_CHARS_PER_TOKEN;
 
   // The historical two-character estimate keeps ordinary prompts near the
   // 70% target. A second absolute byte cap uses the model's whole declared
   // window, so dense Unicode cannot overflow while ordinary English is not
   // needlessly constrained to one byte per target token.
   const hardInputTokens = Math.max(0, contextTokens - args.maxOutputTokens);
-  const staticBytes = utf8Bytes(args.system ?? '') + jsonBytes(args.tools);
-  const byteSafeBudget = hardInputTokens * CONSERVATIVE_BYTES_PER_TOKEN - staticBytes;
+  const byteSafeBudget = openAiStaticTokens === null
+    ? hardInputTokens * CONSERVATIVE_BYTES_PER_TOKEN
+      - utf8Bytes(args.system ?? '')
+      - utf8Bytes(staticTools)
+    : Math.max(
+      0,
+      hardInputTokens - openAiStaticTokens - OPENAI_PROTOCOL_TOKEN_RESERVE,
+    ) * CONSERVATIVE_BYTES_PER_TOKEN;
   return Math.max(0, Math.min(targetBudget, byteSafeBudget));
 }
 

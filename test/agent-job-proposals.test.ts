@@ -3,6 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   PROPOSAL_AGGREGATE_MAX_BYTES,
+  PROPOSAL_ESCAPED_PLAN_MAX_BYTES,
   PROPOSAL_MANIFEST_MAX_BYTES,
   PROPOSAL_MAX_PAGES,
   PROPOSAL_STAGE_INPUT_MAX_BYTES,
@@ -107,11 +108,33 @@ describe('proposal turn pre-persistence boundary', () => {
 });
 
 describe('durable agent-job proposal staging', () => {
-  it('rejects proposal page counts above the shared 100-page contract', async () => {
+  it('rejects proposal page counts above the shared 32-page contract', async () => {
     const jobId = await seedJob();
-    await expect(stage(jobId, 1, 101, createPage('sources/too-many')))
+    await expect(stage(jobId, 1, 33, createPage('sources/too-many')))
       .rejects.toMatchObject({ code: 'invalid_total_pages' });
-    expect(PROPOSAL_MAX_PAGES).toBe(100);
+    expect(PROPOSAL_MAX_PAGES).toBe(32);
+  });
+
+  it('uses the same lowercase ASCII-and-CJK slug contract as Lore', async () => {
+    const jobId = await seedJob();
+    await expect(stage(jobId, 1, 1, createPage('sources/éclair')))
+      .rejects.toMatchObject({ code: 'invalid_slug' });
+    await expect(stage(jobId, 1, 1, createPage('sources/αθήνα')))
+      .rejects.toMatchObject({ code: 'invalid_slug' });
+    await expect(stage(jobId, 1, 1, createPage('sources/東京')))
+      .resolves.toMatchObject({ slug: 'sources/東京' });
+  });
+
+  it('rejects blank page bodies and update baselines', async () => {
+    const createJob = await seedJob();
+    await expect(stage(createJob, 1, 1, createPage('sources/example', ' \n\t ')))
+      .rejects.toMatchObject({ code: 'invalid_string' });
+
+    const updateJob = await seedJob();
+    await expect(stage(updateJob, 1, 1, {
+      ...updatePage('sources/example'),
+      baseMarkdown: '   ',
+    })).rejects.toMatchObject({ code: 'invalid_string' });
   });
 
   it('stages exact pages, finalizes an ordered manifest, and retrieves the full owned plan', async () => {
@@ -465,15 +488,15 @@ describe('durable agent-job proposal staging', () => {
 
   it('rejects cumulative staged pages over the aggregate ceiling without persisting the crossing fragment', async () => {
     const jobId = await seedJob();
-    const pageCount = 5;
+    const pageCount = 2;
     for (let sequence = 1; sequence < pageCount; sequence++) {
-      const page = createPage(`sources/large-${sequence}`, 'x'.repeat(165_000));
+      const page = createPage(`sources/large-${sequence}`, 'x'.repeat(80_000));
       await stage(jobId, sequence, pageCount, page);
     }
     const crossingInput = {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       sequence: pageCount, total_pages: pageCount,
-      page: createPage(`sources/large-${pageCount}`, 'x'.repeat(165_000)),
+      page: createPage(`sources/large-${pageCount}`, 'x'.repeat(80_000)),
     };
     await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
       type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input: crossingInput,
@@ -481,7 +504,7 @@ describe('durable agent-job proposal staging', () => {
     const replayInput = {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       sequence: pageCount - 1, total_pages: pageCount,
-      page: createPage(`sources/large-${pageCount - 1}`, 'x'.repeat(165_000)),
+      page: createPage(`sources/large-${pageCount - 1}`, 'x'.repeat(80_000)),
     };
     await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
       type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input: replayInput,
@@ -493,15 +516,16 @@ describe('durable agent-job proposal staging', () => {
       [jobId],
     );
     expect(Number(rows[0]!.count)).toBe(pageCount - 1);
-    expect(PROPOSAL_AGGREGATE_MAX_BYTES).toBe(786_432);
+    expect(PROPOSAL_AGGREGATE_MAX_BYTES).toBe(96 * 1024);
+    expect(PROPOSAL_ESCAPED_PLAN_MAX_BYTES).toBe(96 * 1024);
     expect(PROPOSAL_MANIFEST_MAX_BYTES).toBe(256 * 1024);
   });
 
-  it('accepts a raw aggregate plan exactly at the shared ceiling', async () => {
+  it('accepts an escaped canonical plan exactly at the shared ceiling', async () => {
     const jobId = await seedJob();
-    const pageCount = 5;
+    const pageCount = 1;
     const pages = Array.from({ length: pageCount }, (_, index) =>
-      createPage(index === 0 ? 'sources/example' : `sources/boundary-${index + 1}`, 'x'.repeat(150_000)));
+      createPage(index === 0 ? 'sources/example' : `sources/boundary-${index + 1}`, 'x'));
     const basePlan = {
       artifactId: 'artifact-1',
       sourceId: 'company',
@@ -512,8 +536,8 @@ describe('durable agent-job proposal staging', () => {
       proposedLinks: [],
       unresolved: [],
     };
-    const remaining = PROPOSAL_AGGREGATE_MAX_BYTES -
-      Buffer.byteLength(canonicalProposalJson(basePlan), 'utf8');
+    const remaining = PROPOSAL_ESCAPED_PLAN_MAX_BYTES -
+      Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8');
     pages[pageCount - 1]!.bodyMarkdown += 'y'.repeat(remaining);
     for (let sequence = 1; sequence <= pageCount; sequence++) {
       await stage(jobId, sequence, pageCount, pages[sequence - 1]!);
@@ -530,7 +554,20 @@ describe('durable agent-job proposal staging', () => {
       'lore-client',
       manifest.proposalDigest,
     );
+    expect(Buffer.byteLength(JSON.stringify(canonicalProposalJson(owned.plan)), 'utf8'))
+      .toBe(PROPOSAL_ESCAPED_PLAN_MAX_BYTES);
     expect(Buffer.byteLength(canonicalProposalJson(owned.plan), 'utf8'))
-      .toBe(PROPOSAL_AGGREGATE_MAX_BYTES);
+      .toBeLessThan(PROPOSAL_AGGREGATE_MAX_BYTES);
+  });
+
+  it('rejects a raw plan whose JSON-string escaped representation exceeds 96 KiB', async () => {
+    const jobId = await seedJob();
+    await stage(jobId, 1, 1, createPage('sources/example', `x${'\n'.repeat(40_000)}`));
+
+    await expect(finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company',
+      admission_scope: 'Include project delivery notes.',
+      total_pages: 1, summary: 'Escaped boundary.',
+    })).rejects.toMatchObject({ code: 'proposal_too_large' });
   });
 });

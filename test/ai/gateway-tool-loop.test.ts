@@ -9,6 +9,7 @@ import {
   type ChatMessage,
   type ToolHandler,
 } from '../../src/core/ai/gateway.ts';
+import { get_encoding } from '@dqbd/tiktoken';
 import {
   compactToolLoopMessages,
   resolveToolLoopMessageBudget,
@@ -580,19 +581,46 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
       .toThrow(ToolLoopContextProjectionError);
   });
 
-  it('reserves no more than one UTF-8 byte per available input token', () => {
+  it('uses exact o200k_base tokens for OpenAI static context and byte-bounds CJK and emoji messages', () => {
+    const system = `${'漢'.repeat(1_000)}${'🧠'.repeat(1_000)}`;
+    const tools = [{
+      name: 'unicode_tool',
+      description: '検証 🧠',
+      inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+    }];
     const budget = resolveToolLoopMessageBudget({
       model: 'openai:gpt-5.6-terra',
       maxOutputTokens: 32_768,
       contextWindowTokens: 200_000,
-      system: '漢'.repeat(1_000),
-      tools: [],
+      system,
+      tools,
     });
+    const encoding = get_encoding('o200k_base');
+    const staticTokens = encoding.encode(system).length
+      + encoding.encode(JSON.stringify(tools)).length;
 
-    // A byte-level tokenizer cannot emit more tokens than the UTF-8 byte
-    // count, so one byte per available token is conservative for ASCII,
-    // CJK, emoji, and mixed JSON payloads.
-    expect(budget).toBe(200_000 - 32_768 - Buffer.byteLength('漢'.repeat(1_000), 'utf8') - 2);
+    expect(budget).toBe(200_000 - 32_768 - staticTokens - 1_024);
+    encoding.free();
+  });
+
+  it('leaves room for a production-sized 128 KiB OpenAI initial message', () => {
+    const budget = resolveToolLoopMessageBudget({
+      model: 'openai:gpt-5.6-terra',
+      maxOutputTokens: 32_768,
+      contextWindowTokens: 200_000,
+      system: 'Published ingestion instructions.\n'.repeat(1_200),
+      tools: Array.from({ length: 14 }, (_, index) => ({
+        name: `tool_${index}`,
+        description: 'Production tool description. '.repeat(24),
+        inputSchema: { type: 'object', properties: { slug: { type: 'string' } } },
+      })),
+    });
+    const messageBytes = Buffer.byteLength(JSON.stringify([{
+      role: 'user',
+      content: 'p'.repeat(128 * 1024),
+    }]), 'utf8');
+
+    expect(budget).toBeGreaterThanOrEqual(messageBytes);
   });
 
   it('fails closed when the full original task and required evidence cannot fit', () => {

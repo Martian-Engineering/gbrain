@@ -221,6 +221,8 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('"proposalDigest": "64 lowercase hex characters"');
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('Stage only one page per turn');
+    expect(skill).toContain('freeze the complete ordered page inventory');
+    expect(skill).toContain('at most 32 pages');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('4,000 characters');
     expect(skill).toContain('server derives the ordered');
