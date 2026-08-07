@@ -270,7 +270,8 @@ After every page is staged, call `brain_finalize_ingestion_proposal` in a
 separate turn with the exact binding fields, stable page count, ordered
 `page_digests`, summary, timeline entries, links, and unresolved items. The
 server rejects gaps, duplicates, changed digests, cross-job evidence, a full
-plan over 786,432 UTF-8 bytes, or a compact manifest over 262,144 UTF-8 bytes.
+plan over 786,432 UTF-8 bytes, more than 100 pages, a timeline `refLabel` over
+500 characters, or a compact manifest over 262,144 UTF-8 bytes.
 Return the finalizer's compact manifest as `staged_proposal`; never reproduce
 page bodies or baselines in the final receipt. Never truncate or split a
 proposal.

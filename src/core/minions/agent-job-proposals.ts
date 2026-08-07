@@ -11,6 +11,9 @@ export const PROPOSAL_AGGREGATE_MAX_BYTES = 786_432;
 /** Maximum UTF-8 size of the compact receipt manifest. */
 export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
 
+/** Maximum number of pages in one finalized proposal. */
+export const PROPOSAL_MAX_PAGES = 100;
+
 export const STAGE_PROPOSAL_TOOL_NAME = 'brain_stage_ingestion_proposal_page';
 export const FINALIZE_PROPOSAL_TOOL_NAME = 'brain_finalize_ingestion_proposal';
 
@@ -195,7 +198,7 @@ export async function stageAgentJobProposalPage(
     throw new AgentJobProposalError('stage_input_too_large', 'Proposal page input exceeds the staging byte limit.');
   }
   const sequence = readPositiveInteger(input.sequence, 'sequence');
-  const totalPages = readPositiveInteger(input.total_pages, 'total_pages');
+  const totalPages = readProposalPageCount(input.total_pages);
   if (sequence > totalPages) {
     throw new AgentJobProposalError('invalid_sequence', 'sequence must be within 1..total_pages.');
   }
@@ -266,7 +269,7 @@ export async function finalizeAgentJobProposal(
   if (proposalToolInputBytes(input) > PROPOSAL_STAGE_INPUT_MAX_BYTES) {
     throw new AgentJobProposalError('finalize_input_too_large', 'Proposal finalization input exceeds the tool byte limit.');
   }
-  const totalPages = readPositiveInteger(input.total_pages, 'total_pages');
+  const totalPages = readProposalPageCount(input.total_pages);
   const requestedDigests = parseRequestedDigests(input.page_digests, totalPages);
   const summary = readBoundedString(input.summary, 'summary', 1_000);
   const timeline = parseTimelineEntries(input.proposed_timeline_entries ?? []);
@@ -585,7 +588,7 @@ function parseTimelineEntries(raw: unknown): ScopedProposalTimelineEntry[] {
       text: readBoundedString(record.text, 'timeline.text', 1_000),
       ref: readCanonicalSlug(record.ref, 'timeline.ref'),
     };
-    if ('refLabel' in record) result.refLabel = readBoundedString(record.refLabel, 'timeline.refLabel', 1_000);
+    if ('refLabel' in record) result.refLabel = readBoundedString(record.refLabel, 'timeline.refLabel', 500);
     return result;
   });
 }
@@ -642,6 +645,17 @@ function readPositiveInteger(raw: unknown, name: string): number {
     throw new AgentJobProposalError('invalid_integer', `${name} must be an integer from 1 to 1000.`);
   }
   return Number(raw);
+}
+
+function readProposalPageCount(raw: unknown): number {
+  const totalPages = readPositiveInteger(raw, 'total_pages');
+  if (totalPages > PROPOSAL_MAX_PAGES) {
+    throw new AgentJobProposalError(
+      'invalid_total_pages',
+      `total_pages must be at most ${PROPOSAL_MAX_PAGES}.`,
+    );
+  }
+  return totalPages;
 }
 
 function readRecord(raw: unknown, name: string): Record<string, unknown> {

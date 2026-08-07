@@ -4,8 +4,11 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   AgentJobProposalError,
   PROPOSAL_AGGREGATE_MAX_BYTES,
+  PROPOSAL_MANIFEST_MAX_BYTES,
+  PROPOSAL_MAX_PAGES,
   PROPOSAL_STAGE_INPUT_MAX_BYTES,
   assertProposalToolTurnPersistable,
+  canonicalProposalJson,
   digestProposalValue,
   finalizeAgentJobProposal,
   getOwnedAgentJobProposal,
@@ -99,6 +102,13 @@ describe('proposal turn pre-persistence boundary', () => {
 });
 
 describe('durable agent-job proposal staging', () => {
+  it('rejects proposal page counts above the shared 100-page contract', async () => {
+    const jobId = await seedJob();
+    await expect(stage(jobId, 1, 101, createPage('sources/too-many')))
+      .rejects.toMatchObject({ code: 'invalid_total_pages' });
+    expect(PROPOSAL_MAX_PAGES).toBe(100);
+  });
+
   it('stages exact pages, finalizes an ordered manifest, and retrieves the full owned plan', async () => {
     const jobId = await seedJob();
     const first = await stage(jobId, 1, 2, createPage('sources/example'));
@@ -243,6 +253,26 @@ describe('durable agent-job proposal staging', () => {
     })).rejects.toMatchObject({ code: 'invalid_timeline' });
   });
 
+  it('rejects timeline reference labels above the shared 500-character contract', async () => {
+    const jobId = await seedJob();
+    const page = await stage(jobId, 1, 1, createPage('sources/example'));
+    await expect(finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include project delivery notes.',
+      total_pages: 1,
+      page_digests: [{ sequence: 1, digest: page.digest }],
+      summary: 'Invalid reference label.',
+      proposed_timeline_entries: [{
+        pageSlug: 'sources/example',
+        date: '2026-08-07',
+        text: 'Delivery review completed.',
+        ref: 'sources/example',
+        refLabel: 'x'.repeat(501),
+      }],
+    })).rejects.toMatchObject({ code: 'invalid_string' });
+  });
+
   it('rejects job, owner, source, artifact, scope, and stored-fragment binding mismatches', async () => {
     const jobId = await seedJob();
     await expect(stageAgentJobProposalPage(engine, jobId, {
@@ -298,5 +328,45 @@ describe('durable agent-job proposal staging', () => {
     );
     expect(Number(rows[0]!.count)).toBe(0);
     expect(PROPOSAL_AGGREGATE_MAX_BYTES).toBe(786_432);
+    expect(PROPOSAL_MANIFEST_MAX_BYTES).toBe(256 * 1024);
+  });
+
+  it('accepts a raw aggregate plan exactly at the shared ceiling', async () => {
+    const jobId = await seedJob();
+    const pageCount = 5;
+    const pages = Array.from({ length: pageCount }, (_, index) =>
+      createPage(`sources/boundary-${index + 1}`, 'x'.repeat(150_000)));
+    const basePlan = {
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include project delivery notes.',
+      summary: 'Boundary.',
+      proposedPages: pages,
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    };
+    const remaining = PROPOSAL_AGGREGATE_MAX_BYTES -
+      Buffer.byteLength(canonicalProposalJson(basePlan), 'utf8');
+    pages[pageCount - 1]!.bodyMarkdown += 'y'.repeat(remaining);
+    const digests = [];
+    for (let sequence = 1; sequence <= pageCount; sequence++) {
+      digests.push(await stage(jobId, sequence, pageCount, pages[sequence - 1]!));
+    }
+
+    const manifest = await finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
+      total_pages: pageCount,
+      page_digests: digests.map(({ sequence, digest }) => ({ sequence, digest })),
+      summary: 'Boundary.',
+    });
+    const owned = await getOwnedAgentJobProposal(
+      engine,
+      jobId,
+      'lore-client',
+      manifest.proposalDigest,
+    );
+    expect(Buffer.byteLength(canonicalProposalJson(owned.plan), 'utf8'))
+      .toBe(PROPOSAL_AGGREGATE_MAX_BYTES);
   });
 });
