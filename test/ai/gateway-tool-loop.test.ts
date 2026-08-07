@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
   toolLoop,
   __setChatTransportForTests,
@@ -374,8 +375,125 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
 
     expect(compacted[0]).toEqual({ role: 'user', content: task });
     expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(130_000);
-    expect(JSON.stringify(compacted.slice(1))).toContain('Context compacted');
+    expect(JSON.stringify(compacted.slice(1))).toContain('working_context_projection');
     expect(JSON.stringify(compacted[0])).not.toContain('[middle omitted]');
+  });
+
+  it('projects large read results as explicit metadata without implying artifact truncation', () => {
+    // Arrange a complete production-sized task followed by enough large reads
+    // to force provider-only compaction of both get_page and search results.
+    const completeArtifact = [
+      'Ingest this complete artifact. artifactIntegrity.complete=true\n',
+      'a'.repeat(50_000),
+      '\nCOMPLETE_ARTIFACT_MIDDLE\n',
+      'z'.repeat(50_000),
+    ].join('');
+    const messages: ChatMessage[] = [{ role: 'user', content: completeArtifact }];
+    for (let i = 0; i < 12; i++) {
+      const toolName = i % 2 === 0 ? 'get_page' : 'search';
+      messages.push({
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: `read-${i}`,
+          toolName,
+          input: toolName === 'get_page'
+            ? { slug: `notes/page-${i}` }
+            : { query: `artifact topic ${i}` },
+        }],
+      });
+      messages.push({
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: `read-${i}`,
+          toolName,
+          output: { slug: `notes/page-${i}`, body: `${i}:`.repeat(20_000) },
+        }],
+      });
+    }
+    const durableSnapshot = structuredClone(messages);
+
+    // Act on the provider projection only.
+    const compacted = compactToolLoopMessages(messages, 130_000, {
+      mutatingToolNames: new Set(),
+    });
+    const serialized = JSON.stringify(compacted);
+
+    // Assert the complete task remains authoritative and projections are
+    // checkable metadata, never source-looking omission previews.
+    expect(compacted[0]).toEqual({ role: 'user', content: completeArtifact });
+    expect(serialized).toContain('COMPLETE_ARTIFACT_MIDDLE');
+    expect(serialized).toContain('working_context_projection');
+    expect(serialized).toContain('original_json_utf8_bytes');
+    expect(serialized).toContain('sha256');
+    expect(serialized).toContain('Re-run search');
+    expect(serialized).not.toContain('[middle omitted]');
+
+    const lastResult = compacted.at(-1)!;
+    expect(lastResult.role).toBe('user');
+    expect(typeof lastResult.content).not.toBe('string');
+    const resultBlock = typeof lastResult.content === 'string'
+      ? undefined
+      : lastResult.content.find(block => block.type === 'tool-result');
+    const output = resultBlock && resultBlock.type === 'tool-result'
+      ? resultBlock.output as Record<string, Record<string, unknown>>
+      : {};
+    const metadata = output.working_context_projection;
+    const originalOutput = (messages.at(-1)!.content as ChatBlock[])[0]!;
+    const originalJson = JSON.stringify(
+      originalOutput.type === 'tool-result' ? originalOutput.output : null,
+    );
+    expect(metadata.original_json_utf8_bytes).toBe(Buffer.byteLength(originalJson, 'utf8'));
+    expect(metadata.sha256).toBe(createHash('sha256').update(originalJson).digest('hex'));
+    expect(metadata.interpretation).toBe('projection_metadata_not_source_content');
+    expect(messages).toEqual(durableSnapshot);
+  });
+
+  it('tiers projections for tight budgets while preserving a balanced tool round', () => {
+    // Arrange one round whose narrative and result both require projection.
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Read the page and continue from verified evidence.' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: `Historical working note: ${'n'.repeat(4_000)}` },
+          {
+            type: 'tool-call',
+            toolCallId: 'tight-read',
+            toolName: 'get_page',
+            input: { slug: 'notes/tight-budget' },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'tight-read',
+          toolName: 'get_page',
+          output: { body: 'p'.repeat(20_000) },
+        }],
+      },
+    ];
+
+    // Act with a budget that requires the minimal metadata tier.
+    const compacted = compactToolLoopMessages(messages, 500, {
+      mutatingToolNames: new Set(),
+    });
+    const serialized = JSON.stringify(compacted);
+
+    // Assert the tool call/result stay paired and even tighter budgets fail
+    // closed instead of emitting an invalid provider transcript.
+    expect(serialized.length).toBeLessThanOrEqual(500);
+    expect(serialized).toContain('"working_context_projection":true');
+    expect(serialized).toContain('gbrain working-context projection');
+    expect(serialized).toContain('tight-read');
+    expect(serialized).not.toContain('[middle omitted]');
+    expect(compacted).toHaveLength(3);
+    expect(() => compactToolLoopMessages(messages, 200, {
+      mutatingToolNames: new Set(),
+    })).toThrow(ToolLoopContextProjectionError);
   });
 
   it('fails closed when the full original task and required evidence cannot fit', () => {

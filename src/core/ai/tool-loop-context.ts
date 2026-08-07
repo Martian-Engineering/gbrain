@@ -30,6 +30,11 @@ interface ToolRound {
   evidence: ToolEvidence[];
 }
 
+interface WorkingContextProjectionSource {
+  kind: 'tool_input' | 'tool_result';
+  toolName: string;
+}
+
 export interface ToolLoopContextOptions {
   /** Tools whose effects must retain a distinct identity when raw rounds drop. */
   mutatingToolNames?: ReadonlySet<string>;
@@ -191,14 +196,26 @@ function compactRound(round: ToolRound, perPayload: number): ToolRound {
       content: mapBlocks(round.assistant, block => {
         if (block.type === 'text') return { ...block, text: boundMiddle(block.text, perPayload) };
         if (block.type !== 'tool-call') return block;
-        return { ...block, input: boundValue(block.input, perPayload) };
+        return {
+          ...block,
+          input: boundValue(block.input, perPayload, {
+            kind: 'tool_input',
+            toolName: block.toolName,
+          }),
+        };
       }),
     },
     result: {
       ...round.result,
       content: mapBlocks(round.result, block => {
         if (block.type !== 'tool-result') return block;
-        return { ...block, output: boundValue(block.output, perPayload) };
+        return {
+          ...block,
+          output: boundValue(block.output, perPayload, {
+            kind: 'tool_result',
+            toolName: block.toolName,
+          }),
+        };
       }),
     },
   };
@@ -303,21 +320,51 @@ function mapBlocks(message: ChatMessage, fn: (block: ChatBlock) => ChatBlock): C
   return typeof message.content === 'string' ? message.content : message.content.map(fn);
 }
 
-function boundValue(value: unknown, maxChars: number): unknown {
+function boundValue(
+  value: unknown,
+  maxChars: number,
+  source: WorkingContextProjectionSource,
+): unknown {
   const serialized = safeJson(value);
   if (serialized.length <= maxChars) return value;
-  return {
-    _gbrain_context_compacted: true,
-    original_chars: serialized.length,
-    ...(maxChars >= 64 ? { preview: boundMiddle(serialized, Math.max(16, maxChars - 80)) } : {}),
+
+  // Full projections carry enough identity to verify or re-read the exact
+  // durable value without presenting any fragment as source content.
+  const originalBytes = Buffer.byteLength(serialized, 'utf8');
+  const sha256 = createHash('sha256').update(serialized).digest('hex');
+  const full = {
+    working_context_projection: {
+      schema: 'gbrain.working_context_projection.v1',
+      kind: source.kind,
+      tool_name: source.toolName,
+      original_json_utf8_bytes: originalBytes,
+      sha256,
+      interpretation: 'projection_metadata_not_source_content',
+      re_read_guidance: source.kind === 'tool_result'
+        ? `Re-run ${source.toolName} with focused input if exact content is needed.`
+        : `Do not reconstruct the exact ${source.toolName} input from this projection; consult durable execution evidence.`,
+    },
   };
+  if (safeJson(full).length <= maxChars) return full;
+
+  // Preserve the checkable identity under tighter budgets. The smallest
+  // tier remains unmistakable metadata while letting atomic rounds fit.
+  const compact = {
+    working_context_projection: {
+      original_json_utf8_bytes: originalBytes,
+      sha256,
+    },
+  };
+  return safeJson(compact).length <= maxChars
+    ? compact
+    : { working_context_projection: true };
 }
 
 function boundMiddle(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
-  const marker = '\n... [middle omitted] ...\n';
-  if (maxChars <= marker.length) return text.slice(0, maxChars);
+  const marker = '\n[gbrain working-context projection: exact text retained in durable execution ledger]\n';
+  if (maxChars <= marker.length) return marker.slice(0, maxChars);
   const available = maxChars - marker.length;
   const head = Math.ceil(available / 2);
   return text.slice(0, head) + marker + text.slice(text.length - (available - head));
