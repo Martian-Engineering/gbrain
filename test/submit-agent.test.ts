@@ -139,11 +139,13 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     });
     it('publishes non-corpus-mutating staged proposal operations', () => {
       expect(submit_agent.params.proposal_artifact_id).toBeDefined();
+      expect(submit_agent.params.proposal_capture_page_slug).toBeDefined();
       expect(submit_agent.params.proposal_admission_scope).toBeDefined();
       expect(stage_ingestion_proposal_page?.scope).toBe('agent');
       expect(stage_ingestion_proposal_page?.mutating).toBe(false);
       expect(finalize_ingestion_proposal?.scope).toBe('agent');
       expect(finalize_ingestion_proposal?.mutating).toBe(false);
+      expect(finalize_ingestion_proposal?.params.page_digests).toBeUndefined();
       expect(get_agent_job_proposal?.scope).toBe('agent');
     });
   });
@@ -374,7 +376,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
-    it('requires and persists the proposal artifact and admission-scope binding together', async () => {
+    it('requires ingestion artifact and capture bindings while allowing first-stage scope selection', async () => {
       await seedClient('cursor', {
         bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
         bound_source_id: 'company',
@@ -384,24 +386,57 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       await expect(callSubmitAgent(ctx, {
         prompt: 'propose',
         proposal_artifact_id: 'artifact-1',
-      })).rejects.toThrow(/must be supplied together/);
+      })).rejects.toThrow(/capture page slug/i);
       await expect(callSubmitAgent(ctx, {
         prompt: 'propose',
         proposal_admission_scope: 'Include delivery notes.',
-      })).rejects.toThrow(/must be supplied together/);
+      })).rejects.toThrow(/artifact and capture/i);
 
       const result = await callSubmitAgent(ctx, {
         prompt: 'propose',
         proposal_artifact_id: 'artifact-1',
-        proposal_admission_scope: 'Include delivery notes.',
+        proposal_capture_page_slug: 'sources/example',
       });
       const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
         'SELECT data FROM minion_jobs WHERE id = $1',
         [result.id],
       );
       expect(row.data.proposal_artifact_id).toBe('artifact-1');
-      expect(row.data.proposal_admission_scope).toBe('Include delivery notes.');
+      expect(row.data.proposal_capture_page_slug).toBe('sources/example');
+      expect(row.data.proposal_admission_scope).toBeUndefined();
       expect(row.data.source_id).toBe('company');
+    });
+
+    it('rejects proposal-tool jobs without a bound source, slug fence, or capture inside the fence', async () => {
+      await seedClient('unscoped', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: null,
+        bound_slug_prefixes: ['sources/'],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'unscoped' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/bound source/i);
+
+      await seedClient('unfenced', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: [],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'unfenced' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/slug fence/i);
+
+      await seedClient('wrong-capture', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['projects/'],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'wrong-capture' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/capture page.*slug fence/i);
     });
 
     it('deduplicates a client idempotency key before enforcing concurrency', async () => {
@@ -1177,7 +1212,9 @@ describe('staged proposal operation contract', () => {
         __owner_client_id: 'lore',
         source_id: 'company',
         proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
         proposal_admission_scope: 'Include delivery notes.',
+        allowed_slug_prefixes: ['sources/*'],
       })],
     );
     const agentCtx = { ...makeCtx({ clientId: 'lore' }), viaSubagent: true, jobId: row.id };
@@ -1199,7 +1236,6 @@ describe('staged proposal operation contract', () => {
       source_id: 'company',
       admission_scope: 'Include delivery notes.',
       total_pages: 1,
-      page_digests: [{ sequence: 1, digest: staged.digest }],
       summary: 'Ready for review.',
       proposed_timeline_entries: [],
       proposed_links: [],

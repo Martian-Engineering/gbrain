@@ -49,6 +49,8 @@ import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
+import { matchesSlugAllowList, slugFenceContains } from './slug-allow-list.ts';
+export { matchesSlugAllowList } from './slug-allow-list.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
@@ -228,52 +230,6 @@ export function validatePageSlug(slug: string): void {
   if (!new RegExp(`^${PAGE_SLUG_SEG}(\\/${PAGE_SLUG_SEG})*$`, 'i').test(slug)) {
     throw new OperationError('invalid_params', `Invalid page_slug: ${slug} (allowed: alphanumeric, CJK, hyphens, forward-slash separated segments)`);
   }
-}
-
-/**
- * Match a slug against a list of allow-list prefix globs.
- *
- * Glob form: `<prefix>/*` matches any slug starting with `<prefix>/` and
- * having at least one more segment (single or multi). Bare `<prefix>` (no
- * trailing `/*`) matches that exact slug only. The `*` is intentionally
- * permissive — depth is unbounded, so `wiki/originals/*` matches both
- * `wiki/originals/idea-x` and `wiki/originals/ideas/2026-04-25-idea-y`.
- *
- * Used by the v0.23 dream-cycle trusted-workspace path. Order doesn't
- * matter; the first match wins (returns true on any match).
- */
-export function matchesSlugAllowList(slug: string, prefixes: readonly string[]): boolean {
-  for (const p of prefixes) {
-    if (p.endsWith('/*')) {
-      const base = p.slice(0, -2);
-      if (slug === base) continue;
-      if (slug.startsWith(base + '/')) return true;
-    } else if (p.endsWith('/')) {
-      if (slug.startsWith(p) && slug.length > p.length) return true;
-    } else if (p === slug) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Return whether every slug matched by a requested fence is inside a bound fence. */
-function slugFenceContains(bound: string, requested: string): boolean {
-  const boundBase = recursiveSlugFenceBase(bound);
-  const requestedBase = recursiveSlugFenceBase(requested);
-  if (boundBase === null) {
-    return requestedBase === null && requested === bound;
-  }
-  const requestedAnchor = requestedBase ?? requested;
-  return requestedAnchor.startsWith(`${boundBase}/`)
-    || (requestedBase !== null && requestedAnchor === boundBase);
-}
-
-/** Strip the recursive suffix from one slash- or glob-form slug fence. */
-function recursiveSlugFenceBase(fence: string): string | null {
-  if (fence.endsWith('/*')) return fence.slice(0, -2);
-  if (fence.endsWith('/')) return fence.slice(0, -1);
-  return null;
 }
 
 /**
@@ -5367,9 +5323,13 @@ const submit_agent: Operation = {
       type: 'string',
       description: 'Exact ingestion artifact id bound to staged proposal tools for this job',
     },
+    proposal_capture_page_slug: {
+      type: 'string',
+      description: 'Exact capture page slug bound to staged proposal provenance for this job',
+    },
     proposal_admission_scope: {
       type: 'string',
-      description: 'Exact resolver admission scope bound to staged proposal tools for this job',
+      description: 'Exact resolver admission scope, or omit so the first staged page freezes it',
     },
   },
   mutating: true,
@@ -5457,20 +5417,56 @@ const submit_agent: Operation = {
     const proposalArtifactId = typeof p.proposal_artifact_id === 'string'
       ? p.proposal_artifact_id.trim()
       : '';
+    const proposalCapturePageSlug = typeof p.proposal_capture_page_slug === 'string'
+      ? p.proposal_capture_page_slug.trim()
+      : '';
     const proposalAdmissionScope = typeof p.proposal_admission_scope === 'string'
       ? p.proposal_admission_scope.trim()
       : '';
-    if ((proposalArtifactId.length > 0) !== (proposalAdmissionScope.length > 0)) {
+    const usesProposalTools = requestedTools.some((tool) => (
+      tool === 'stage_ingestion_proposal_page' || tool === 'finalize_ingestion_proposal'
+    ));
+    if ((proposalArtifactId.length > 0) !== (proposalCapturePageSlug.length > 0)) {
       throw new OperationError(
         'invalid_params',
-        'submit_agent: proposal_artifact_id and proposal_admission_scope must be supplied together.',
+        'submit_agent: proposal artifact and capture page slug must be supplied together.',
       );
     }
-    if (proposalArtifactId.length > 255 || proposalAdmissionScope.length > 8_000) {
+    if (proposalAdmissionScope && !proposalArtifactId) {
       throw new OperationError(
         'invalid_params',
-        'submit_agent: proposal artifact id or admission scope exceeds its bounded length.',
+        'submit_agent: proposal admission scope requires a proposal artifact and capture page binding.',
       );
+    }
+    if (usesProposalTools && (!proposalArtifactId || !proposalCapturePageSlug)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal-tool jobs require a proposal artifact and capture page slug.',
+      );
+    }
+    if (proposalArtifactId.length > 255 || proposalCapturePageSlug.length > 255 || proposalAdmissionScope.length > 8_000) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal artifact, capture page slug, or admission scope exceeds its bounded length.',
+      );
+    }
+    if (usesProposalTools && !boundSource) {
+      throw new OperationError('invalid_params', 'submit_agent: proposal-tool jobs require a bound source.');
+    }
+    if (usesProposalTools && requestedSlugPrefixes.length === 0) {
+      throw new OperationError('invalid_params', 'submit_agent: proposal-tool jobs require a non-empty slug fence.');
+    }
+    if (proposalCapturePageSlug) {
+      validatePageSlug(proposalCapturePageSlug);
+      if (proposalCapturePageSlug !== proposalCapturePageSlug.toLowerCase()) {
+        throw new OperationError('invalid_params', 'submit_agent: proposal capture page slug must be canonical lowercase.');
+      }
+      if (!matchesSlugAllowList(proposalCapturePageSlug, requestedSlugPrefixes)) {
+        throw new OperationError(
+          'permission_denied',
+          'submit_agent: proposal capture page is outside the requested slug fence.',
+        );
+      }
     }
     if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {
       throw new OperationError(
@@ -5546,6 +5542,7 @@ const submit_agent: Operation = {
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
         skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
         proposal_artifact_id: proposalArtifactId || null,
+        proposal_capture_page_slug: proposalCapturePageSlug || null,
         proposal_admission_scope: proposalAdmissionScope || null,
       };
     }
@@ -5587,7 +5584,8 @@ const submit_agent: Operation = {
     if (boundSource) jobData.source_id = boundSource;
     if (proposalArtifactId) {
       jobData.proposal_artifact_id = proposalArtifactId;
-      jobData.proposal_admission_scope = proposalAdmissionScope;
+      jobData.proposal_capture_page_slug = proposalCapturePageSlug;
+      if (proposalAdmissionScope) jobData.proposal_admission_scope = proposalAdmissionScope;
     }
     const job = await queue.add(
       'subagent',
@@ -5634,7 +5632,7 @@ const stage_ingestion_proposal_page: Operation = {
   params: {
     artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
     source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
-    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time or frozen by the first staged page' },
     sequence: { type: 'number', required: true, description: 'One-based page position' },
     total_pages: { type: 'number', required: true, description: 'Total number of pages in the proposal (1-100)' },
     page: { type: 'object', required: true, description: 'Exact create or update page proposal' },
@@ -5658,15 +5656,14 @@ const stage_ingestion_proposal_page: Operation = {
 
 const finalize_ingestion_proposal: Operation = {
   name: 'finalize_ingestion_proposal',
-  description: 'Validate and freeze the complete staged ingestion proposal, returning a compact digest manifest without page bodies.',
+  description: 'Validate and freeze the complete staged ingestion proposal, deriving a compact ordered digest manifest without page bodies.',
   // Freezing job evidence does not mutate pages, links, takes, or timelines.
   mutating: false,
   params: {
     artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
     source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
-    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope already frozen on the agent job' },
     total_pages: { type: 'number', required: true, description: 'Total number of staged pages (1-100)' },
-    page_digests: { type: 'array', required: true, items: { type: 'object' }, description: 'Ordered one-based sequence and digest pairs' },
     summary: { type: 'string', required: true, description: 'Compact source-grounded proposal summary' },
     proposed_timeline_entries: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen timeline entries' },
     proposed_links: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen typed links' },

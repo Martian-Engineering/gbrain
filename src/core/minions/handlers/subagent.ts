@@ -57,7 +57,10 @@ import { supportsReasoningEffort } from '../../ai/model-resolver.ts';
 import { randomUUIDv7 } from 'bun';
 import { isContextLimitMessage } from '../error-classify.ts';
 import { ToolLoopContextProjectionError } from '../../ai/tool-loop-context.ts';
-import { assertProposalToolTurnPersistable } from '../agent-job-proposals.ts';
+import {
+  assertProposalToolTurnPersistable,
+  assertProposalToolTurnPersistableForJob,
+} from '../agent-job-proposals.ts';
 
 // ── Defaults ────────────────────────────────────────────────
 
@@ -658,7 +661,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
       // Enforce proposal page count and byte limits before the assistant turn
       // makes its raw tool inputs durable in subagent_messages.
-      assertProposalToolTurnPersistable(blocks);
+      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
 
       // 3. Persist the assistant message BEFORE tool dispatch so replay
       //    sees a consistent state.
@@ -1015,6 +1018,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       nextMessageIdx,
     },
     onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {
+      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
       // Convert ChatBlock[] back to ContentBlock-shaped JSONB for persistence.
       // Storing the gateway's provider-neutral shape is the v2 content_blocks
       // contract; the D5 shim handles legacy reads from v1 rows.

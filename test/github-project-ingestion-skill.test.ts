@@ -222,6 +222,8 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('Stage only one page per turn');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
+    expect(skill).toContain('server derives the ordered');
+    expect(skill).not.toContain('ordered\n`page_digests`');
     expect(skill).toContain('"effect": "create | update"');
     expect(skill).toContain('Create entries have');
     expect(skill).toMatch(/Update entries add\s+exactly `baseMarkdown` and `expectedContentHash`/);

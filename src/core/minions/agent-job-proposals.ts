@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { assertValidSourceId } from '../source-id.ts';
+import { matchesSlugAllowList } from '../slug-allow-list.ts';
 
 /** Maximum UTF-8 size of one page-staging tool input. */
 export const PROPOSAL_STAGE_INPUT_MAX_BYTES = 196_608;
@@ -86,7 +87,6 @@ export interface FinalizeProposalInput {
   source_id: string;
   admission_scope: string;
   total_pages: number;
-  page_digests: unknown;
   summary: string;
   proposed_timeline_entries?: unknown;
   proposed_links?: unknown;
@@ -110,7 +110,30 @@ interface JobBinding {
   ownerClientId: string;
   sourceId: string;
   artifactId: string;
+  admissionScope: string | null;
+  capturePageSlug: string;
+  allowedSlugPrefixes: string[];
+}
+
+interface ParsedStageProposalPageInput {
+  artifactId: string;
+  sourceId: string;
   admissionScope: string;
+  sequence: number;
+  totalPages: number;
+  page: ScopedProposalPage;
+  pageDigest: string;
+}
+
+interface StoredProposalFragment {
+  sequence: number;
+  total_pages: number;
+  owner_client_id: string;
+  source_id: string;
+  artifact_id: string;
+  admission_scope: string;
+  page: unknown;
+  page_digest: string;
 }
 
 interface ProposalTurnBlock {
@@ -151,16 +174,7 @@ export function proposalToolInputBytes(input: unknown): number {
  * defense in depth.
  */
 export function assertProposalToolTurnPersistable(blocks: readonly ProposalTurnBlock[]): void {
-  const calls = blocks.flatMap((block) => {
-    const isCall = block.type === 'tool_use' || block.type === 'tool-call';
-    if (!isCall) return [];
-    const name = typeof block.name === 'string'
-      ? block.name
-      : typeof block.toolName === 'string'
-        ? block.toolName
-        : '';
-    return [{ name, input: block.input }];
-  });
+  const calls = proposalToolCalls(blocks);
   const stageCalls = calls.filter((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
   const finalizeCalls = calls.filter((call) => call.name === FINALIZE_PROPOSAL_TOOL_NAME);
   if (stageCalls.length > 1) {
@@ -187,6 +201,46 @@ export function assertProposalToolTurnPersistable(blocks: readonly ProposalTurnB
   }
 }
 
+/**
+ * Check cumulative staged bytes before persisting a fresh assistant turn.
+ *
+ * The same-sequence, same-content replay contributes zero new bytes. The
+ * staging transaction repeats this check while holding the job row lock.
+ */
+export async function assertProposalToolTurnPersistableForJob(
+  engine: BrainEngine,
+  jobId: number,
+  blocks: readonly ProposalTurnBlock[],
+): Promise<void> {
+  assertProposalToolTurnPersistable(blocks);
+  const stageCall = proposalToolCalls(blocks)
+    .find((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
+  if (!stageCall) return;
+  const candidate = parseStageProposalPageInput(stageCall.input);
+
+  await engine.transaction(async (tx) => {
+    const binding = await readJobBinding(tx, jobId, true);
+    assertBindingMatches(binding, candidate);
+    assertSlugAllowed(binding, candidate.page.slug, 'Proposed page');
+    const fragments = await readStoredFragments(tx, jobId);
+    assertCumulativeStageFits(binding, candidate, fragments);
+  });
+}
+
+/** Extract provider-neutral and legacy proposal tool-call shapes. */
+function proposalToolCalls(blocks: readonly ProposalTurnBlock[]): Array<{ name: string; input: unknown }> {
+  return blocks.flatMap((block) => {
+    const isCall = block.type === 'tool_use' || block.type === 'tool-call';
+    if (!isCall) return [];
+    const name = typeof block.name === 'string'
+      ? block.name
+      : typeof block.toolName === 'string'
+        ? block.toolName
+        : '';
+    return [{ name, input: block.input }];
+  });
+}
+
 /** Stage one exact page proposal in the current agent job's durable ledger. */
 export async function stageAgentJobProposalPage(
   engine: BrainEngine,
@@ -194,26 +248,29 @@ export async function stageAgentJobProposalPage(
   input: StageProposalPageInput,
 ): Promise<ProposalPageDigest> {
   assertSafeJobId(jobId);
-  if (proposalToolInputBytes(input) > PROPOSAL_STAGE_INPUT_MAX_BYTES) {
-    throw new AgentJobProposalError('stage_input_too_large', 'Proposal page input exceeds the staging byte limit.');
-  }
-  const sequence = readPositiveInteger(input.sequence, 'sequence');
-  const totalPages = readProposalPageCount(input.total_pages);
-  if (sequence > totalPages) {
-    throw new AgentJobProposalError('invalid_sequence', 'sequence must be within 1..total_pages.');
-  }
-  const page = parseProposalPage(input.page);
-  const pageDigest = digestProposalValue(page);
+  const candidate = parseStageProposalPageInput(input);
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
-    assertBindingMatches(binding, input.artifact_id, input.source_id, input.admission_scope);
+    assertBindingMatches(binding, candidate);
+    const frozenBinding = await freezeAdmissionScope(tx, jobId, binding, candidate.admissionScope);
+    assertSlugAllowed(frozenBinding, candidate.page.slug, 'Proposed page');
     const finalized = await tx.executeRaw<{ proposal_digest: string }>(
       `SELECT proposal_digest FROM agent_job_proposals WHERE job_id = $1`,
       [jobId],
     );
     if (finalized.length > 0) {
       throw new AgentJobProposalError('proposal_finalized', 'This job proposal is already finalized.');
+    }
+
+    const fragments = await readStoredFragments(tx, jobId);
+    const replay = assertCumulativeStageFits(frozenBinding, candidate, fragments);
+    if (replay) {
+      return {
+        sequence: candidate.sequence,
+        slug: candidate.page.slug,
+        digest: candidate.pageDigest,
+      };
     }
 
     await tx.executeRaw(
@@ -223,39 +280,16 @@ export async function stageAgentJobProposalPage(
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9)
        ON CONFLICT (job_id, sequence) DO NOTHING`,
       [
-        jobId, binding.ownerClientId, binding.sourceId, binding.artifactId,
-        binding.admissionScope, sequence, totalPages, canonicalProposalJson(page), pageDigest,
+        jobId, frozenBinding.ownerClientId, frozenBinding.sourceId, frozenBinding.artifactId,
+        frozenBinding.admissionScope, candidate.sequence, candidate.totalPages,
+        canonicalProposalJson(candidate.page), candidate.pageDigest,
       ],
     );
-    const rows = await tx.executeRaw<{
-      source_id: string;
-      artifact_id: string;
-      admission_scope: string;
-      total_pages: number;
-      page: unknown;
-      page_digest: string;
-    }>(
-      `SELECT source_id, artifact_id, admission_scope, total_pages, page, page_digest
-         FROM agent_job_proposal_fragments
-        WHERE job_id = $1 AND sequence = $2`,
-      [jobId, sequence],
-    );
-    const existing = rows[0];
-    if (
-      !existing
-      || existing.source_id !== binding.sourceId
-      || existing.artifact_id !== binding.artifactId
-      || existing.admission_scope !== binding.admissionScope
-      || Number(existing.total_pages) !== totalPages
-      || existing.page_digest !== pageDigest
-      || canonicalProposalJson(existing.page) !== canonicalProposalJson(page)
-    ) {
-      throw new AgentJobProposalError(
-        'conflicting_fragment',
-        `Sequence ${sequence} already contains a different proposal fragment.`,
-      );
-    }
-    return { sequence, slug: page.slug, digest: pageDigest };
+    return {
+      sequence: candidate.sequence,
+      slug: candidate.page.slug,
+      digest: candidate.pageDigest,
+    };
   });
 }
 
@@ -270,7 +304,10 @@ export async function finalizeAgentJobProposal(
     throw new AgentJobProposalError('finalize_input_too_large', 'Proposal finalization input exceeds the tool byte limit.');
   }
   const totalPages = readProposalPageCount(input.total_pages);
-  const requestedDigests = parseRequestedDigests(input.page_digests, totalPages);
+  const artifactId = readBoundedString(input.artifact_id, 'artifact_id', 255);
+  const sourceId = readBoundedString(input.source_id, 'source_id', 255);
+  assertValidSourceId(sourceId);
+  const admissionScope = readBoundedString(input.admission_scope, 'admission_scope', 8_000);
   const summary = readBoundedString(input.summary, 'summary', 1_000);
   const timeline = parseTimelineEntries(input.proposed_timeline_entries ?? []);
   const links = parseLinks(input.proposed_links ?? []);
@@ -278,24 +315,9 @@ export async function finalizeAgentJobProposal(
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
-    assertBindingMatches(binding, input.artifact_id, input.source_id, input.admission_scope);
-    const fragments = await tx.executeRaw<{
-      sequence: number;
-      total_pages: number;
-      owner_client_id: string;
-      source_id: string;
-      artifact_id: string;
-      admission_scope: string;
-      page: unknown;
-      page_digest: string;
-    }>(
-      `SELECT sequence, total_pages, owner_client_id, source_id, artifact_id,
-              admission_scope, page, page_digest
-         FROM agent_job_proposal_fragments
-        WHERE job_id = $1
-        ORDER BY sequence`,
-      [jobId],
-    );
+    assertBindingMatches(binding, { artifactId, sourceId, admissionScope });
+    const boundScope = requireBoundAdmissionScope(binding);
+    const fragments = await readStoredFragments(tx, jobId);
     if (fragments.length !== totalPages) {
       throw new AgentJobProposalError(
         'fragment_gap',
@@ -309,7 +331,6 @@ export async function finalizeAgentJobProposal(
     for (let index = 0; index < fragments.length; index++) {
       const expectedSequence = index + 1;
       const fragment = fragments[index]!;
-      const requested = requestedDigests[index]!;
       if (Number(fragment.sequence) !== expectedSequence || Number(fragment.total_pages) !== totalPages) {
         throw new AgentJobProposalError('fragment_gap', 'Staged proposal sequences are not exactly contiguous.');
       }
@@ -317,31 +338,30 @@ export async function finalizeAgentJobProposal(
         fragment.owner_client_id !== binding.ownerClientId
         || fragment.source_id !== binding.sourceId
         || fragment.artifact_id !== binding.artifactId
-        || fragment.admission_scope !== binding.admissionScope
+        || fragment.admission_scope !== boundScope
       ) {
         throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
       }
       const page = parseProposalPage(fragment.page);
       if (
-        requested.sequence !== expectedSequence
-        || requested.digest !== fragment.page_digest
-        || digestProposalValue(page) !== fragment.page_digest
+        digestProposalValue(page) !== fragment.page_digest
       ) {
         throw new AgentJobProposalError('digest_mismatch', `Digest mismatch at sequence ${expectedSequence}.`);
       }
       if (seenSlugs.has(page.slug)) {
         throw new AgentJobProposalError('duplicate_page', `Proposal contains duplicate page slug ${page.slug}.`);
       }
+      assertSlugAllowed(binding, page.slug, 'Proposed page');
       seenSlugs.add(page.slug);
       pages.push(page);
       pageDigests.push({ sequence: expectedSequence, slug: page.slug, digest: fragment.page_digest });
     }
-    validatePlanRelations(seenSlugs, timeline, links);
+    validatePlanRelations(binding, seenSlugs, timeline, links);
 
     const plan: ScopedAdmissionProposalPlan = {
       artifactId: binding.artifactId,
       sourceId: binding.sourceId,
-      admissionScope: binding.admissionScope,
+      admissionScope: boundScope,
       summary,
       proposedPages: pages,
       proposedTimelineEntries: timeline,
@@ -361,7 +381,7 @@ export async function finalizeAgentJobProposal(
       status: 'staged_proposal',
       artifactId: binding.artifactId,
       sourceId: binding.sourceId,
-      admissionScope: binding.admissionScope,
+      admissionScope: boundScope,
       summary,
       pageDigests,
       proposalDigest,
@@ -386,7 +406,7 @@ export async function finalizeAgentJobProposal(
        ON CONFLICT (job_id) DO NOTHING`,
       [
         jobId, binding.ownerClientId, binding.sourceId, binding.artifactId,
-        binding.admissionScope, totalPages, canonicalProposalJson(pageDigests),
+        boundScope, totalPages, canonicalProposalJson(pageDigests),
         planJson, proposalDigest, manifestJson,
       ],
     );
@@ -468,50 +488,200 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
     source_id: string | null;
     artifact_id: string | null;
     admission_scope: string | null;
+    capture_page_slug: string | null;
+    allowed_slug_prefixes: unknown;
   }>(
     `SELECT name,
             data->>'__owner_client_id' AS owner_client_id,
             data->>'source_id' AS source_id,
             data->>'proposal_artifact_id' AS artifact_id,
-            data->>'proposal_admission_scope' AS admission_scope
+            data->>'proposal_admission_scope' AS admission_scope,
+            data->>'proposal_capture_page_slug' AS capture_page_slug,
+            data->'allowed_slug_prefixes' AS allowed_slug_prefixes
        FROM minion_jobs
       WHERE id = $1${lock ? ' FOR UPDATE' : ''}`,
     [jobId],
   );
   const row = rows[0];
   if (
-    !row || row.name !== 'subagent' || !row.owner_client_id || !row.artifact_id
-    || !row.admission_scope
+    !row || row.name !== 'subagent' || !row.owner_client_id || !row.source_id
+    || !row.artifact_id || !row.capture_page_slug
+    || !Array.isArray(row.allowed_slug_prefixes)
+    || row.allowed_slug_prefixes.length === 0
+    || row.allowed_slug_prefixes.some((prefix) => typeof prefix !== 'string' || prefix.length === 0)
   ) {
     throw new AgentJobProposalError(
       'job_not_bound',
-      'Agent job is not bound to an owner, proposal artifact, and admission scope.',
+      'Agent job is not bound to an owner, source, proposal artifact, capture page, and slug fence.',
     );
   }
-  const sourceId = row.source_id ?? 'default';
+  const sourceId = row.source_id;
   assertValidSourceId(sourceId);
+  const capturePageSlug = readCanonicalSlug(row.capture_page_slug, 'proposal_capture_page_slug');
+  const allowedSlugPrefixes = row.allowed_slug_prefixes as string[];
+  if (!matchesSlugAllowList(capturePageSlug, allowedSlugPrefixes)) {
+    throw new AgentJobProposalError(
+      'job_not_bound',
+      'Agent job capture page is outside its bound slug fence.',
+    );
+  }
   return {
     ownerClientId: row.owner_client_id,
     sourceId,
     artifactId: row.artifact_id,
     admissionScope: row.admission_scope,
+    capturePageSlug,
+    allowedSlugPrefixes,
   };
 }
 
 function assertBindingMatches(
   binding: JobBinding,
-  artifactId: unknown,
-  sourceId: unknown,
-  admissionScope: unknown,
+  requested: Pick<ParsedStageProposalPageInput, 'artifactId' | 'sourceId' | 'admissionScope'>,
 ): void {
   if (
-    artifactId !== binding.artifactId
-    || sourceId !== binding.sourceId
-    || admissionScope !== binding.admissionScope
+    requested.artifactId !== binding.artifactId
+    || requested.sourceId !== binding.sourceId
+    || (binding.admissionScope !== null && requested.admissionScope !== binding.admissionScope)
   ) {
     throw new AgentJobProposalError(
       'binding_mismatch',
       'Proposal artifact, source, or admission scope does not match the submitted agent job.',
+    );
+  }
+}
+
+/** Freeze a first-stage admission scope without changing any other job binding. */
+async function freezeAdmissionScope(
+  engine: BrainEngine,
+  jobId: number,
+  binding: JobBinding,
+  requestedScope: string,
+): Promise<JobBinding & { admissionScope: string }> {
+  if (binding.admissionScope === null) {
+    await engine.executeRaw(
+      `UPDATE minion_jobs
+          SET data = jsonb_set(data, '{proposal_admission_scope}', to_jsonb($2::text), true),
+              updated_at = now()
+        WHERE id = $1 AND data->>'proposal_admission_scope' IS NULL`,
+      [jobId, requestedScope],
+    );
+    binding.admissionScope = requestedScope;
+  }
+  if (binding.admissionScope !== requestedScope) {
+    throw new AgentJobProposalError(
+      'binding_mismatch',
+      'Proposal admission scope does not match the scope frozen by the first staged page.',
+    );
+  }
+  return binding as JobBinding & { admissionScope: string };
+}
+
+/** Require finalization to use a scope already frozen by a staged page. */
+function requireBoundAdmissionScope(binding: JobBinding): string {
+  if (binding.admissionScope === null) {
+    throw new AgentJobProposalError(
+      'job_not_bound',
+      'Agent job admission scope has not been frozen by a staged page.',
+    );
+  }
+  return binding.admissionScope;
+}
+
+/** Parse and normalize one page-staging input before any durable write. */
+function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput {
+  if (proposalToolInputBytes(raw) > PROPOSAL_STAGE_INPUT_MAX_BYTES) {
+    throw new AgentJobProposalError('stage_input_too_large', 'Proposal page input exceeds the staging byte limit.');
+  }
+  const input = readRecord(raw, 'stage proposal input');
+  const artifactId = readBoundedString(input.artifact_id, 'artifact_id', 255);
+  const sourceId = readBoundedString(input.source_id, 'source_id', 255);
+  assertValidSourceId(sourceId);
+  const admissionScope = readBoundedString(input.admission_scope, 'admission_scope', 8_000);
+  const sequence = readPositiveInteger(input.sequence, 'sequence');
+  const totalPages = readProposalPageCount(input.total_pages);
+  if (sequence > totalPages) {
+    throw new AgentJobProposalError('invalid_sequence', 'sequence must be within 1..total_pages.');
+  }
+  const page = parseProposalPage(input.page);
+  return {
+    artifactId,
+    sourceId,
+    admissionScope,
+    sequence,
+    totalPages,
+    page,
+    pageDigest: digestProposalValue(page),
+  };
+}
+
+/** Read every staged fragment in deterministic sequence order. */
+async function readStoredFragments(engine: BrainEngine, jobId: number): Promise<StoredProposalFragment[]> {
+  return engine.executeRaw<StoredProposalFragment>(
+    `SELECT sequence, total_pages, owner_client_id, source_id, artifact_id,
+            admission_scope, page, page_digest
+       FROM agent_job_proposal_fragments
+      WHERE job_id = $1
+      ORDER BY sequence`,
+    [jobId],
+  );
+}
+
+/**
+ * Validate replay identity and the cumulative canonical page-byte ceiling.
+ * Returns true only for an exact existing sequence replay.
+ */
+function assertCumulativeStageFits(
+  binding: JobBinding,
+  candidate: ParsedStageProposalPageInput,
+  fragments: readonly StoredProposalFragment[],
+): boolean {
+  let stagedBytes = 0;
+  let replay = false;
+  for (const fragment of fragments) {
+    if (
+      fragment.owner_client_id !== binding.ownerClientId
+      || fragment.source_id !== binding.sourceId
+      || fragment.artifact_id !== binding.artifactId
+      || fragment.admission_scope !== candidate.admissionScope
+      || Number(fragment.total_pages) !== candidate.totalPages
+    ) {
+      throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
+    }
+    const page = parseProposalPage(fragment.page);
+    const pageDigest = digestProposalValue(page);
+    if (pageDigest !== fragment.page_digest) {
+      throw new AgentJobProposalError('digest_mismatch', 'A staged fragment does not match its stored digest.');
+    }
+    stagedBytes += proposalToolInputBytes(page);
+    if (Number(fragment.sequence) !== candidate.sequence) continue;
+    if (
+      pageDigest !== candidate.pageDigest
+      || canonicalProposalJson(page) !== canonicalProposalJson(candidate.page)
+    ) {
+      throw new AgentJobProposalError(
+        'conflicting_fragment',
+        `Sequence ${candidate.sequence} already contains a different proposal fragment.`,
+      );
+    }
+    replay = true;
+  }
+  if (!replay) stagedBytes += proposalToolInputBytes(candidate.page);
+  if (stagedBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'proposal_too_large',
+      `Staged proposal pages are ${stagedBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
+    );
+  }
+  return replay;
+}
+
+/** Reject a proposed mutation target outside the job's durable slug fence. */
+function assertSlugAllowed(binding: JobBinding, slug: string, label: string): void {
+  if (!matchesSlugAllowList(slug, binding.allowedSlugPrefixes)) {
+    throw new AgentJobProposalError(
+      'slug_not_allowed',
+      `${label} ${slug} is outside the agent job slug fence.`,
     );
   }
 }
@@ -538,34 +708,11 @@ function parseProposalPage(raw: unknown): ScopedProposalPage {
   return { slug, effect, title, bodyMarkdown, baseMarkdown, expectedContentHash };
 }
 
-function parseRequestedDigests(raw: unknown, totalPages: number): Array<{ sequence: number; digest: string }> {
-  if (!Array.isArray(raw) || raw.length !== totalPages) {
-    throw new AgentJobProposalError('invalid_manifest', 'page_digests must contain exactly total_pages entries.');
-  }
-  const seen = new Set<number>();
-  return raw.map((entry, index) => {
-    const record = readRecord(entry, `page_digests[${index}]`);
-    assertExactKeys(record, ['sequence', 'digest'], `page_digests[${index}]`);
-    const sequence = readPositiveInteger(record.sequence, `page_digests[${index}].sequence`);
-    const digest = readString(record.digest, `page_digests[${index}].digest`);
-    if (!SHA256_RE.test(digest)) {
-      throw new AgentJobProposalError('invalid_manifest', `Invalid digest at sequence ${sequence}.`);
-    }
-    if (seen.has(sequence)) {
-      throw new AgentJobProposalError('duplicate_manifest_sequence', `Duplicate manifest sequence ${sequence}.`);
-    }
-    seen.add(sequence);
-    if (sequence !== index + 1) {
-      throw new AgentJobProposalError('fragment_gap', 'page_digests must be ordered and contiguous from 1.');
-    }
-    return { sequence, digest };
-  });
-}
-
 function parseTimelineEntries(raw: unknown): ScopedProposalTimelineEntry[] {
   if (!Array.isArray(raw) || raw.length > 40) {
     throw new AgentJobProposalError('invalid_timeline', 'proposed_timeline_entries must be an array of at most 40 entries.');
   }
+  const identities = new Set<string>();
   return raw.map((entry, index) => {
     const record = readRecord(entry, `proposed_timeline_entries[${index}]`);
     const keys = Object.keys(record).sort();
@@ -589,6 +736,11 @@ function parseTimelineEntries(raw: unknown): ScopedProposalTimelineEntry[] {
       ref: readCanonicalSlug(record.ref, 'timeline.ref'),
     };
     if ('refLabel' in record) result.refLabel = readBoundedString(record.refLabel, 'timeline.refLabel', 500);
+    const identity = canonicalProposalJson(result);
+    if (identities.has(identity)) {
+      throw new AgentJobProposalError('duplicate_timeline', 'Proposal contains duplicate timeline mutations.');
+    }
+    identities.add(identity);
     return result;
   });
 }
@@ -597,14 +749,21 @@ function parseLinks(raw: unknown): ScopedProposalLink[] {
   if (!Array.isArray(raw) || raw.length > 40) {
     throw new AgentJobProposalError('invalid_links', 'proposed_links must be an array of at most 40 entries.');
   }
+  const identities = new Set<string>();
   return raw.map((entry, index) => {
     const record = readRecord(entry, `proposed_links[${index}]`);
     assertExactKeys(record, ['from', 'to', 'type'], `proposed_links[${index}]`);
-    return {
+    const result = {
       from: readCanonicalSlug(record.from, 'link.from'),
       to: readCanonicalSlug(record.to, 'link.to'),
       type: readBoundedString(record.type, 'link.type', 128),
     };
+    const identity = canonicalProposalJson(result);
+    if (identities.has(identity)) {
+      throw new AgentJobProposalError('duplicate_links', 'Proposal contains duplicate link mutations.');
+    }
+    identities.add(identity);
+    return result;
   });
 }
 
@@ -616,18 +775,28 @@ function parseUnresolved(raw: unknown): string[] {
 }
 
 function validatePlanRelations(
+  binding: JobBinding,
   pageSlugs: ReadonlySet<string>,
   timeline: readonly ScopedProposalTimelineEntry[],
   links: readonly ScopedProposalLink[],
 ): void {
-  // The shared plan contract guarantees referential integrity. Provider
-  // skills own stricter provenance rules such as capture-page-only refs.
+  if (!pageSlugs.has(binding.capturePageSlug)) {
+    throw new AgentJobProposalError(
+      'missing_capture_page',
+      'The exact job-bound capture page must be included in proposed pages.',
+    );
+  }
   for (const entry of timeline) {
-    if (!pageSlugs.has(entry.ref)) {
-      throw new AgentJobProposalError('invalid_timeline', 'Every timeline ref must name a proposed page.');
+    assertSlugAllowed(binding, entry.pageSlug, 'Timeline target');
+    if (entry.ref !== binding.capturePageSlug) {
+      throw new AgentJobProposalError(
+        'invalid_timeline_capture',
+        'Every timeline ref must equal the exact job-bound capture page.',
+      );
     }
   }
   for (const link of links) {
+    assertSlugAllowed(binding, link.from, 'Link source');
     if (!pageSlugs.has(link.from)) {
       throw new AgentJobProposalError('invalid_links', 'Every proposed link from slug must name a proposed page.');
     }

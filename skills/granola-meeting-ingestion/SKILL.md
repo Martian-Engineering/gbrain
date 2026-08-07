@@ -267,9 +267,12 @@ excluded material or the admission scope. Scope provenance exists only in the
 top-level proposal receipt.
 
 After every page is staged, call `brain_finalize_ingestion_proposal` in a
-separate turn with the exact binding fields, stable page count, ordered
-`page_digests`, summary, timeline entries, links, and unresolved items. The
-server rejects gaps, duplicates, changed digests, cross-job evidence, a full
+separate turn with the exact binding fields, stable page count, summary,
+timeline entries, links, and unresolved items. The server derives the ordered
+page-digest manifest from the job's durable fragments, so finalization does not
+depend on old stage outputs remaining in model context. The server rejects
+gaps, duplicate or changed fragments, cross-job evidence, a capture page that
+does not match the exact job binding, mutations outside the job slug fence, a full
 plan over 786,432 UTF-8 bytes, more than 100 pages, a timeline `refLabel` over
 500 characters, or a compact manifest over 262,144 UTF-8 bytes.
 Return the finalizer's compact manifest as `staged_proposal`; never reproduce
