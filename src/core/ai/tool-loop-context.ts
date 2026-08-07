@@ -81,7 +81,7 @@ export function compactToolLoopMessages(
   if (jsonLength(messages) <= maxChars) return messages;
 
   const { rounds, otherCount } = collectToolRounds(messages);
-  const task = buildTaskAnchor(messages, Math.max(256, Math.floor(maxChars * 0.25)));
+  const task = buildTaskAnchor(messages);
   const retained: ToolRound[] = [];
   let retainedStart = rounds.length;
 
@@ -158,8 +158,8 @@ function collectToolRounds(messages: ChatMessage[]): { rounds: ToolRound[]; othe
   return { rounds, otherCount };
 }
 
-/** Preserve the original task and any later user correction, bounded in-place. */
-function buildTaskAnchor(messages: ChatMessage[], maxChars: number): ChatMessage {
+/** Preserve the complete original task and any later user correction. */
+function buildTaskAnchor(messages: ChatMessage[]): ChatMessage {
   const taskTexts = messages.filter(isTaskMessage).map(messageText).filter(Boolean);
   if (taskTexts.length === 0) {
     return { role: 'user', content: 'Continue the assigned task from the retained durable tool evidence.' };
@@ -169,7 +169,7 @@ function buildTaskAnchor(messages: ChatMessage[], maxChars: number): ChatMessage
   const combined = first === latest
     ? first
     : `Original task:\n${first}\n\nLatest user direction:\n${latest}`;
-  return { role: 'user', content: boundMiddle(combined, maxChars) };
+  return { role: 'user', content: combined };
 }
 
 /** Find the largest payload representation whose complete round fits. */

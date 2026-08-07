@@ -742,6 +742,7 @@ describe('get_agent_job owner-scoped receipt', () => {
       allowed_recovery_actions: [
         'finalize_verified_success',
         'continue_approved_work',
+        'retry_filing_from_current_state',
         'refresh_proposal',
         'close_without_remaining_writes',
       ],
@@ -816,6 +817,43 @@ describe('get_agent_job owner-scoped receipt', () => {
       owned.execution_evidence.operations[5].link_payload_sha256,
     );
     expect(JSON.stringify(owned.execution_evidence)).not.toContain('private');
+  });
+
+  it('attributes failed reads to the job-bound source', async () => {
+    await seedClient('lore', { bound_tools: ['get_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'private' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES ($1, 1, 'get-missing', 'brain_get_page', $2::jsonb, 'failed', NULL,
+               'private database detail', 0)`,
+      [row.id, JSON.stringify({ slug: 'concepts/missing' })],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.operations).toEqual([
+      expect.objectContaining({
+        operation: 'get_page',
+        execution_status: 'failed',
+        source_id: 'private',
+        slug: 'concepts/missing',
+      }),
+    ]);
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain(
+      'private database detail',
+    );
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
   });
 
   it('does not attribute a skipped duplicate hash to the requested slug', async () => {
@@ -899,6 +937,9 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.operations[0].link_payload_sha256).not.toBe(
       owned.execution_evidence.operations[1].link_payload_sha256,
     );
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
   });
 
   it('does not use a same-slug read from another source as write-back proof', async () => {
@@ -979,6 +1020,67 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.allowed_recovery_actions).toEqual([]);
   });
 
+  it('does not authorize current-state retry while a mutation is pending', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES
+         ($1, 1, 'put-failed', 'brain_put_page', $2::jsonb, 'failed', NULL, 0),
+         ($1, 2, 'put-pending', 'brain_put_page', $3::jsonb, 'pending', NULL, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'concepts/failed', content: '# Failed' }),
+        JSON.stringify({ slug: 'concepts/pending', content: '# Pending' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.availability).toBe('incomplete');
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
+  });
+
+  it('does not authorize current-state retry when mutation evidence is truncated', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       SELECT $1, item, 'put-' || item, 'brain_put_page',
+              jsonb_build_object('slug', 'concepts/' || item, 'content', '# Failed'),
+              'failed', NULL, 0
+         FROM generate_series(1, 501) AS item`,
+      [row.id],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.truncated).toBe(true);
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
+  });
+
   it('keeps evidence incomplete when an unsupported mutating tool ran', async () => {
     await seedClient('lore', { bound_tools: ['put_page', 'delete_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
@@ -990,9 +1092,12 @@ describe('get_agent_job owner-scoped receipt', () => {
     await engine.executeRaw(
       `INSERT INTO subagent_tool_executions
          (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
-       VALUES ($1, 1, 'delete-unsupported', 'brain_delete_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+       VALUES
+         ($1, 1, 'put-failed', 'brain_put_page', $2::jsonb, 'failed', NULL, 0),
+         ($1, 2, 'delete-unsupported', 'brain_delete_page', $3::jsonb, 'complete', $4::jsonb, 0)`,
       [
         row.id,
+        JSON.stringify({ slug: 'concepts/failed', content: '# Failed' }),
         JSON.stringify({ slug: 'concepts/private-deletion' }),
         JSON.stringify({ status: 'ok' }),
       ],
@@ -1012,5 +1117,8 @@ describe('get_agent_job owner-scoped receipt', () => {
       ],
     });
     expect(JSON.stringify(owned.execution_evidence)).not.toContain('private-deletion');
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
   });
 });

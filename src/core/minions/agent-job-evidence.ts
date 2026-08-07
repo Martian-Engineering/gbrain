@@ -22,6 +22,7 @@ interface ToolExecutionRow {
 type RecoveryAction =
   | 'finalize_verified_success'
   | 'continue_approved_work'
+  | 'retry_filing_from_current_state'
   | 'refresh_proposal'
   | 'close_without_remaining_writes';
 
@@ -68,6 +69,12 @@ export async function readAgentJobExecutionEvidence(
     mutatingToolNames.has(row.tool_name) && !isTrackedTool(row.tool_name)
   ).length;
   const pending = boundedRows.some((row) => row.status === 'pending');
+  const pendingMutation = operations.some((operation) =>
+    isMutationOperation(operation) && operation.execution_status === 'pending'
+  );
+  const failedMutation = operations.some((operation) =>
+    isMutationOperation(operation) && operation.execution_status === 'failed'
+  );
   const incompleteMutation = operations.some((operation) =>
     completedMutationLacksProof(operation)
   );
@@ -89,6 +96,8 @@ export async function readAgentJobExecutionEvidence(
       terminal,
       truncated,
       pending,
+      pendingMutation,
+      failedMutation,
       unsupportedMutationCount,
     }),
     source_id: sourceId,
@@ -154,8 +163,14 @@ function recoveryActions(input: {
   terminal: boolean;
   truncated: boolean;
   pending: boolean;
+  pendingMutation: boolean;
+  failedMutation: boolean;
   unsupportedMutationCount: number;
 }): RecoveryAction[] {
+  const retryFilingFromCurrentState = input.terminal &&
+    input.availability === 'complete' && !input.truncated &&
+    input.unsupportedMutationCount === 0 && !input.pendingMutation &&
+    input.failedMutation;
   if (!input.terminal || input.pending) return [];
   const closeOrRefresh: RecoveryAction[] = [
     'refresh_proposal',
@@ -168,10 +183,18 @@ function recoveryActions(input: {
     return [
       'finalize_verified_success',
       'continue_approved_work',
+      ...(retryFilingFromCurrentState
+        ? ['retry_filing_from_current_state' as const]
+        : []),
       ...closeOrRefresh,
     ];
   }
   return ['continue_approved_work', ...closeOrRefresh];
+}
+
+function isMutationOperation(operation: Record<string, unknown>): boolean {
+  return ['put_page', 'add_timeline_entry', 'add_link', 'remove_link']
+    .includes(String(operation.operation));
 }
 
 function isTrackedTool(toolName: string): toolName is typeof TRACKED_TOOLS[number] {
@@ -209,7 +232,7 @@ function evidenceForRow(
   if (row.tool_name === 'brain_get_page') {
     return {
       ...base,
-      source_id: stringValue(output.source_id),
+      source_id: row.status === 'failed' ? sourceId : stringValue(output.source_id),
       slug: stringValue(input.slug),
       observed_content_hash: hashValue(output.content_hash),
     };

@@ -338,6 +338,75 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(JSON.stringify(result.messages).length).toBeGreaterThan(3_400_000);
   });
 
+  it('preserves a production-sized original task while compacting tool history', () => {
+    const task = [
+      'Ingest the complete artifact exactly as assigned.\n',
+      'a'.repeat(57_000),
+      '\nTASK_MIDDLE_MUST_SURVIVE\n',
+      'z'.repeat(57_000),
+      '\nReturn the reviewed receipt.',
+    ].join('');
+    const messages: ChatMessage[] = [{ role: 'user', content: task }];
+    for (let i = 0; i < 6; i++) {
+      messages.push({
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: `read-${i}`,
+          toolName: 'search',
+          input: { query: `round-${i}` },
+        }],
+      });
+      messages.push({
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: `read-${i}`,
+          toolName: 'search',
+          output: { body: 'x'.repeat(20_000) },
+        }],
+      });
+    }
+
+    const compacted = compactToolLoopMessages(messages, 130_000, {
+      mutatingToolNames: new Set(),
+    });
+
+    expect(compacted[0]).toEqual({ role: 'user', content: task });
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(130_000);
+    expect(JSON.stringify(compacted.slice(1))).toContain('Context compacted');
+    expect(JSON.stringify(compacted[0])).not.toContain('[middle omitted]');
+  });
+
+  it('fails closed when the full original task and required evidence cannot fit', () => {
+    const task = `Apply this exact plan:\n${'p'.repeat(1_800)}`;
+    const messages: ChatMessage[] = [
+      { role: 'user', content: task },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: 'write-required',
+          toolName: 'put_page',
+          input: { slug: 'wiki/required', content: 'x'.repeat(2_000) },
+        }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'write-required',
+          toolName: 'put_page',
+          output: { ok: true },
+        }],
+      },
+    ];
+
+    expect(() => compactToolLoopMessages(messages, 2_000, {
+      mutatingToolNames: new Set(['put_page']),
+    })).toThrow(ToolLoopContextProjectionError);
+  });
+
   it('keeps distinct targets and per-call outcomes for omitted mutations', () => {
     const messages: ChatMessage[] = [{ role: 'user', content: 'Update both pages once.' }];
     for (const [id, slug, failed] of [
