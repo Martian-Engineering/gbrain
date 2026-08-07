@@ -11,6 +11,7 @@ import {
 } from '../../src/core/ai/gateway.ts';
 import {
   compactToolLoopMessages,
+  resolveToolLoopMessageBudget,
   ToolLoopContextProjectionError,
 } from '../../src/core/ai/tool-loop-context.ts';
 
@@ -494,6 +495,104 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(() => compactToolLoopMessages(messages, 200, {
       mutatingToolNames: new Set(),
     })).toThrow(ToolLoopContextProjectionError);
+  });
+
+  it('retains only structural mutation identity when a large write input is projected', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Write the page exactly once and report the target.' },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: 'large-write',
+          toolName: 'put_page',
+          input: {
+            slug: 'wiki/critical-target',
+            source_id: 'martian',
+            content: 'PRIVATE_BODY_PROSE'.repeat(2_000),
+          },
+        }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'large-write',
+          toolName: 'put_page',
+          output: { ok: true },
+        }],
+      },
+    ];
+    const durableSnapshot = structuredClone(messages);
+
+    const compacted = compactToolLoopMessages(messages, 600, {
+      mutatingToolNames: new Set(['put_page']),
+    });
+    const serialized = JSON.stringify(compacted);
+
+    expect(serialized).toContain('wiki/critical-target');
+    expect(serialized).toContain('martian');
+    expect(serialized).not.toContain('PRIVATE_BODY_PROSE');
+    expect(serialized).toContain('sha256');
+    expect(messages).toEqual(durableSnapshot);
+  });
+
+  it('bounds projections by UTF-8 bytes for dense Unicode content', () => {
+    const maxBytes = 2_000;
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Read the page and continue.' },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: 'unicode-read',
+          toolName: 'get_page',
+          input: { slug: 'notes/unicode' },
+        }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'unicode-read',
+          toolName: 'get_page',
+          output: { body: `${'漢'.repeat(2_000)}${'🧠'.repeat(2_000)}` },
+        }],
+      },
+    ];
+    const durableSnapshot = structuredClone(messages);
+
+    const compacted = compactToolLoopMessages(messages, maxBytes, {
+      mutatingToolNames: new Set(),
+    });
+
+    expect(Buffer.byteLength(JSON.stringify(compacted), 'utf8')).toBeLessThanOrEqual(maxBytes);
+    expect(JSON.stringify(compacted)).toContain('working_context_projection');
+    expect(messages).toEqual(durableSnapshot);
+  });
+
+  it('fails closed when a dense-Unicode task exceeds its byte budget', () => {
+    const task = `Preserve exactly:\n${'漢'.repeat(700)}`;
+    expect(JSON.stringify([{ role: 'user', content: task }]).length).toBeLessThan(1_000);
+    expect(Buffer.byteLength(JSON.stringify([{ role: 'user', content: task }]), 'utf8')).toBeGreaterThan(1_000);
+
+    expect(() => compactToolLoopMessages([{ role: 'user', content: task }], 1_000))
+      .toThrow(ToolLoopContextProjectionError);
+  });
+
+  it('reserves no more than one UTF-8 byte per available input token', () => {
+    const budget = resolveToolLoopMessageBudget({
+      model: 'openai:gpt-5.6-terra',
+      maxOutputTokens: 32_768,
+      contextWindowTokens: 200_000,
+      system: '漢'.repeat(1_000),
+      tools: [],
+    });
+
+    // A byte-level tokenizer cannot emit more tokens than the UTF-8 byte
+    // count, so one byte per available token is conservative for ASCII,
+    // CJK, emoji, and mixed JSON payloads.
+    expect(budget).toBe(200_000 - 32_768 - Buffer.byteLength('漢'.repeat(1_000), 'utf8') - 2);
   });
 
   it('fails closed when the full original task and required evidence cannot fit', () => {
