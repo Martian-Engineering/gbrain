@@ -143,8 +143,12 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(submit_agent.params.proposal_admission_scope).toBeDefined();
       expect(stage_ingestion_proposal_page?.scope).toBe('agent');
       expect(stage_ingestion_proposal_page?.mutating).toBe(false);
+      expect(stage_ingestion_proposal_page?.params.total_pages.description)
+        .toContain('(1-32)');
       expect(finalize_ingestion_proposal?.scope).toBe('agent');
       expect(finalize_ingestion_proposal?.mutating).toBe(false);
+      expect(finalize_ingestion_proposal?.params.total_pages.description)
+        .toContain('(1-32)');
       expect(finalize_ingestion_proposal?.params.page_digests).toBeUndefined();
       expect(get_agent_job_proposal?.scope).toBe('agent');
     });
