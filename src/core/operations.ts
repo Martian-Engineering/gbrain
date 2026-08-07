@@ -50,6 +50,7 @@ import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import { matchesSlugAllowList, slugFenceContains } from './slug-allow-list.ts';
+import { PROPOSAL_ADMISSION_SCOPE_MAX_CHARS } from './minions/agent-job-proposals.ts';
 export { matchesSlugAllowList } from './slug-allow-list.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
@@ -5444,7 +5445,11 @@ const submit_agent: Operation = {
         'submit_agent: proposal-tool jobs require a proposal artifact and capture page slug.',
       );
     }
-    if (proposalArtifactId.length > 255 || proposalCapturePageSlug.length > 255 || proposalAdmissionScope.length > 8_000) {
+    if (
+      proposalArtifactId.length > 255
+      || proposalCapturePageSlug.length > 255
+      || proposalAdmissionScope.length > PROPOSAL_ADMISSION_SCOPE_MAX_CHARS
+    ) {
       throw new OperationError(
         'invalid_params',
         'submit_agent: proposal artifact, capture page slug, or admission scope exceeds its bounded length.',

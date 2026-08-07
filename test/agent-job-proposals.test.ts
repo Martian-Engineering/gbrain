@@ -223,6 +223,26 @@ describe('durable agent-job proposal staging', () => {
       .rejects.toMatchObject({ code: 'binding_mismatch' });
   });
 
+  it('shares Lore\'s exact 4,000-character admission-scope ceiling', async () => {
+    const maximumScope = 's'.repeat(4_000);
+    const acceptedJobId = await seedJob({ proposal_admission_scope: null });
+    await stage(acceptedJobId, 1, 1, createPage('sources/example'), maximumScope);
+    const manifest = await finalizeAgentJobProposal(engine, acceptedJobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: maximumScope,
+      total_pages: 1, summary: 'Boundary scope.',
+    });
+    expect(manifest.admissionScope).toBe(maximumScope);
+
+    const oversizedScope = `${maximumScope}s`;
+    const rejectedJobId = await seedJob({ proposal_admission_scope: null });
+    await expect(stage(rejectedJobId, 1, 1, createPage('sources/example'), oversizedScope))
+      .rejects.toMatchObject({ code: 'invalid_string' });
+    await expect(finalizeAgentJobProposal(engine, acceptedJobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: oversizedScope,
+      total_pages: 1, summary: 'Oversized scope.',
+    })).rejects.toMatchObject({ code: 'invalid_string' });
+  });
+
   it('requires pre-bound owner, source, artifact, capture slug, and slug fences', async () => {
     for (const overrides of [
       { __owner_client_id: null },

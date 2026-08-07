@@ -439,6 +439,31 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       })).rejects.toThrow(/capture page.*slug fence/i);
     });
 
+    it('accepts a 4,000-character proposal scope and rejects 4,001 characters', async () => {
+      await seedClient('scope-limit', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const ctx = makeCtx({ clientId: 'scope-limit' });
+      const maximumScope = 's'.repeat(4_000);
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: `${maximumScope}s`,
+      })).rejects.toThrow(/admission scope exceeds/i);
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: maximumScope,
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1', [result.id],
+      );
+      expect(row!.data.proposal_admission_scope).toBe(maximumScope);
+    });
+
     it('deduplicates a client idempotency key before enforcing concurrency', async () => {
       await seedClient('cursor', {
         bound_tools: ['search'],

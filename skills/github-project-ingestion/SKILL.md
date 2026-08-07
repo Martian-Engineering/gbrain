@@ -256,7 +256,8 @@ Immediately after reading and constructing each complete page, call
 returned `{sequence, slug, digest}`; later turns may rely on that durable digest
 instead of retaining every old raw `get_page` output or proposed body in the
 working context. An identical retry is safe. Never change `total_pages`, reuse
-a sequence for different content, or stage after finalization.
+a sequence for different content, or stage after finalization. The exact
+`admission_scope` must contain 1-4,000 characters after trimming.
 
 Populate `proposedTimelineEntries` with the exact timeline mutations the normal
 workflow requires: timeline entries only for material dated events with the

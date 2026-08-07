@@ -15,6 +15,9 @@ export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
 /** Maximum number of pages in one finalized proposal. */
 export const PROPOSAL_MAX_PAGES = 100;
 
+/** Maximum characters in the shared Lore/GBrain admission-scope contract. */
+export const PROPOSAL_ADMISSION_SCOPE_MAX_CHARS = 4_000;
+
 export const STAGE_PROPOSAL_TOOL_NAME = 'brain_stage_ingestion_proposal_page';
 export const FINALIZE_PROPOSAL_TOOL_NAME = 'brain_finalize_ingestion_proposal';
 
@@ -307,7 +310,11 @@ export async function finalizeAgentJobProposal(
   const artifactId = readBoundedString(input.artifact_id, 'artifact_id', 255);
   const sourceId = readBoundedString(input.source_id, 'source_id', 255);
   assertValidSourceId(sourceId);
-  const admissionScope = readBoundedString(input.admission_scope, 'admission_scope', 8_000);
+  const admissionScope = readBoundedString(
+    input.admission_scope,
+    'admission_scope',
+    PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+  );
   const summary = readBoundedString(input.summary, 'summary', 1_000);
   const timeline = parseTimelineEntries(input.proposed_timeline_entries ?? []);
   const links = parseLinks(input.proposed_links ?? []);
@@ -597,7 +604,11 @@ function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput
   const artifactId = readBoundedString(input.artifact_id, 'artifact_id', 255);
   const sourceId = readBoundedString(input.source_id, 'source_id', 255);
   assertValidSourceId(sourceId);
-  const admissionScope = readBoundedString(input.admission_scope, 'admission_scope', 8_000);
+  const admissionScope = readBoundedString(
+    input.admission_scope,
+    'admission_scope',
+    PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+  );
   const sequence = readPositiveInteger(input.sequence, 'sequence');
   const totalPages = readProposalPageCount(input.total_pages);
   if (sequence > totalPages) {
