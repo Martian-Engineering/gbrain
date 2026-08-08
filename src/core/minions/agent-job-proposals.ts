@@ -781,7 +781,14 @@ export function parseFinalizedProposalManifest(
     proposedLinks,
     unresolved: parseProposalUnresolved(record.unresolved),
   };
-  assertValidSourceId(manifest.sourceId);
+  try {
+    assertValidSourceId(manifest.sourceId);
+  } catch {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest contains an invalid source identity.',
+    );
+  }
   if (canonicalProposalJson(raw) !== canonicalProposalJson(manifest)) {
     throw new AgentJobProposalError(
       'proposal_identity_mismatch',

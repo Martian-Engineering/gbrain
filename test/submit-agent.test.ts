@@ -1119,6 +1119,9 @@ describe('get_agent_job owner-scoped receipt', () => {
       {
         manifest: { ...fixture.manifest, unresolved: ['x'.repeat(501)] },
       },
+      {
+        manifest: { ...fixture.manifest, sourceId: '../invalid-source' },
+      },
     ];
 
     for (const corruption of corruptions) {
