@@ -1,5 +1,5 @@
 /**
- * v0.35.5 — engine parity for `refreshPageBody` + `migrateFactsToCanonical`.
+ * Engine parity for `refreshPageBody` + `migrateFactsToCanonical`.
  *
  * These two new BrainEngine methods land in BOTH PGLite + Postgres. The
  * production cycle calls them transparently via the engine interface, so
@@ -59,7 +59,7 @@ async function seed(engine: BrainEngine, slug: string, body: string, type = 'per
 // ─── refreshPageBody parity ─────────────────────────────────────────
 
 describe('refreshPageBody (parity)', () => {
-  test('updates compiled_truth + timeline + content_hash; skips soft-deleted', async () => {
+  test('updates compiled_truth + content_hash and clears the legacy timeline column', async () => {
     for (const engine of [pglite, pg].filter(Boolean) as BrainEngine[]) {
       await seed(engine, 'people/alice', '# alice\n\nOriginal body.');
 
@@ -73,7 +73,7 @@ describe('refreshPageBody (parity)', () => {
 
       const fetched = await engine.getPage('people/alice', { sourceId: 'default' });
       expect(fetched?.compiled_truth).toBe('# alice\n\nNew compiled body.');
-      expect(fetched?.timeline).toBe('## History\n\nNew timeline.');
+      expect(fetched?.timeline).toBe('');
       expect(fetched?.content_hash).toBe('newhash123');
     }
   });

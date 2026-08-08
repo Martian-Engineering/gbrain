@@ -20,7 +20,10 @@ const expectedTools = [
   'get_page',
   'list_pages',
   'resolve_slugs',
+  'get_links',
   'get_backlinks',
+  'stage_ingestion_proposal_page',
+  'finalize_ingestion_proposal',
   'put_page',
   'add_link',
   'add_timeline_entry',
@@ -81,15 +84,94 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('prompt_injection_suspected');
   });
 
-  test('consolidates only on exact stable identity', () => {
+  test('uses Lore artifact integrity as the transport-completeness authority', () => {
+    expect(skill).toContain('artifactIntegrity:');
+    expect(skill).toContain('complete: true');
+    expect(skill).toContain('manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }');
+    expect(skill).toMatch(/Outside apply mode[\s\S]{0,250}`artifactIntegrity\.complete`[\s\S]{0,40}flag is not exactly `true`/);
+    expect(skill).toMatch(/authenticated OAuth caller deterministically\s+verified these\s+values/);
+    expect(skill).toMatch(/treat\s+the well-formed\s+envelope as authoritative/);
+    expect(skill).toMatch(/Do not attempt to recalculate,\s+estimate, or\s+second-guess hashes or byte counts/);
+    expect(skill).not.toContain('Recompute each SHA-256');
+    expect(skill).toMatch(/Working-context projection or omission\s+markers[\s\S]*never treat them\s+as proof\s+that the original artifact is incomplete/);
+    expect(skill).not.toContain('artifact is visibly incomplete');
+  });
+
+  test('accepts only the bounded error-redacted prior-attempt projection', () => {
+    expect(skill).toContain('priorAttempt: # optional; omitted when there is no prior write evidence');
+    for (const field of [
+      'failureCode:', 'terminalFailureClass:', 'receiptStatus:', 'createdPages:',
+      'updatedPages:', 'verifiedPages:', 'pageResults:', 'slugAdjustments:',
+      'timelineResults:', 'linkResults:',
+    ]) expect(skill).toContain(field);
+    expect(skill).toMatch(/never contains a top-level summary, unresolved list, raw error, or a nested\s+result `error`/);
+    expect(skill).toMatch(/Durable GBrain state remains authoritative/);
+    expect(skill).toMatch(/never skip a\s+mutation based on the projection alone/);
+  });
+
+  test('consolidates only on exact stable identity inside the capture fence', () => {
     expect(skill).toContain('Search and read before every create');
     expect(skill).toContain('Search for the exact Gmail thread ID');
     expect(skill).toContain('case, invoice, and document identifiers');
     expect(skill).toContain('Similar subjects are never identity');
     expect(skill).toMatch(/Consolidate only on an exact\s+non-empty identity match/);
-    expect(skill).toContain('legacy email-source page');
-    expect(skill).toMatch(/provenance carries the same Gmail\s+thread ID/);
-    expect(skill).toContain('never create a parallel source page');
+    expect(skill).toContain('differently slugged legacy email-source page');
+    expect(skill).toMatch(/read it as identity evidence but never rewrite it/);
+    expect(skill).toMatch(/[Tt]he exact prompt-supplied `capturePageSlug` is the only\s+source-page write\s+target/);
+    expect(skill).not.toMatch(/Update it even when its slug differs from `capturePageSlug`/);
+    expect(skill).toMatch(/do not create any source page\s+other than the exact `capturePageSlug`/);
+    expect(skill).toMatch(/legacy page may be cited as read-only historical\s+evidence/);
+    expect(skill).toMatch(/Each immutable capture writes its\s+own exact artifact capture page/);
+    expect(skill).toMatch(/one traceable `sources\/` page for this immutable\s+capture artifact/);
+    expect(skill).toContain('capturePageSlug: <exact sources/ slug for this immutable capture artifact>');
+    expect(skill).toContain('### 4. Record the immutable capture source page');
+    expect(skill).toMatch(/Prior capture pages remain\s+read-only provenance/);
+    expect(skill).toMatch(/same\s+`canonicalExternalId`, `captureExternalId`, and `revision`/);
+    expect(skill).toMatch(/same\s+thread with a different capture identity or revision/);
+    expect(skill).not.toMatch(/When it already carries the same Gmail thread ID, update it/);
+    expect(skill).not.toMatch(/one traceable `sources\/` page for the Gmail thread/);
+    expect(skill).not.toContain('capturePageSlug: <fallback sources/ slug for a thread with no existing page>');
+    expect(skill).not.toContain('### 4. Record the Gmail thread source page');
+    expect(skill).not.toMatch(/newer thread version updates the same source page/i);
+  });
+
+  test('supports staged scoped proposals and frozen audited apply', () => {
+    expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
+    expect(skill).toContain('admissionScope: <required in propose and apply modes>');
+    expect(skill).toMatch(/In `propose` mode, do not call any corpus-mutating tool/);
+    expect(skill).toContain('brain_stage_ingestion_proposal_page');
+    expect(skill).toContain('brain_finalize_ingestion_proposal');
+    expect(skill).toMatch(/exact `artifact_id`,\s+`source_id`, `admission_scope`, one-based `sequence`, stable `total_pages`, and\s+`page` object/);
+    expect(skill).toMatch(/same exact `artifact_id`, `source_id`, `admission_scope`, and\s+`total_pages`/);
+    expect(skill).toContain('`proposed_timeline_entries`');
+    expect(skill).toContain('`proposed_links`');
+    expect(skill).toContain('Stage only one page per turn');
+    expect(skill).toContain('at most 32 pages');
+    expect(skill).toContain('98,304 UTF-8 bytes');
+    expect(skill).toContain('131,072 UTF-8 bytes');
+    expect(skill).toContain('262,144 UTF-8 bytes');
+    expect(skill).toContain('100 total agent turns');
+    expect(skill).toContain('"status": "staged_proposal"');
+    expect(skill).toMatch(/In `apply` mode, execute only the prompt-supplied frozen plan/);
+    expect(skill).toMatch(/Before any read or mutation, validate the entire\s+frozen plan/);
+    expect(skill).toContain('one to 32 uniquely slugged canonical pages');
+    expect(skill).toContain('`capturePageSlug` present exactly once');
+    expect(skill).toContain('at most 40');
+    expect(skill).toMatch(/Reject duplicate mutations[\s\S]*98,304 UTF-8 bytes/);
+    expect(skill).toMatch(/A create\s+must still be absent apart from the non-capture mechanical collision adjustment/);
+    expect(skill).toContain('pageResults');
+    expect(skill).toContain('timelineResults');
+    expect(skill).toContain('linkResults');
+    expect(skill).toContain('canonicalExternalId');
+    expect(skill).toContain('captureExternalId');
+    expect(skill).toContain('substantiveSummaryVerified');
+    expect(skill).toContain('readBackVerifiedPages');
+    expect(skill).toContain('`capturePageSlug` is never adjusted');
+  });
+
+  test('stages a normal-mode partial exclusion before any corpus write', () => {
+    expect(skill).toMatch(/newly\s+discovered partial exclusion[\s\S]*staged_proposal/);
+    expect(skill).toMatch(/before any\s+corpus mutation/);
   });
 
   test('records substantive source provenance without copying the local mirror', () => {
@@ -125,7 +207,7 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('"sourceId": "verified source id"');
     expect(skill).toContain('"canonicalExternalId": "copied exactly from the prompt"');
     expect(skill).toContain('"captureExternalId": "copied exactly from the prompt"');
-    expect(skill).toContain('"sourcePageSlug": "<sourceId>:<actual sources/ slug written>"');
+    expect(skill).toContain('"sourcePageSlug": "<sourceId>:<capturePageSlug>"');
     expect(skill).toContain('"substantiveSummaryVerified": true');
     expect(skill).toContain('"datedFactCount": 1');
     expect(skill).toContain('"readBackVerifiedPages": ["<sourceId>:<slug>"]');

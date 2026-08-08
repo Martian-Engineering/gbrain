@@ -1068,6 +1068,46 @@ CREATE TABLE IF NOT EXISTS subagent_tool_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_subagent_tools_job ON subagent_tool_executions (job_id, status);
 
+-- Exact ingestion proposal bodies live outside the bounded agent receipt.
+-- These rows are job-owned evidence only; they never mutate corpus state.
+CREATE TABLE IF NOT EXISTS agent_job_proposal_fragments (
+  job_id          BIGINT      NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+  owner_client_id TEXT        NOT NULL,
+  source_id       TEXT        NOT NULL,
+  artifact_id     TEXT        NOT NULL,
+  admission_scope TEXT        NOT NULL,
+  sequence        INTEGER     NOT NULL,
+  total_pages     INTEGER     NOT NULL,
+  page            JSONB       NOT NULL,
+  page_digest     TEXT        NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (job_id, sequence),
+  CONSTRAINT chk_agent_job_proposal_fragment_sequence
+    CHECK (sequence >= 1 AND total_pages >= sequence),
+  CONSTRAINT chk_agent_job_proposal_fragment_digest
+    CHECK (page_digest ~ '^[a-f0-9]{64}\$')
+);
+CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_fragments_owner
+  ON agent_job_proposal_fragments (owner_client_id, job_id);
+
+CREATE TABLE IF NOT EXISTS agent_job_proposals (
+  job_id          BIGINT      PRIMARY KEY REFERENCES minion_jobs(id) ON DELETE CASCADE,
+  owner_client_id TEXT        NOT NULL,
+  source_id       TEXT        NOT NULL,
+  artifact_id     TEXT        NOT NULL,
+  admission_scope TEXT        NOT NULL,
+  total_pages     INTEGER     NOT NULL CHECK (total_pages >= 1),
+  page_digests    JSONB       NOT NULL,
+  plan            JSONB       NOT NULL,
+  proposal_digest TEXT        NOT NULL,
+  manifest        JSONB       NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT chk_agent_job_proposal_digest
+    CHECK (proposal_digest ~ '^[a-f0-9]{64}\$')
+);
+CREATE INDEX IF NOT EXISTS idx_agent_job_proposals_owner_digest
+  ON agent_job_proposals (owner_client_id, proposal_digest);
+
 -- Rate-lease table — concurrency cap on outbound providers (e.g.
 -- anthropic:messages). Acquire: INSERT if active < max_concurrent under
 -- advisory lock. Release: DELETE. Stale leases (expires_at past) auto-prune
@@ -1514,6 +1554,8 @@ BEGIN
     ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
     ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;

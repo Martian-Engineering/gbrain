@@ -281,6 +281,10 @@ describeE2E('E2E: Timeline', () => {
     expect(await callOp('add_timeline_entry', params)).toEqual({
       status: 'ok',
       inserted: true,
+      write_through: {
+        written: false,
+        skipped: 'no_repo_configured',
+      },
     });
 
     const timeline = await callOp('get_timeline', { slug: 'people/sarah-chen' }) as any[];

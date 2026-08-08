@@ -117,6 +117,7 @@ describe('put_page write-through — happy path', () => {
     const result = (await putPage.handler(ctx, {
       slug: 'inbox/mcp-prov',
       content: '---\ntitle: Q\n---\n\nbody',
+      expected_content_hash: null,
     })) as { write_through?: { written: boolean; path?: string } };
     expect(result.write_through?.written).toBe(true);
     const onDisk = fs.readFileSync(result.write_through!.path!, 'utf8');
@@ -137,6 +138,7 @@ describe('put_page write-through — trust gating', () => {
     const result = (await putPage.handler(ctx, {
       slug: 'wiki/agents/42/scratch',
       content: '---\ntitle: S\n---\n\nbody',
+      expected_content_hash: null,
     })) as { write_through?: { written: boolean; skipped?: string } };
     expect(result.write_through?.written).toBe(false);
     expect(result.write_through?.skipped).toBe('subagent_sandbox');
@@ -153,6 +155,7 @@ describe('put_page write-through — trust gating', () => {
     const result = (await putPage.handler(ctx, {
       slug: 'wiki/personal/reflections/note',
       content: '---\ntitle: R\n---\n\nreflection',
+      expected_content_hash: null,
     })) as { write_through?: { written: boolean; path?: string } };
     expect(result.write_through?.written).toBe(true);
     expect(fs.existsSync(result.write_through!.path!)).toBe(true);

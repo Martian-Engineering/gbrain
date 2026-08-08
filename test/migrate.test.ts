@@ -20,6 +20,24 @@ describe('migrate', () => {
   // and are covered in the E2E suite (test/e2e/mechanical.test.ts)
 });
 
+describe('migration v136 — staged proposal RLS', () => {
+  test('Postgres gates RLS on inherited BYPASSRLS or superuser and fails loudly', () => {
+    const pgSql = MIGRATIONS.find(m => m.version === 136)!.sql;
+    expect(pgSql).toContain("pg_has_role(current_user, pr.oid, 'USAGE')");
+    expect(pgSql).toMatch(/pr\.rolbypassrls OR pr\.rolsuper/);
+    expect(pgSql).toMatch(/IF NOT has_bypass/);
+    expect(pgSql).toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
+    expect(pgSql).toContain('ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY');
+    expect(pgSql).toContain('ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY');
+  });
+
+  test('PGLite has no RLS or BYPASSRLS gate', () => {
+    const pgliteSql = MIGRATIONS.find(m => m.version === 136)!.sqlFor!.pglite!;
+    expect(pgliteSql).not.toContain('rolbypassrls');
+    expect(pgliteSql).not.toContain('ENABLE ROW LEVEL SECURITY');
+  });
+});
+
 // v0.28.5 — A1: cheap probe used by `connectEngine` to gate `initSchema()`
 // so already-migrated brains don't pay the schema-replay cost on every
 // short-lived CLI invocation. Closes #651 in cooperation with X1's

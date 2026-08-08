@@ -13,6 +13,8 @@ tools:
   - resolve_slugs
   - get_links
   - get_backlinks
+  - stage_ingestion_proposal_page
+  - finalize_ingestion_proposal
   - put_page
   - add_link
   - add_timeline_entry
@@ -48,7 +50,7 @@ These instructions are self-contained for a source-bound remote Minion.
 - Independently confirm that the complete artifact satisfies the supplied
   resolver text and revision before writing. Resolver ambiguity returns a
   classed `needs_attention` receipt without mutation. Partial disqualification
-  returns a complete `scoped_proposal` without mutation.
+  returns a complete `staged_proposal` manifest without corpus mutation.
 - An omitted `mode` preserves the normal write path. `mode: propose` performs
   the normal analysis, search, and deduplication but performs zero mutations.
   `mode: apply` executes only the prompt-supplied frozen plan.
@@ -98,6 +100,11 @@ Expect one complete task with these fields:
 
 ```yaml
 artifactId: <Lore artifact id>
+artifactIntegrity: # required normal/propose; omitted apply
+  complete: true
+  manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
+  contentMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
+  transcriptMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
 capturePageSlug: <exact slug of the sources/ capture page>
 mode: <propose | apply | omit for normal mode>
 admissionScope: <required in propose and apply modes>
@@ -114,12 +121,45 @@ attempt: <positive integer>
 manifest: <complete manifest.json object>
 contentMarkdown: <complete content.md text>
 transcriptMarkdown: <complete transcript.md text>
-priorAttempt: <optional failure or partial-write context>
+priorAttempt: # optional; omitted for a clean no-write propose attempt
+  attempt: <positive integer>
+  failureCode: <optional bounded failure code>
+  terminalFailureClass: <optional bounded terminal failure class>
+  receiptStatus: <optional bounded receipt status>
+  createdPages: <optional source-qualified page identifiers>
+  updatedPages: <optional source-qualified page identifiers>
+  verifiedPages: <optional source-qualified page identifiers>
+  pageResults: <optional bounded page result ledger without error fields>
+  slugAdjustments: <optional bounded slug adjustment ledger>
+  timelineResults: <optional bounded timeline result ledger without error fields>
+  linkResults: <optional bounded link result ledger without error fields>
 ```
 
-Stop with `failed` before any write when a required field is absent, the
-provider is not `granola`, or the artifact is visibly incomplete. Do not fetch,
-truncate, split, or reconstruct missing input.
+In normal and propose modes, stop with `failed` before analysis or staging when
+a required field is absent, the provider is not `granola`, or
+`artifactIntegrity.complete` is not exactly `true`. The envelope is the
+authority for transport completeness. Working-context projection or omission
+markers from the model provider describe only the current context window;
+never treat them as proof that the original artifact is incomplete. Do not
+fetch, truncate, split, or reconstruct missing input. Apply mode intentionally
+omits `artifactIntegrity` because it replays only the supplied frozen plan.
+
+Before normal/propose analysis or staging, require each integrity `sha256` to
+contain exactly 64 lowercase hexadecimal characters and each `bytes` to be a
+non-negative integer. The authenticated OAuth caller deterministically
+verified these values against the exact prompt fields before submission; treat
+the well-formed envelope as authoritative. Do not attempt to recalculate,
+estimate, or second-guess hashes or byte counts in model reasoning. Do not
+reinterpret a context-projection marker as an integrity failure when the
+envelope is well formed and `complete` is exactly `true`.
+
+When `priorAttempt` is present, accept only the typed projection shown above.
+It never contains a top-level summary, unresolved list, raw error, or a nested
+result `error`; reject unexpected fields instead of treating them as artifact
+evidence. Use the projected ledgers only to select read-back checks and safe
+resume points. Durable GBrain state remains authoritative, so never skip a
+mutation based on the projection alone. A clean propose attempt with no writes
+omits `priorAttempt` entirely.
 
 An absent `mode` selects normal mode. Reject any other mode value. Require a
 non-empty `admissionScope` in propose and apply modes. In apply mode, require
@@ -164,7 +204,7 @@ When `mode` is absent, follow the complete workflow. If the artifact clearly
 matches in part but also contains material excluded by the resolver, treat that
 as partial disqualification. Derive `admissionScope` only from the resolver's
 own exclusion language, finish the normal search and deduplication analysis,
-and return `scoped_proposal` directly. Do not mutate before returning that
+and return `staged_proposal` directly. Do not mutate before returning that
 proposal. Apply every propose-mode scope, completeness, provenance, and payload
 cap obligation to this receipt. Do not discard the completed analysis into
 `needs_attention`.
@@ -186,14 +226,26 @@ timeline entry, link, summary, or dossier update may derive from excluded
 material. Do not repeat, paraphrase, or identify the exclusion inside any
 proposed mutation.
 
-In `propose` mode, do not call any mutating tool, including `put_page`,
-`add_link`, or `add_timeline_entry`. Read-only discovery and verification are
-allowed. Return the complete set of pages that `apply` will write. For this
+In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
+`add_link`, or `add_timeline_entry`. Read-only discovery and job-evidence
+staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the capture page, meeting page, and every dossier page
 that the scoped ingestion requires. Each update entry contains the full
 intended `bodyMarkdown`, never a diff. Copy the exact body and `content_hash`
 from the `get_page` read used to draft each update into `baseMarkdown` and
 `expectedContentHash`. Omit both fields for a create.
+
+Before constructing final page bodies, freeze the complete ordered page inventory
+and stable `total_pages`; the inventory may contain at most 32 pages. Once the
+inventory is frozen, read and construct each page in order, then immediately call
+`brain_stage_ingestion_proposal_page` in its own agent turn with the exact
+`artifact_id`, `source_id`, `admission_scope`, one-based `sequence`, stable
+`total_pages`, and page object. Stage only one page per turn. Preserve the
+returned `{sequence, slug, digest}`; later turns may rely on that durable digest
+instead of retaining every old raw `get_page` output or proposed body in the
+working context. An identical retry is safe. Never change `total_pages`, reuse
+a sequence for different content, or stage after finalization. The exact
+`admission_scope` must contain 1-4,000 characters after trimming.
 
 Populate `proposedTimelineEntries` with the exact timeline mutations the normal
 workflow requires: timeline entries only for material dated events with the
@@ -217,11 +269,19 @@ complete verbatim record. Its title and body must not name or describe the
 excluded material or the admission scope. Scope provenance exists only in the
 top-level proposal receipt.
 
-Serialize the complete `scoped_proposal` receipt as JSON and measure its UTF-8
-byte length. The receipt, including `proposedTimelineEntries` and
-`proposedLinks`, must not exceed 262,144 UTF-8 bytes. Return `failed` with an
-operational summary and no mutations when it exceeds that limit or the size
-cannot be established. Never truncate or split a proposal.
+After every page is staged, call `brain_finalize_ingestion_proposal` in a
+separate turn with the exact binding fields, stable page count, summary,
+timeline entries, links, and unresolved items. The server derives the ordered
+page-digest manifest from the job's durable fragments, so finalization does not
+depend on old stage outputs remaining in model context. The server rejects
+gaps, duplicate or changed fragments, cross-job evidence, a capture page that
+does not match the exact job binding, mutations outside the job slug fence, a full
+raw or JSON-escaped plan representation over 98,304 UTF-8 bytes, more than 32
+pages, a timeline `refLabel` over
+500 characters, or a compact manifest over 262,144 UTF-8 bytes.
+Return the finalizer's compact manifest as `staged_proposal`; never reproduce
+page bodies or baselines in the final receipt. Never truncate or split a
+proposal.
 
 ### Apply mode
 
@@ -495,7 +555,8 @@ writes honestly so a later attempt can continue without duplication.
 - Creating attendee stubs or guessing among same-name identities.
 - Adding routine attendance to every entity timeline.
 - Advancing Lore checkpoints or making Review-eligibility decisions.
-- Mutating in propose mode or returning an incomplete or truncated proposal.
+- Mutating corpus state in propose mode or returning an incomplete or truncated
+  proposal.
 - Returning a timeline entry whose `ref` is not the planned capture page.
 - Returning a link whose `from` slug is absent from `proposedPages`.
 - Hand-writing a `## Timeline` section or omitting a required material event
@@ -516,35 +577,17 @@ For propose mode or normal-mode partial disqualification:
 
 ```json
 {
-  "status": "scoped_proposal",
+  "status": "staged_proposal",
   "artifactId": "copied exactly from the prompt",
   "sourceId": "verified source id",
   "admissionScope": "supplied or resolver-derived scope",
   "summary": "compact source-grounded proposal summary",
-  "proposedPages": [
-    {
-      "slug": "sources/granola/example",
-      "effect": "create",
-      "title": "complete intended page title",
-      "bodyMarkdown": "complete intended page body"
-    },
-    {
-      "slug": "projects/example",
-      "effect": "update",
-      "title": "complete intended project title",
-      "bodyMarkdown": "complete intended project body",
-      "baseMarkdown": "exact reviewed page body for updates, null for creates",
-      "expectedContentHash": "exact get_page content_hash for updates, null for creates"
-    },
-    {
-      "slug": "meetings/example",
-      "effect": "update",
-      "title": "complete intended meeting title",
-      "bodyMarkdown": "complete intended meeting body",
-      "baseMarkdown": "exact reviewed page body for updates, null for creates",
-      "expectedContentHash": "exact get_page content_hash for updates, null for creates"
-    }
+  "pageDigests": [
+    { "sequence": 1, "slug": "sources/granola/example", "digest": "64 lowercase hex characters" },
+    { "sequence": 2, "slug": "projects/example", "digest": "64 lowercase hex characters" },
+    { "sequence": 3, "slug": "meetings/example", "digest": "64 lowercase hex characters" }
   ],
+  "proposalDigest": "64 lowercase hex characters",
   "proposedTimelineEntries": [
     {
       "pageSlug": "projects/example",

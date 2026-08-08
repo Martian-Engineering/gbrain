@@ -231,6 +231,7 @@ describe('claim suppression operation contract', () => {
       slug,
       claim_text: 'The launch is Friday.',
     });
+    const suppressed = await engine.getPage(slug, { sourceId: 'default' });
 
     const blocked = await operationsByName.put_page.handler(ctx({
       remote: true,
@@ -240,6 +241,7 @@ describe('claim suppression operation contract', () => {
     }), {
       slug,
       content: '---\ntitle: Blocked\n---\n\nTHE   LAUNCH is friday.',
+      expected_content_hash: suppressed!.content_hash,
     }) as Record<string, unknown>;
     expect(blocked).toMatchObject({
       suppression_backstop: {
@@ -255,6 +257,7 @@ describe('claim suppression operation contract', () => {
     const listed = await listClaims(slug);
     expect(listed.suppressed_claims).toHaveLength(1);
     expect(listed.suppressed_claims[0].active).toBe(false);
+    const unsuppressed = await engine.getPage(slug, { sourceId: 'default' });
 
     const allowed = await operationsByName.put_page.handler(ctx({
       remote: true,
@@ -264,6 +267,7 @@ describe('claim suppression operation contract', () => {
     }), {
       slug,
       content: '---\ntitle: Allowed\n---\n\nThe launch is Friday.',
+      expected_content_hash: unsuppressed!.content_hash,
     }) as Record<string, unknown>;
     expect(allowed.suppression_backstop).toBeUndefined();
     expect((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth)

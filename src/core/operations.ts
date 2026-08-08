@@ -49,6 +49,13 @@ import { isSearchMode } from './search/mode.ts';
 import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
+import { matchesSlugAllowList, slugFenceContains } from './slug-allow-list.ts';
+import { PROPOSAL_ADMISSION_SCOPE_MAX_CHARS } from './minions/agent-job-proposals.ts';
+import {
+  isValidSubagentMaxOutputTokens,
+  MAX_SUBAGENT_MAX_OUTPUT_TOKENS,
+} from './minions/subagent-limits.ts';
+export { matchesSlugAllowList } from './slug-allow-list.ts';
 import * as db from './db.ts';
 import { VERSION } from '../version.ts';
 import { assertValidSourceId } from './source-id.ts';
@@ -228,52 +235,6 @@ export function validatePageSlug(slug: string): void {
   if (!new RegExp(`^${PAGE_SLUG_SEG}(\\/${PAGE_SLUG_SEG})*$`, 'i').test(slug)) {
     throw new OperationError('invalid_params', `Invalid page_slug: ${slug} (allowed: alphanumeric, CJK, hyphens, forward-slash separated segments)`);
   }
-}
-
-/**
- * Match a slug against a list of allow-list prefix globs.
- *
- * Glob form: `<prefix>/*` matches any slug starting with `<prefix>/` and
- * having at least one more segment (single or multi). Bare `<prefix>` (no
- * trailing `/*`) matches that exact slug only. The `*` is intentionally
- * permissive — depth is unbounded, so `wiki/originals/*` matches both
- * `wiki/originals/idea-x` and `wiki/originals/ideas/2026-04-25-idea-y`.
- *
- * Used by the v0.23 dream-cycle trusted-workspace path. Order doesn't
- * matter; the first match wins (returns true on any match).
- */
-export function matchesSlugAllowList(slug: string, prefixes: readonly string[]): boolean {
-  for (const p of prefixes) {
-    if (p.endsWith('/*')) {
-      const base = p.slice(0, -2);
-      if (slug === base) continue;
-      if (slug.startsWith(base + '/')) return true;
-    } else if (p.endsWith('/')) {
-      if (slug.startsWith(p) && slug.length > p.length) return true;
-    } else if (p === slug) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Return whether every slug matched by a requested fence is inside a bound fence. */
-function slugFenceContains(bound: string, requested: string): boolean {
-  const boundBase = recursiveSlugFenceBase(bound);
-  const requestedBase = recursiveSlugFenceBase(requested);
-  if (boundBase === null) {
-    return requestedBase === null && requested === bound;
-  }
-  const requestedAnchor = requestedBase ?? requested;
-  return requestedAnchor.startsWith(`${boundBase}/`)
-    || (requestedBase !== null && requestedAnchor === boundBase);
-}
-
-/** Strip the recursive suffix from one slash- or glob-form slug fence. */
-function recursiveSlugFenceBase(fence: string): string | null {
-  if (fence.endsWith('/*')) return fence.slice(0, -2);
-  if (fence.endsWith('/')) return fence.slice(0, -1);
-  return null;
 }
 
 /**
@@ -5358,10 +5319,26 @@ const submit_agent: Operation = {
     allowed_tools: { type: 'array', description: 'Subset of bound_tools the agent may invoke', items: { type: 'string' } },
     allowed_slug_prefixes: { type: 'array', description: 'Subset of bound_slug_prefixes for put_page writes', items: { type: 'string' } },
     max_turns: { type: 'number', description: 'Max LLM turns (default 20, hard cap 100)' },
+    max_output_tokens: {
+      type: 'number',
+      description: 'Per-turn output token budget (integer 1-32768; defaults to server configuration)',
+    },
     queue: { type: 'string', description: 'Queue name (default "default")' },
     idempotency_key: {
       type: 'string',
       description: 'Caller-stable key that returns the same agent job for retries by this OAuth client',
+    },
+    proposal_artifact_id: {
+      type: 'string',
+      description: 'Exact ingestion artifact id bound to staged proposal tools for this job',
+    },
+    proposal_capture_page_slug: {
+      type: 'string',
+      description: 'Exact capture page slug bound to staged proposal provenance for this job',
+    },
+    proposal_admission_scope: {
+      type: 'string',
+      description: 'Exact resolver admission scope, or omit so the first staged page freezes it',
     },
   },
   mutating: true,
@@ -5446,6 +5423,64 @@ const submit_agent: Operation = {
         'submit_agent: reasoning_effort must be one of none, minimal, low, medium, high, xhigh.',
       );
     }
+    const proposalArtifactId = typeof p.proposal_artifact_id === 'string'
+      ? p.proposal_artifact_id.trim()
+      : '';
+    const proposalCapturePageSlug = typeof p.proposal_capture_page_slug === 'string'
+      ? p.proposal_capture_page_slug.trim()
+      : '';
+    const proposalAdmissionScope = typeof p.proposal_admission_scope === 'string'
+      ? p.proposal_admission_scope.trim()
+      : '';
+    const usesProposalTools = requestedTools.some((tool) => (
+      tool === 'stage_ingestion_proposal_page' || tool === 'finalize_ingestion_proposal'
+    ));
+    if ((proposalArtifactId.length > 0) !== (proposalCapturePageSlug.length > 0)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal artifact and capture page slug must be supplied together.',
+      );
+    }
+    if (proposalAdmissionScope && !proposalArtifactId) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal admission scope requires a proposal artifact and capture page binding.',
+      );
+    }
+    if (usesProposalTools && (!proposalArtifactId || !proposalCapturePageSlug)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal-tool jobs require a proposal artifact and capture page slug.',
+      );
+    }
+    if (
+      proposalArtifactId.length > 255
+      || proposalCapturePageSlug.length > 255
+      || proposalAdmissionScope.length > PROPOSAL_ADMISSION_SCOPE_MAX_CHARS
+    ) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal artifact, capture page slug, or admission scope exceeds its bounded length.',
+      );
+    }
+    if (usesProposalTools && !boundSource) {
+      throw new OperationError('invalid_params', 'submit_agent: proposal-tool jobs require a bound source.');
+    }
+    if (usesProposalTools && requestedSlugPrefixes.length === 0) {
+      throw new OperationError('invalid_params', 'submit_agent: proposal-tool jobs require a non-empty slug fence.');
+    }
+    if (proposalCapturePageSlug) {
+      validatePageSlug(proposalCapturePageSlug);
+      if (proposalCapturePageSlug !== proposalCapturePageSlug.toLowerCase()) {
+        throw new OperationError('invalid_params', 'submit_agent: proposal capture page slug must be canonical lowercase.');
+      }
+      if (!matchesSlugAllowList(proposalCapturePageSlug, requestedSlugPrefixes)) {
+        throw new OperationError(
+          'permission_denied',
+          'submit_agent: proposal capture page is outside the requested slug fence.',
+        );
+      }
+    }
     if (p.reasoning_effort !== undefined && typeof p.model !== 'string') {
       throw new OperationError(
         'invalid_params',
@@ -5461,6 +5496,17 @@ const submit_agent: Operation = {
         'invalid_params',
         `submit_agent: model "${p.model}" does not support reasoning_effort "${p.reasoning_effort}".`,
       );
+    }
+    const rawMaxOutputTokens = p.max_output_tokens;
+    let requestedMaxOutputTokens: number | undefined;
+    if (rawMaxOutputTokens !== undefined) {
+      if (!isValidSubagentMaxOutputTokens(rawMaxOutputTokens)) {
+        throw new OperationError(
+          'invalid_params',
+          `submit_agent: max_output_tokens must be an integer from 1 to ${MAX_SUBAGENT_MAX_OUTPUT_TOKENS}.`,
+        );
+      }
+      requestedMaxOutputTokens = rawMaxOutputTokens;
     }
     if (boundSlugPrefixes !== null) {
       for (const sp of requestedSlugPrefixes) {
@@ -5491,6 +5537,59 @@ const submit_agent: Operation = {
       }
     }
 
+    const prompt = typeof p.prompt === 'string' ? p.prompt : '';
+    if (!prompt) {
+      throw new OperationError('invalid_params', 'submit_agent: prompt must be a non-empty string.');
+    }
+
+    let skillBody: string | undefined;
+    let skillName: string | undefined;
+    let skillSha256: string | undefined;
+    let selectedModel: string | undefined;
+    let selectedMaxOutputTokens: number | undefined;
+    if (!ctx.dryRun) {
+      if (typeof p.skill_name === 'string') {
+        if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
+          throw new OperationError(
+            'permission_denied',
+            'submit_agent: skill_name requires read scope in addition to agent scope.',
+          );
+        }
+        const skillCatalog = await import('./skill-catalog.ts');
+        const publish = await skillCatalog.readMcpPublishSkills(ctx);
+        skillCatalog.assertPublishEnabled(ctx, publish);
+        const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
+        const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
+        const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
+        const { createHash } = await import('crypto');
+        skillBody = skill.body;
+        skillName = skill.name;
+        skillSha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+      }
+      const { resolveSubagentInitialPromptBudget } = await import(
+        './minions/subagent-prompt-budget.ts'
+      );
+      const promptBudget = await resolveSubagentInitialPromptBudget({
+        engine: ctx.engine,
+        config: ctx.config,
+        prompt,
+        userSystem: skillBody,
+        model: typeof p.model === 'string' ? p.model : undefined,
+        maxOutputTokens: requestedMaxOutputTokens,
+        allowedTools: requestedTools,
+        allowedSlugPrefixes: requestedSlugPrefixes,
+        sourceId: boundSource ?? undefined,
+      });
+      selectedModel = promptBudget.model;
+      selectedMaxOutputTokens = promptBudget.maxOutputTokens;
+      if (promptBudget.messageBytes > promptBudget.messageBudgetBytes) {
+        throw new OperationError(
+          'invalid_params',
+          `submit_agent: initial prompt is too large for model ${selectedModel} with the published skill and requested tools (${promptBudget.messageBytes} UTF-8 bytes; maximum ${promptBudget.messageBudgetBytes}).`,
+        );
+      }
+    }
+
     // Concurrency cap: count active+waiting agent jobs for this client.
     const inflight = await sql`
       SELECT COUNT(*)::int AS n
@@ -5518,7 +5617,11 @@ const submit_agent: Operation = {
         bound_max_concurrent: boundMaxConcurrent,
         model: typeof p.model === 'string' ? p.model : '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : null,
+        max_output_tokens: requestedMaxOutputTokens ?? null,
         skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
+        proposal_artifact_id: proposalArtifactId || null,
+        proposal_capture_page_slug: proposalCapturePageSlug || null,
+        proposal_admission_scope: proposalAdmissionScope || null,
       };
     }
 
@@ -5529,34 +5632,27 @@ const submit_agent: Operation = {
     const queue = new MinionQueue(ctx.engine);
 
     const jobData: Record<string, unknown> = {
-      prompt: p.prompt as string,
+      prompt,
       max_turns: Math.min((p.max_turns as number) ?? 20, 100),
       allowed_tools: requestedTools,
       allowed_slug_prefixes: requestedSlugPrefixes,
       use_gateway_loop: true,
       __owner_client_id: clientId,
     };
-    if (typeof p.skill_name === 'string') {
-      if (!hasScope(ctx.auth?.scopes ?? [], 'read')) {
-        throw new OperationError(
-          'permission_denied',
-          'submit_agent: skill_name requires read scope in addition to agent scope.',
-        );
-      }
-      const skillCatalog = await import('./skill-catalog.ts');
-      const publish = await skillCatalog.readMcpPublishSkills(ctx);
-      skillCatalog.assertPublishEnabled(ctx, publish);
-      const configuredDir = await skillCatalog.readMcpSkillsDir(ctx);
-      const { dir } = skillCatalog.resolveSkillsDir(ctx, configuredDir);
-      const skill = skillCatalog.getSkillDetail(ctx, dir, p.skill_name);
-      const { createHash } = await import('crypto');
-      jobData.system = skill.body;
-      jobData.skill_name = skill.name;
-      jobData.skill_sha256 = createHash('sha256').update(skill.body, 'utf8').digest('hex');
+    if (skillBody && skillName && skillSha256) {
+      jobData.system = skillBody;
+      jobData.skill_name = skillName;
+      jobData.skill_sha256 = skillSha256;
     }
-    if (typeof p.model === 'string') jobData.model = p.model;
+    if (selectedModel) jobData.model = selectedModel;
+    if (selectedMaxOutputTokens) jobData.max_tokens = selectedMaxOutputTokens;
     if (isReasoningEffort(p.reasoning_effort)) jobData.reasoning_effort = p.reasoning_effort;
     if (boundSource) jobData.source_id = boundSource;
+    if (proposalArtifactId) {
+      jobData.proposal_artifact_id = proposalArtifactId;
+      jobData.proposal_capture_page_slug = proposalCapturePageSlug;
+      if (proposalAdmissionScope) jobData.proposal_admission_scope = proposalAdmissionScope;
+    }
     const job = await queue.add(
       'subagent',
       jobData,
@@ -5577,7 +5673,7 @@ const submit_agent: Operation = {
       logAgentSubmission({
         client_id: clientId,
         job_id: job.id,
-        model: typeof p.model === 'string' ? p.model : '<default>',
+        model: selectedModel ?? '<default>',
         reasoning_effort: isReasoningEffort(p.reasoning_effort) ? p.reasoning_effort : undefined,
         bound_tools: requestedTools,
         bound_source: boundSource,
@@ -5590,6 +5686,69 @@ const submit_agent: Operation = {
     } catch { /* never block submission */ }
 
     return { id: job.id, name: 'subagent', client_id: clientId };
+  },
+};
+
+const stage_ingestion_proposal_page: Operation = {
+  name: 'stage_ingestion_proposal_page',
+  description: 'Stage one exact page body and optimistic baseline in the current ingestion agent job. This writes job evidence only and never mutates corpus state.',
+  // Operation mutability classifies corpus effects; durable job evidence is
+  // intentionally excluded from corpus-write audit and retry semantics.
+  mutating: false,
+  params: {
+    artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
+    source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time or frozen by the first staged page' },
+    sequence: { type: 'number', required: true, description: 'One-based page position' },
+    total_pages: { type: 'number', required: true, description: 'Total number of pages in the proposal (1-32)' },
+    page: { type: 'object', required: true, description: 'Exact create or update page proposal' },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError('permission_denied', 'stage_ingestion_proposal_page is available only inside an agent job.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.stageAgentJobProposalPage(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+};
+
+const finalize_ingestion_proposal: Operation = {
+  name: 'finalize_ingestion_proposal',
+  description: 'Validate and freeze the complete staged ingestion proposal, deriving a compact ordered digest manifest without page bodies.',
+  // Freezing job evidence does not mutate pages, links, takes, or timelines.
+  mutating: false,
+  params: {
+    artifact_id: { type: 'string', required: true, description: 'Exact artifact id bound at submit_agent time' },
+    source_id: { type: 'string', required: true, description: 'Exact source bound to the current agent job' },
+    admission_scope: { type: 'string', required: true, description: 'Exact admission scope already frozen on the agent job' },
+    total_pages: { type: 'number', required: true, description: 'Total number of staged pages (1-32)' },
+    summary: { type: 'string', required: true, description: 'Compact source-grounded proposal summary' },
+    proposed_timeline_entries: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen timeline entries' },
+    proposed_links: { type: 'array', items: { type: 'object' }, description: 'Bounded frozen typed links' },
+    unresolved: { type: 'array', items: { type: 'string' }, description: 'Bounded unresolved items' },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError('permission_denied', 'finalize_ingestion_proposal is available only inside an agent job.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.finalizeAgentJobProposal(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
   },
 };
 
@@ -5647,6 +5806,37 @@ const get_agent_job: Operation = {
       created_at: job.created_at,
       finished_at: job.finished_at,
     };
+  },
+};
+
+const get_agent_job_proposal: Operation = {
+  name: 'get_agent_job_proposal',
+  description: 'Retrieve the complete frozen ingestion proposal for an owned agent job and exact proposal digest.',
+  params: {
+    id: { type: 'number', required: true, description: 'Agent job id returned by submit_agent', trace: { kind: 'job' } },
+    proposal_digest: { type: 'string', required: true, description: 'Exact proposal digest from the compact staged_proposal receipt', trace: { kind: 'proposal' } },
+  },
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    const clientId = ctx.auth?.clientId;
+    if (!clientId) {
+      throw new OperationError('permission_denied', 'get_agent_job_proposal requires an OAuth client.');
+    }
+    const proposal = await import('./minions/agent-job-proposals.ts');
+    try {
+      return await proposal.getOwnedAgentJobProposal(
+        ctx.engine,
+        p.id as number,
+        clientId,
+        p.proposal_digest as string,
+      );
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        const code = error.code === 'permission_denied' ? 'permission_denied' : 'invalid_params';
+        throw new OperationError(code, error.message);
+      }
+      throw error;
+    }
   },
 };
 
@@ -8560,7 +8750,8 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent, get_agent_job, get_agent_job_execution_evidence,
+  submit_agent, stage_ingestion_proposal_page, finalize_ingestion_proposal,
+  get_agent_job, get_agent_job_proposal, get_agent_job_execution_evidence,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP

@@ -26,6 +26,9 @@ import { operationsByName } from '../src/core/operations.ts';
 
 const submit_agent = operationsByName['submit_agent'];
 const get_agent_job = operationsByName['get_agent_job'];
+const stage_ingestion_proposal_page = operationsByName['stage_ingestion_proposal_page'];
+const finalize_ingestion_proposal = operationsByName['finalize_ingestion_proposal'];
+const get_agent_job_proposal = operationsByName['get_agent_job_proposal'];
 const get_agent_job_execution_evidence =
   operationsByName['get_agent_job_execution_evidence'];
 if (!submit_agent) {
@@ -133,6 +136,27 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     });
     it('declares an explicit reasoning_effort param', () => {
       expect(submit_agent.params.reasoning_effort).toBeDefined();
+    });
+    it('publishes the bounded per-job output budget', () => {
+      expect(submit_agent.params.max_output_tokens).toMatchObject({
+        type: 'number',
+        description: expect.stringContaining('1-32768'),
+      });
+    });
+    it('publishes non-corpus-mutating staged proposal operations', () => {
+      expect(submit_agent.params.proposal_artifact_id).toBeDefined();
+      expect(submit_agent.params.proposal_capture_page_slug).toBeDefined();
+      expect(submit_agent.params.proposal_admission_scope).toBeDefined();
+      expect(stage_ingestion_proposal_page?.scope).toBe('agent');
+      expect(stage_ingestion_proposal_page?.mutating).toBe(false);
+      expect(stage_ingestion_proposal_page?.params.total_pages.description)
+        .toContain('(1-32)');
+      expect(finalize_ingestion_proposal?.scope).toBe('agent');
+      expect(finalize_ingestion_proposal?.mutating).toBe(false);
+      expect(finalize_ingestion_proposal?.params.total_pages.description)
+        .toContain('(1-32)');
+      expect(finalize_ingestion_proposal?.params.page_digests).toBeUndefined();
+      expect(get_agent_job_proposal?.scope).toBe('agent');
     });
   });
 
@@ -362,6 +386,94 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
   });
 
   describe('happy-path submission', () => {
+    it('requires ingestion artifact and capture bindings while allowing first-stage scope selection', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const ctx = makeCtx({ clientId: 'cursor' });
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_artifact_id: 'artifact-1',
+      })).rejects.toThrow(/capture page slug/i);
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_admission_scope: 'Include delivery notes.',
+      })).rejects.toThrow(/artifact and capture/i);
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'propose',
+        proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row.data.proposal_artifact_id).toBe('artifact-1');
+      expect(row.data.proposal_capture_page_slug).toBe('sources/example');
+      expect(row.data.proposal_admission_scope).toBeUndefined();
+      expect(row.data.source_id).toBe('company');
+    });
+
+    it('rejects proposal-tool jobs without a bound source, slug fence, or capture inside the fence', async () => {
+      await seedClient('unscoped', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: null,
+        bound_slug_prefixes: ['sources/'],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'unscoped' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/bound source/i);
+
+      await seedClient('unfenced', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: [],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'unfenced' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/slug fence/i);
+
+      await seedClient('wrong-capture', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['projects/'],
+      });
+      await expect(callSubmitAgent(makeCtx({ clientId: 'wrong-capture' }), {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      })).rejects.toThrow(/capture page.*slug fence/i);
+    });
+
+    it('accepts a 4,000-character proposal scope and rejects 4,001 characters', async () => {
+      await seedClient('scope-limit', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const ctx = makeCtx({ clientId: 'scope-limit' });
+      const maximumScope = 's'.repeat(4_000);
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: `${maximumScope}s`,
+      })).rejects.toThrow(/admission scope exceeds/i);
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: maximumScope,
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1', [result.id],
+      );
+      expect(row!.data.proposal_admission_scope).toBe(maximumScope);
+    });
+
     it('deduplicates a client idempotency key before enforcing concurrency', async () => {
       await seedClient('cursor', {
         bound_tools: ['search'],
@@ -376,7 +488,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         idempotency_key: 'lore-job-01',
       });
       const repeated = await callSubmitAgent(ctx, {
-        prompt: 'correct the selected claim',
+        prompt: 'x'.repeat(500_000),
         idempotency_key: 'lore-job-01',
       });
 
@@ -485,6 +597,70 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       })).rejects.toThrow(/does not support reasoning_effort/i);
     });
 
+    it.each([0, -1, 1.5, 32_769, Number.NaN, Number.POSITIVE_INFINITY, null, '32768'])(
+      'rejects invalid max_output_tokens=%p before enqueue',
+      async (maxOutputTokens) => {
+        await seedClient('cursor', {
+          bound_tools: ['search'],
+          bound_source_id: 'default',
+          bound_slug_prefixes: ['wiki/'],
+        });
+        const ctx = makeCtx({ clientId: 'cursor' });
+
+        await expect(callSubmitAgent(ctx, {
+          prompt: 'go',
+          max_output_tokens: maxOutputTokens,
+        })).rejects.toMatchObject({
+          code: 'invalid_params',
+          message: expect.stringMatching(/max_output_tokens.*integer.*1.*32768/i),
+        });
+        const rows = await engine.executeRaw<{ n: number }>(
+          `SELECT COUNT(*)::int AS n FROM minion_jobs
+            WHERE data->>'__owner_client_id' = 'cursor'`,
+        );
+        expect(rows[0]?.n).toBe(0);
+        expect(fs.readdirSync(tmpAuditDir)).toEqual([]);
+      },
+    );
+
+    it('uses the configured output budget when max_output_tokens is omitted', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      await engine.setConfig('agent.max_output_tokens', '5000');
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const result = await callSubmitAgent(ctx, { prompt: 'go' });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(5_000);
+    });
+
+    it('uses the explicit max_output_tokens for prompt admission and durable execution', async () => {
+      await seedClient('cursor', {
+        bound_tools: ['search'],
+        bound_source_id: 'default',
+        bound_slug_prefixes: ['wiki/'],
+      });
+      await engine.setConfig('agent.max_output_tokens', '8192');
+      const ctx = makeCtx({ clientId: 'cursor' });
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'go',
+        model: 'openai:gpt-5.6-terra',
+        max_output_tokens: 32_768,
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(32_768);
+    });
+
     it('inserts a subagent job + writes audit row', async () => {
       await seedClient('cursor', {
         bound_tools: ['search', 'get_page'],
@@ -574,6 +750,81 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(row.data.skill_name).toBe('knowledge-correction');
       expect(row.data.skill_sha256).toMatch(/^[a-f0-9]{64}$/);
       expect(row.data.system).toContain('Knowledge Correction');
+    });
+
+    it('accepts a production-sized 128 KiB prompt with the published GitHub skill on Terra', async () => {
+      const tools = [
+        'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
+        'resolve_slugs', 'get_links', 'get_backlinks',
+        'stage_ingestion_proposal_page', 'finalize_ingestion_proposal',
+        'put_page', 'add_link', 'add_timeline_entry', 'validate_links',
+      ];
+      await seedClient('lore', {
+        bound_tools: tools,
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/', 'projects/', 'people/', 'companies/'],
+        bound_max_concurrent: 3,
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      await engine.setConfig('agent.max_output_tokens', '8192');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      const result = await callSubmitAgent(ctx, {
+        prompt: 'p'.repeat(128 * 1024),
+        skill_name: 'github-project-ingestion',
+        model: 'openai:gpt-5.6-terra',
+        max_output_tokens: 32_768,
+        allowed_tools: tools,
+        proposal_artifact_id: 'artifact-128k',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include source-grounded delivery knowledge.',
+      });
+
+      expect(result.id).toBeNumber();
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row?.data.max_tokens).toBe(32_768);
+    });
+
+    it('rejects an over-budget fresh prompt before creating a job or audit record', async () => {
+      const tools = [
+        'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
+        'resolve_slugs', 'get_links', 'get_backlinks',
+        'stage_ingestion_proposal_page', 'finalize_ingestion_proposal',
+        'put_page', 'add_link', 'add_timeline_entry', 'validate_links',
+      ];
+      await seedClient('lore', {
+        bound_tools: tools,
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/', 'projects/', 'people/', 'companies/'],
+        bound_max_concurrent: 3,
+      });
+      await engine.setConfig('mcp.publish_skills', 'true');
+      await engine.setConfig('agent.max_output_tokens', '32768');
+      const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
+      ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
+
+      await expect(callSubmitAgent(ctx, {
+        prompt: 'p'.repeat(300_000),
+        skill_name: 'github-project-ingestion',
+        model: 'openai:gpt-5.6-terra',
+        allowed_tools: tools,
+        proposal_artifact_id: 'artifact-too-large',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include source-grounded delivery knowledge.',
+      })).rejects.toMatchObject({
+        code: 'invalid_params',
+        message: expect.stringMatching(/initial prompt.*too large/i),
+      });
+      const rows = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM minion_jobs
+          WHERE data->>'__owner_client_id' = 'lore'`,
+      );
+      expect(rows[0]?.n).toBe(0);
+      expect(fs.readdirSync(tmpAuditDir)).toEqual([]);
     });
 
     it('refuses an unpublished server skill', async () => {
@@ -1122,6 +1373,94 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
       'retry_filing_from_current_state',
     );
+  });
+});
+
+describe('staged proposal operation contract', () => {
+  it('stages only inside the bound job, finalizes compactly, and retrieves by exact owner and digest', async () => {
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'lore',
+        source_id: 'company',
+        proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include delivery notes.',
+        allowed_slug_prefixes: ['sources/*'],
+      })],
+    );
+    const agentCtx = { ...makeCtx({ clientId: 'lore' }), viaSubagent: true, jobId: row.id };
+    const staged = await stage_ingestion_proposal_page!.handler(agentCtx, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include delivery notes.',
+      sequence: 1,
+      total_pages: 1,
+      page: {
+        slug: 'sources/example',
+        effect: 'create',
+        title: 'Example',
+        bodyMarkdown: '# Example',
+      },
+    }) as any;
+    const manifest = await finalize_ingestion_proposal!.handler(agentCtx, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include delivery notes.',
+      total_pages: 1,
+      summary: 'Ready for review.',
+      proposed_timeline_entries: [],
+      proposed_links: [],
+      unresolved: [],
+    }) as any;
+
+    expect(manifest).toEqual({
+      status: 'staged_proposal',
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include delivery notes.',
+      summary: 'Ready for review.',
+      pageDigests: [{ sequence: 1, slug: 'sources/example', digest: staged.digest }],
+      proposalDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    });
+
+    const retrieved = await get_agent_job_proposal!.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id, proposal_digest: manifest.proposalDigest },
+    ) as any;
+    expect(retrieved).toEqual({
+      id: row.id,
+      proposal_digest: manifest.proposalDigest,
+      page_digests: manifest.pageDigests,
+      plan: {
+        artifactId: 'artifact-1',
+        sourceId: 'company',
+        admissionScope: 'Include delivery notes.',
+        summary: 'Ready for review.',
+        proposedPages: [{
+          slug: 'sources/example',
+          effect: 'create',
+          title: 'Example',
+          bodyMarkdown: '# Example',
+        }],
+        proposedTimelineEntries: [],
+        proposedLinks: [],
+        unresolved: [],
+      },
+    });
+    await expect(get_agent_job_proposal!.handler(
+      makeCtx({ clientId: 'other' }),
+      { id: row.id, proposal_digest: manifest.proposalDigest },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+    await expect(stage_ingestion_proposal_page!.handler(makeCtx({ clientId: 'lore' }), {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include delivery notes.',
+      sequence: 1, total_pages: 1, page: {},
+    })).rejects.toMatchObject({ code: 'permission_denied' });
   });
 });
 

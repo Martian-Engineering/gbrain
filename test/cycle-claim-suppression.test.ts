@@ -151,6 +151,7 @@ describe('dream-cycle suppression contract', () => {
   test('mocked synthesize generation is skipped and recorded when it reasserts a claim', async () => {
     await seedSuppression();
     const slug = 'wiki/personal/patterns/launch-timing';
+    const reviewed = await engine.getPage(slug, { sourceId: 'default' });
     const generated = await operationsByName.put_page.handler(ctx({
       remote: true,
       viaSubagent: true,
@@ -159,6 +160,7 @@ describe('dream-cycle suppression contract', () => {
     }), {
       slug,
       content: '---\ntitle: Launch timing\n---\n\nTHE   LAUNCH is friday.',
+      expected_content_hash: reviewed!.content_hash,
     });
     expect(generated).toMatchObject({
       status: 'skipped',

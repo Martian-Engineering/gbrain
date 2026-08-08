@@ -55,7 +55,8 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // operations.ts:enforceSubagentSlugFence).
     // lore-cd8 added replace_page_text (write, fenced like put_page and
     // CAS-guarded by expected_content_hash).
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(28);
+    // Durable ingestion proposals add two non-corpus-mutating staging tools.
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(30);
     expect(BRAIN_TOOL_ALLOWLIST.has('add_timeline_entry')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);

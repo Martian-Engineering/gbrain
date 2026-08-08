@@ -32,6 +32,7 @@ import {
   type ChatBlock,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
+import { stageAgentJobProposalPage } from '../../src/core/minions/agent-job-proposals.ts';
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -71,20 +72,23 @@ interface FakeJobOpts {
   model?: string;
   allowed_tools?: string[];
   use_gateway_loop?: boolean;
+  data?: Record<string, unknown>;
 }
 
 async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: MinionJobContext; tokenSink: any[] }> {
+  const jobData = {
+    prompt: opts.prompt,
+    model: opts.model,
+    allowed_tools: opts.allowed_tools,
+    use_gateway_loop: opts.use_gateway_loop,
+    ...opts.data,
+  };
   // Insert a minion_jobs row so foreign keys validate (subagent_tool_executions.job_id FK).
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
      VALUES ('subagent', 'active', $1::jsonb, 'default', 0, now())
      RETURNING id`,
-    [JSON.stringify({
-      prompt: opts.prompt,
-      model: opts.model,
-      allowed_tools: opts.allowed_tools,
-      use_gateway_loop: opts.use_gateway_loop,
-    })],
+    [JSON.stringify(jobData)],
   );
   const jobId = rows[0].id;
 
@@ -95,12 +99,7 @@ async function makeFakeJob(opts: FakeJobOpts): Promise<{ jobId: number; ctx: Min
   const ctx: MinionJobContext = {
     id: jobId,
     name: 'subagent',
-    data: {
-      prompt: opts.prompt,
-      model: opts.model,
-      allowed_tools: opts.allowed_tools,
-      use_gateway_loop: opts.use_gateway_loop,
-    },
+    data: jobData,
     attempts_made: 0,
     signal: abortCtrl.signal,
     deadlineAtMs: null,
@@ -170,6 +169,148 @@ function buildHandler(toolRegistry: ToolDef[]) {
 
 describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gateway.toolLoop)', () => {
   afterAll(() => clearGateway());
+
+  it('rejects an oversized staged page before gateway assistant or tool persistence', async () => {
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [{
+        type: 'tool-call',
+        toolCallId: 'stage-too-large',
+        toolName: 'brain_stage_ingestion_proposal_page',
+        input: { page: { bodyMarkdown: 'x'.repeat(196_608) } },
+      }] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage',
+      input_schema: { type: 'object' },
+      idempotent: true,
+      mutating: false,
+      async execute() { return { ok: true }; },
+    };
+    const handler = buildHandler([tool]);
+    const { jobId, ctx } = await makeFakeJob({ prompt: 'stage', model: 'anthropic:claude-sonnet-4-6' });
+
+    await expect(handler(ctx)).rejects.toThrow(/maximum/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    const executions = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(executions).toHaveLength(0);
+  });
+
+  it('rejects two staged pages before gateway assistant or tool persistence', async () => {
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [
+        {
+          type: 'tool-call',
+          toolCallId: 'stage-1',
+          toolName: 'brain_stage_ingestion_proposal_page',
+          input: { page: 1 },
+        },
+        {
+          type: 'tool-call',
+          toolCallId: 'stage-2',
+          toolName: 'brain_stage_ingestion_proposal_page',
+          input: { page: 2 },
+        },
+      ] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage',
+      input_schema: { type: 'object' },
+      idempotent: true,
+      mutating: false,
+      async execute() { return { ok: true }; },
+    };
+    const handler = buildHandler([tool]);
+    const { jobId, ctx } = await makeFakeJob({ prompt: 'stage twice', model: 'anthropic:claude-sonnet-4-6' });
+
+    await expect(handler(ctx)).rejects.toThrow(/exactly one/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    const executions = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(executions).toHaveLength(0);
+  });
+
+  it('rejects a cumulative stage overflow before assistant, tool, or fragment persistence', async () => {
+    const crossingInput = {
+      artifact_id: 'artifact-1', source_id: 'company',
+      admission_scope: 'Derived scope.', sequence: 2, total_pages: 2,
+      page: {
+        slug: 'sources/large-2', effect: 'create', title: 'Large',
+        bodyMarkdown: 'x'.repeat(80_000),
+      },
+    };
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [{
+        type: 'tool-call', toolCallId: 'stage-overflow',
+        toolName: 'brain_stage_ingestion_proposal_page', input: crossingInput,
+      }] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    } satisfies ChatResult));
+    let executed = false;
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage', input_schema: { type: 'object' },
+      idempotent: true, mutating: false,
+      async execute() { executed = true; return { ok: true }; },
+    };
+    const handler = buildHandler([tool]);
+    const { jobId, ctx } = await makeFakeJob({
+      prompt: 'stage', model: 'anthropic:claude-sonnet-4-6',
+      data: {
+        __owner_client_id: 'lore-client', source_id: 'company',
+        proposal_artifact_id: 'artifact-1', proposal_capture_page_slug: 'sources/large-1',
+        proposal_admission_scope: 'Derived scope.', allowed_slug_prefixes: ['sources/*'],
+      },
+    });
+    await stageAgentJobProposalPage(engine, jobId, {
+      ...crossingInput,
+      sequence: 1,
+      page: { ...crossingInput.page, slug: 'sources/large-1' },
+    });
+
+    await expect(handler(ctx)).rejects.toThrow(/maximum/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`, [jobId],
+    );
+    const executions = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`, [jobId],
+    );
+    const fragments = await engine.executeRaw<{ sequence: number }>(
+      `SELECT sequence FROM agent_job_proposal_fragments WHERE job_id = $1 ORDER BY sequence`, [jobId],
+    );
+    expect(executed).toBe(false);
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(executions).toHaveLength(0);
+    expect(fragments.map((row) => Number(row.sequence))).toEqual([1]);
+  });
 
   it('happy path 1-turn: gateway returns text, handler returns SubagentResult', async () => {
     __setChatTransportForTests(async () => ({

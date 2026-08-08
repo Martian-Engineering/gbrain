@@ -19,8 +19,10 @@ function makeEngine(opts: { knownSources?: string[] } = {}) {
   const pageLookups: unknown[][] = [];
   const engine = {
     getConfig: async () => null,
+    resolveSlugWithAlias: async (slug: string) => slug,
     executeRaw: async (sql: string, params: unknown[] = []) => {
-      if (sql.includes('FROM sources WHERE id = $1')) {
+      const normalizedSql = sql.replace(/\s+/g, ' ');
+      if (normalizedSql.includes('FROM sources WHERE id = $1')) {
         // Default (no `knownSources` override): every id "exists", matching
         // the original test's assumption. When `knownSources` is passed,
         // only ids in that list resolve — used to simulate a source that
@@ -28,23 +30,23 @@ function makeEngine(opts: { knownSources?: string[] } = {}) {
         if (!opts.knownSources) return [{ id: params[0] as string }];
         return opts.knownSources.includes(params[0] as string) ? [{ id: params[0] as string }] : [];
       }
-      if (sql.includes('FROM sources WHERE local_path IS NOT NULL AND id != ')) {
+      if (normalizedSql.includes('FROM sources WHERE local_path IS NOT NULL AND id != ')) {
         // resolveSourceId tier 5.5 (sole-non-default-source). No registered
         // sources with a local_path in these tests.
         return [];
       }
-      if (sql.includes('FROM sources WHERE local_path IS NOT NULL')) {
+      if (normalizedSql.includes('FROM sources WHERE local_path IS NOT NULL')) {
         // resolveSourceId tier 4 (registered source whose local_path
         // contains CWD). No registered sources in these tests.
         return [];
       }
-      if (sql.includes('FROM pages WHERE slug = $1 AND source_id = $2')) {
+      if (normalizedSql.includes('FROM pages WHERE slug = $1 AND source_id = $2 AND deleted_at IS NULL')) {
         pageLookups.push(params);
         if (params[0] === 'shared/page' && params[1] === 'dept') return [{ id: 22 }];
         if (params[0] === 'shared/page' && params[1] === 'default') return [{ id: 11 }];
         return [];
       }
-      if (sql.includes('FROM pages WHERE slug = $1 LIMIT 1')) {
+      if (normalizedSql.includes('FROM pages WHERE slug = $1 AND deleted_at IS NULL')) {
         pageLookups.push(params);
         return [{ id: 11 }];
       }

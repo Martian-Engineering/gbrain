@@ -57,33 +57,18 @@ import { supportsReasoningEffort } from '../../ai/model-resolver.ts';
 import { randomUUIDv7 } from 'bun';
 import { isContextLimitMessage } from '../error-classify.ts';
 import { ToolLoopContextProjectionError } from '../../ai/tool-loop-context.ts';
+import {
+  assertProposalToolTurnPersistable,
+  assertProposalToolTurnPersistableForJob,
+} from '../agent-job-proposals.ts';
+import { resolveSubagentMaxOutputTokens } from '../subagent-limits.ts';
+export { resolveSubagentMaxOutputTokens as resolveMaxOutputTokens } from '../subagent-limits.ts';
 
 // ── Defaults ────────────────────────────────────────────────
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TURNS = 20;
-const DEFAULT_MAX_OUTPUT_TOKENS = 8192;
 const DEFAULT_RATE_KEY = 'anthropic:messages';
-
-/**
- * Resolve the per-turn output-token cap (#2778). Per-job data wins, then the
- * `agent.max_output_tokens` config row, then the 8192 default (was a
- * hardcoded 4096 that made pages >~12KB unwritable via put_page). Invalid
- * values (NaN / zero / negative) fall through to the next tier.
- */
-export function resolveMaxOutputTokens(
-  perJob: number | undefined,
-  configRaw: string | null | undefined,
-): number {
-  if (typeof perJob === 'number' && Number.isFinite(perJob) && perJob > 0) {
-    return Math.floor(perJob);
-  }
-  if (typeof configRaw === 'string' && configRaw.trim() !== '') {
-    const n = Number(configRaw);
-    if (Number.isFinite(n) && n > 0) return Math.floor(n);
-  }
-  return DEFAULT_MAX_OUTPUT_TOKENS;
-}
 
 /**
  * Resolve the rate-lease cap from the env var.
@@ -251,7 +236,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     }
     const maxTurns = data.max_turns ?? DEFAULT_MAX_TURNS;
     // #2778: per-turn output cap — data.max_tokens → config → 8192 default.
-    const maxOutputTokens = resolveMaxOutputTokens(
+    const maxOutputTokens = resolveSubagentMaxOutputTokens(
       data.max_tokens,
       await engine.getConfig('agent.max_output_tokens').catch(() => null),
     );
@@ -400,6 +385,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         };
       }
       if (pendingToolUses.length > 0) {
+        assertProposalToolTurnPersistable(pendingToolUses);
         const synthesizedResults: ContentBlock[] = [];
         for (const use of pendingToolUses) {
           const prior = priorToolByUseId.get(use.id);
@@ -654,6 +640,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
       const blocks = assistantMsg.content as ContentBlock[];
 
+      // Enforce proposal page count and byte limits before the assistant turn
+      // makes its raw tool inputs durable in subagent_messages.
+      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
+
       // 3. Persist the assistant message BEFORE tool dispatch so replay
       //    sees a consistent state.
       const assistantIdx = nextMessageIdx++;
@@ -845,7 +835,7 @@ interface GatewayRunArgs {
   systemPrompt: string;
   toolDefs: ToolDef[];
   maxTurns: number;
-  /** #2778: per-turn output-token cap (resolved by resolveMaxOutputTokens). */
+  /** #2778: per-turn output-token cap resolved from frozen job/config state. */
   maxOutputTokens: number;
 }
 
@@ -1009,6 +999,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       nextMessageIdx,
     },
     onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {
+      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
       // Convert ChatBlock[] back to ContentBlock-shaped JSONB for persistence.
       // Storing the gateway's provider-neutral shape is the v2 content_blocks
       // contract; the D5 shim handles legacy reads from v1 rows.
@@ -1198,6 +1189,7 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
     const toolCalls = msg.blocks.filter(
       (b): b is Extract<ChatBlock, { type: 'tool-call' }> => b.type === 'tool-call',
     );
+    assertProposalToolTurnPersistable(toolCalls);
     if (toolCalls.length === 0) continue;
 
     // Skip if a following tool-result user turn exists AT ALL. A fully-answered

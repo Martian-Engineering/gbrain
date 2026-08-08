@@ -125,6 +125,58 @@ function makeThrowingTool(name = 'broken'): ToolDef {
 // ── Tests ───────────────────────────────────────────────────
 
 describe('subagent handler happy path', () => {
+  test('proposal stage guard rejects oversized raw input before assistant or tool persistence', async () => {
+    const tool = makeEchoTool('brain_stage_ingestion_proposal_page');
+    const client = new FakeMessagesClient([{
+      content: [{
+        type: 'tool_use',
+        id: 'stage-too-large',
+        name: tool.name,
+        input: { page: { bodyMarkdown: 'x'.repeat(196_608) } },
+      } as any],
+      stop_reason: 'tool_use' as any,
+    }]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [tool] });
+    const ctx = await makeCtx({ prompt: 'stage one page' });
+
+    await expect(handler(ctx)).rejects.toThrow(/maximum/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [ctx.id],
+    );
+    const tools = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [ctx.id],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(tools).toHaveLength(0);
+  });
+
+  test('proposal stage guard rejects two staged pages before assistant or tool persistence', async () => {
+    const tool = makeEchoTool('brain_stage_ingestion_proposal_page');
+    const client = new FakeMessagesClient([{
+      content: [
+        { type: 'tool_use', id: 'stage-1', name: tool.name, input: { page: 1 } } as any,
+        { type: 'tool_use', id: 'stage-2', name: tool.name, input: { page: 2 } } as any,
+      ],
+      stop_reason: 'tool_use' as any,
+    }]);
+    const handler = makeSubagentHandler({ engine, client, toolRegistry: [tool] });
+    const ctx = await makeCtx({ prompt: 'stage two pages' });
+
+    await expect(handler(ctx)).rejects.toThrow(/exactly one/i);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [ctx.id],
+    );
+    const tools = await engine.executeRaw(
+      `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
+      [ctx.id],
+    );
+    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(tools).toHaveLength(0);
+  });
+
   test('no-tool end_turn: returns text response + persists user + assistant rows', async () => {
     const client = new FakeMessagesClient([
       { content: [{ type: 'text', text: 'hello world' }] as any, stop_reason: 'end_turn' },
