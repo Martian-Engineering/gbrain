@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.3.1
+version: 1.3.2
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -96,6 +96,16 @@ a source-bound remote Minion.
   and plain text; never nest Markdown links or extra square brackets inside
   it — unresolvable citations render as dead text instead of links.
 - Read back every written page and validate its links before reporting success.
+- Validate each complete candidate body before writing it. After `put_page`,
+  record the returned `content_hash` and use `get_page` for server-authoritative
+  post-write proof. A large page read may return only the typed
+  `gbrain.page_read_verification_projection.v1` working-context projection with
+  server-authenticated `source_id`, `slug`, and `content_hash`. Treat the page as
+  verified only when all three fields are well formed, identify the exact
+  authenticated destination, and its `content_hash` exactly matches the `content_hash` returned by the write.
+  Do not require the full page body to re-enter model context.
+  Treat any missing or malformed `source_id`, `slug`, or `content_hash` as unverified.
+  Never infer verification from generic `working_context_projection` metadata or its payload digest.
 - In `createdPages`, `updatedPages`, `verifiedPages`, and
   `pageResults.appliedPage`, qualify every page as `<sourceId>:<slug>` even
   when page tools accept a bare slug. Each top-level page-array entry contains
@@ -494,9 +504,10 @@ Minion mechanics, receipt details, or review-control state into the capture body
 Those belong to Lore's ingestion ledger. Never cite or link the capture page to
 itself. A capture cannot establish its own provenance.
 
-Read this page back and verify every identity and revision field, the clickable
-upstream URL, the direct GitHub attribution, the concise body anatomy, and the
-absence of self-citations before continuing.
+Before writing, verify every identity and revision field, the clickable upstream
+URL, the direct GitHub attribution, the concise body anatomy, and the absence of
+self-citations. After writing, use the server-authoritative page verification
+rule above to prove that this exact validated body landed before continuing.
 
 ### 5. Update durable feature or initiative knowledge
 
@@ -567,12 +578,14 @@ People belong in `people/`, organizations in `companies/`, ongoing work in
 
 ### 7. Verify and report
 
-1. Read back the capture page; confirm it contains the exact upstream identity
+1. Before writing, confirm it contains the exact upstream identity
    and clickable GitHub URL, and confirm it contains no citation or wikilink to
-   its own slug.
-2. Read back any feature or initiative page and every entity page written;
-   verify every GitHub-derived claim on every other written page cites the
-   exact source capture.
+   its own slug. Then prove the write through an exact
+   source, slug, and content-hash read-back match.
+2. Validate every feature, initiative, and entity page before writing; verify every GitHub-derived claim on every other written page cites the
+   exact source capture. Then prove each
+   resulting write through the same server-authoritative hash match. A typed
+   hash-only read projection is sufficient; a generic projection is not.
 3. Verify canonical and capture identities, revision order, current state, and
    the link to the exact source capture.
 4. Check `get_backlinks` for every meaningful explicit reference.

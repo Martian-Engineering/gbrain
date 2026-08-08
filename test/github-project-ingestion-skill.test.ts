@@ -43,7 +43,7 @@ const expectedPrefixes = [
 
 describe('github-project-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.3.1');
+    expect(skill).toContain('version: 1.3.2');
     expect(getSkillAgentBindings(skillsDir, 'github-project-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -276,6 +276,15 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toMatch(/Do not attempt to recalculate,\s+estimate, or second-guess hashes or byte counts/);
     expect(skill).not.toContain('Recompute each SHA-256');
     expect(skill).toMatch(/Working-context projection or omission\s+markers[\s\S]*never treat them\s+as proof that the original artifact is incomplete/);
+  });
+
+  test('uses only authenticated page identity and hash projections as post-write proof', () => {
+    expect(skill).toContain('gbrain.page_read_verification_projection.v1');
+    expect(skill).toMatch(/server-authenticated `source_id`, `slug`, and `content_hash`/);
+    expect(skill).toMatch(/exactly matches the `content_hash` returned by the write/);
+    expect(skill).toMatch(/Do not require the full page body to re-enter model context/);
+    expect(skill).toMatch(/missing or malformed `source_id`, `slug`, or `content_hash`[\s\S]*unverified/);
+    expect(skill).toMatch(/Never infer verification from generic `working_context_projection` metadata/);
   });
 
   test('accepts only the bounded error-redacted prior-attempt projection', () => {
