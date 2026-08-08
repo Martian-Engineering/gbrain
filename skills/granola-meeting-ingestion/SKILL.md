@@ -239,7 +239,11 @@ Before constructing final page bodies, freeze the complete ordered page inventor
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
 the inventory as exact `{slug,effect}` entries. Each canonical slug appears exactly
 once, the capture slug appears exactly once, and every entry is inside the job's
-slug fence. Consolidate all source material for a slug into that one complete page
+slug fence. Each effect must match the current non-deleted page state in the bound source:
+when a slug exists but is marked `create`, use `update` and read its exact baseline;
+when a slug does not exist but is marked `update`, use `create`. Correct the full
+inventory and `total_pages`, then retry if staging reports either mismatch.
+Consolidate all source material for a slug into that one complete page
 entry before staging; never reserve a second inventory slot for the same slug. Once the
 inventory is frozen, use `search`, `query`, `list_pages`, and `resolve_slugs`
 results to work through it without preloading full page bodies. Never request

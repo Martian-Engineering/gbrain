@@ -5705,7 +5705,7 @@ const stage_ingestion_proposal_page: Operation = {
       type: 'array',
       items: { type: 'object' },
       required: true,
-      description: 'Complete ordered unique {slug,effect} page plan, repeated unchanged on every stage call',
+      description: 'Complete ordered unique {slug,effect} page plan; first stage validates effects against live pages in the bound source, then every stage repeats it unchanged',
     },
     page: { type: 'object', required: true, description: 'Exact create or update page proposal' },
   },

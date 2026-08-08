@@ -224,6 +224,9 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('freeze the complete ordered page inventory');
     expect(skill).toMatch(/exact\s+`\{slug,effect\}` entries/);
     expect(skill).toMatch(/Each canonical slug appears exactly\s+once/);
+    expect(skill).toMatch(/effect must match the current non-deleted page state in the bound source/);
+    expect(skill).toMatch(/exists but is marked `create`.*use `update`.*exact baseline/s);
+    expect(skill).toMatch(/does not exist but is marked `update`.*use `create`/s);
     expect(skill).toMatch(/Repeat the\s+same full `page_inventory` unchanged on every stage call/);
     expect(skill).toContain('`nextExpectedSlot`');
     expect(skill).toContain('at most 32 pages');

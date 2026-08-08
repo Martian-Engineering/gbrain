@@ -54,6 +54,22 @@ async function seedJob(overrides: Record<string, unknown> = {}): Promise<number>
   return Number(rows[0]!.id);
 }
 
+async function seedStoredPage(
+  slug: string,
+  sourceId = 'company',
+  deleted = false,
+): Promise<void> {
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
+    [sourceId],
+  );
+  await engine.executeRaw(
+    `INSERT INTO pages (source_id, slug, type, title, compiled_truth, deleted_at)
+     VALUES ($1, $2, 'note', 'Existing page', '# Existing', CASE WHEN $3 THEN now() ELSE NULL END)`,
+    [sourceId, slug, deleted],
+  );
+}
+
 function createPage(slug: string, bodyMarkdown = '# Page'): ScopedProposalPage {
   return { slug, effect: 'create', title: 'Page', bodyMarkdown };
 }
@@ -146,6 +162,7 @@ describe('durable agent-job proposal staging', () => {
   });
 
   it('stages exact pages, finalizes an ordered manifest, and retrieves the full owned plan', async () => {
+    await seedStoredPage('projects/example');
     const jobId = await seedJob();
     const pages = [createPage('sources/example'), updatePage('projects/example')];
     const inventory = pageInventory(...pages);
@@ -329,6 +346,59 @@ describe('durable agent-job proposal staging', () => {
       );
       expect(row).toEqual({ scope: null, inventory: null });
     }
+  });
+
+  it('reports every first-stage effect mismatch without freezing the correctable plan', async () => {
+    await seedStoredPage('sources/example');
+    await seedStoredPage('projects/other-source', 'other');
+    await seedStoredPage('projects/deleted', 'company', true);
+    const jobId = await seedJob({ proposal_admission_scope: null });
+    const mismatchedInventory: ProposalPageInventoryEntry[] = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/missing', effect: 'update' },
+      { slug: 'projects/other-source', effect: 'create' },
+      { slug: 'projects/deleted', effect: 'create' },
+    ];
+
+    const mismatch = await stage(
+      jobId,
+      1,
+      mismatchedInventory.length,
+      createPage('sources/example'),
+      'Correctable scope.',
+      mismatchedInventory,
+    ).then(() => null, error => error as Error & { code: string });
+    expect(mismatch).toMatchObject({
+      code: 'inventory_effect_mismatch',
+      message: expect.stringMatching(
+        /sources\/example.*exists.*marked create.*use update.*exact baseline.*projects\/missing.*does not exist.*marked update.*use create/is,
+      ),
+    });
+    const mismatchText = String(mismatch);
+    expect(mismatchText).not.toContain('projects/other-source');
+    expect(mismatchText).not.toContain('projects/deleted');
+
+    const [untouched] = await engine.executeRaw<{
+      scope: string | null;
+      inventory: unknown;
+      fragment_count: string;
+    }>(
+      `SELECT data->>'proposal_admission_scope' AS scope,
+              data->'proposal_page_inventory' AS inventory,
+              (SELECT count(*)::text FROM agent_job_proposal_fragments WHERE job_id = minion_jobs.id) AS fragment_count
+         FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(untouched).toEqual({ scope: null, inventory: null, fragment_count: '0' });
+
+    await expect(stage(
+      jobId,
+      1,
+      1,
+      updatePage('sources/example'),
+      'Correctable scope.',
+      [{ slug: 'sources/example', effect: 'update' }],
+    )).resolves.toMatchObject({ nextExpectedSlot: null });
   });
 
   it('freezes one exact inventory and rejects changed later calls before inserting a fragment', async () => {
@@ -568,6 +638,7 @@ describe('durable agent-job proposal staging', () => {
     })).rejects.toMatchObject({ code: 'digest_mismatch' });
 
     const duplicatePageJob = await seedJob({ proposal_capture_page_slug: 'sources/same' });
+    await seedStoredPage('projects/other');
     const uniquePages = [createPage('sources/same'), updatePage('projects/other')];
     const uniqueInventory = pageInventory(...uniquePages);
     await stage(duplicatePageJob, 1, 2, uniquePages[0]!, undefined, uniqueInventory);

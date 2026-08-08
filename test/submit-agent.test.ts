@@ -156,6 +156,8 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         required: true,
         items: { type: 'object' },
       });
+      expect(stage_ingestion_proposal_page?.params.page_inventory.description)
+        .toContain('validates effects against live pages in the bound source');
       expect(finalize_ingestion_proposal?.scope).toBe('agent');
       expect(finalize_ingestion_proposal?.mutating).toBe(false);
       expect(finalize_ingestion_proposal?.params.total_pages.description)

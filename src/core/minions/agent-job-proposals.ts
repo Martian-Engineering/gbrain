@@ -293,6 +293,7 @@ export async function stageAgentJobProposalPage(
       throw new AgentJobProposalError('proposal_finalized', 'This job proposal is already finalized.');
     }
 
+    await assertFirstInventoryEffectsMatchCorpus(tx, binding, candidate.pageInventory);
     const fragments = await readStoredFragments(tx, jobId);
     const replay = assertCumulativeStageFits(binding, candidate, fragments);
     const frozenBinding = await freezeProposalBinding(
@@ -829,6 +830,45 @@ function assertExactPageInventory(
     throw new AgentJobProposalError(
       'inventory_mismatch',
       'page_inventory does not exactly match the inventory frozen by the first successful stage. Repeat the unchanged frozen inventory and retry.',
+    );
+  }
+}
+
+/** Check a newly proposed inventory against current live pages in its bound source. */
+async function assertFirstInventoryEffectsMatchCorpus(
+  engine: BrainEngine,
+  binding: JobBinding,
+  inventory: readonly ProposalPageInventoryEntry[],
+): Promise<void> {
+  if (binding.pageInventory !== null && binding.pageInventory !== undefined) return;
+  // The durable source binding keeps same-slug pages in every other source
+  // from changing whether this inventory entry is a create or an update.
+  const rows = await engine.executeRaw<{ slug: string }>(
+    `SELECT slug
+       FROM pages
+      WHERE source_id = $1
+        AND deleted_at IS NULL
+        AND slug = ANY($2::text[])`,
+    [binding.sourceId, inventory.map(entry => entry.slug)],
+  );
+  const existingSlugs = new Set(rows.map(row => row.slug));
+  // Return the complete correction set so the agent can rebuild and retry one
+  // coherent inventory instead of discovering effect mistakes one at a time.
+  const mismatches = inventory.flatMap((entry) => {
+    const exists = existingSlugs.has(entry.slug);
+    if (exists && entry.effect === 'create') {
+      return [`${entry.slug} exists but is marked create; use update and read its exact baseline before staging.`];
+    }
+    if (!exists && entry.effect === 'update') {
+      return [`${entry.slug} does not exist but is marked update; use create.`];
+    }
+    return [];
+  });
+  if (mismatches.length > 0) {
+    throw new AgentJobProposalError(
+      'inventory_effect_mismatch',
+      `page_inventory effects do not match current non-deleted pages in source ${binding.sourceId}: `
+        + `${mismatches.join(' ')} Correct page_inventory and total_pages, then retry.`,
     );
   }
 }
