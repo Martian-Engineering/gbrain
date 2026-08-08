@@ -120,7 +120,19 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toMatch(/[Tt]he exact prompt-supplied `capturePageSlug` is the only\s+source-page write\s+target/);
     expect(skill).not.toMatch(/Update it even when its slug differs from `capturePageSlug`/);
     expect(skill).toMatch(/do not create any source page\s+other than the exact `capturePageSlug`/);
-    expect(skill).toMatch(/legacy page may be cited as read-only historical evidence/);
+    expect(skill).toMatch(/legacy page may be cited as read-only historical\s+evidence/);
+    expect(skill).toMatch(/Each immutable capture writes its\s+own exact artifact capture page/);
+    expect(skill).toMatch(/one traceable `sources\/` page for this immutable\s+capture artifact/);
+    expect(skill).toContain('capturePageSlug: <exact sources/ slug for this immutable capture artifact>');
+    expect(skill).toContain('### 4. Record the immutable capture source page');
+    expect(skill).toMatch(/Prior capture pages remain\s+read-only provenance/);
+    expect(skill).toMatch(/same\s+`canonicalExternalId`, `captureExternalId`, and `revision`/);
+    expect(skill).toMatch(/same\s+thread with a different capture identity or revision/);
+    expect(skill).not.toMatch(/When it already carries the same Gmail thread ID, update it/);
+    expect(skill).not.toMatch(/one traceable `sources\/` page for the Gmail thread/);
+    expect(skill).not.toContain('capturePageSlug: <fallback sources/ slug for a thread with no existing page>');
+    expect(skill).not.toContain('### 4. Record the Gmail thread source page');
+    expect(skill).not.toMatch(/newer thread version updates the same source page/i);
   });
 
   test('supports staged scoped proposals and frozen audited apply', () => {

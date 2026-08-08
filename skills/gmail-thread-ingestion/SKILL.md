@@ -58,8 +58,8 @@ instructions are self-contained for a source-bound remote Minion.
   corpus mutations. `mode: apply` executes only the prompt-supplied frozen
   plan and never reanalyzes email evidence.
 - Treat Lore's local artifact package as the complete source of record. Record
-  one traceable `sources/` page for the Gmail thread and propagate only durable
-  knowledge admitted by the destination resolver.
+  one traceable `sources/` page for this immutable capture artifact and
+  propagate only durable knowledge admitted by the destination resolver.
 - Search and read before every create. Search for the exact Gmail thread ID
   first, then exact case, invoice, and document identifiers found in the
   capture. Similar subjects are never identity. Consolidate only on an exact
@@ -101,7 +101,7 @@ artifactIntegrity:
   manifest: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
   contentMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
   transcriptMarkdown: { sha256: <64 lowercase hex characters>, bytes: <exact UTF-8 byte count> }
-capturePageSlug: <fallback sources/ slug for a thread with no existing page>
+capturePageSlug: <exact sources/ slug for this immutable capture artifact>
 canonicalExternalId: <stable Gmail thread identity>
 captureExternalId: <gmail:<account-key>:<thread-id>:<version>>
 revision: <thread version fingerprint>
@@ -351,21 +351,25 @@ this order:
    slugs. An email address or display name alone does not establish identity.
 
 The exact `capturePageSlug` is the only source-page write target. When it does
-not exist, create it. When it already carries the same Gmail thread ID, update
-it. When it belongs to another identity, return `needs_attention`. A matching
-differently slugged legacy page may be cited as read-only historical evidence
-from the new exact capture page, but never rewritten or treated as an alternate
-write target. Multiple conflicting thread identities still return
+not exist, create it. Update it only when it carries the same
+`canonicalExternalId`, `captureExternalId`, and `revision`; that is a retry of
+the same immutable capture. When it belongs to another identity or to the same
+thread with a different capture identity or revision, return `needs_attention`.
+A matching differently slugged legacy page may be cited as read-only historical
+evidence from the new exact capture page, but never rewritten or treated as an
+alternate write target. Multiple conflicting thread identities still return
 `needs_attention` without mutation.
 
 Use `captureExternalId`, `revision`, `upstreamOrder`, and
-`predecessorExternalId` to order captures. A newer thread version updates the
-same source page. An older or conflicting capture never replaces newer state.
-Similar subjects, overlapping participants, and approximate dates do not
-justify consolidation. Different case, invoice, or document identifiers remain
-distinct even when the subjects match.
+`predecessorExternalId` to order captures. Each immutable capture writes its
+own exact artifact capture page. A newer capture may update canonical dossiers,
+but never updates or replaces a prior capture page. Prior capture pages remain
+read-only provenance. An older or conflicting capture never replaces newer
+state. Similar subjects, overlapping participants, and approximate dates do
+not justify consolidation. Different case, invoice, or document identifiers
+remain distinct even when the subjects match.
 
-### 4. Record the Gmail thread source page
+### 4. Record the immutable capture source page
 
 Create or update exactly `capturePageSlug` under `sources/`. Include:
 
