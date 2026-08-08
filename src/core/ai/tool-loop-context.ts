@@ -220,6 +220,7 @@ export function compactToolLoopMessages(
   options: ToolLoopContextOptions = {},
 ): ChatMessage[] {
   const fallback = compactToolLoopMessagesToByteBudget(messages, maxBytes, options);
+  if (fallback === messages) return fallback;
   const preferredBytes = options.preferredProjectionBytes;
   if (
     preferredBytes === undefined
@@ -227,14 +228,13 @@ export function compactToolLoopMessages(
     || !options.preferredProjectionFits
   ) return fallback;
 
-  const preferred = restorePreferredNewestSingletonResult(
-    messages,
-    fallback,
-    options,
-  );
-  if (!preferred || jsonBytes(preferred) > preferredBytes) return fallback;
   try {
-    return options.preferredProjectionFits(preferred) ? preferred : fallback;
+    return buildPreferredNewestSingletonProjection(
+      messages,
+      preferredBytes,
+      options,
+      options.preferredProjectionFits,
+    ) ?? fallback;
   } catch {
     // Exact provider tokenization is optional. Any failure retains the
     // independently valid worst-case byte projection.
@@ -243,15 +243,17 @@ export function compactToolLoopMessages(
 }
 
 /**
- * Restore only the newest singleton read result onto an already-safe fallback.
- * Tool identity comes from the paired assistant call, never the result label.
+ * Build a minimal preferred projection around the newest singleton read.
+ * Older rounds become durable ledger evidence instead of consuming headroom.
  */
-function restorePreferredNewestSingletonResult(
-  originalMessages: ChatMessage[],
-  fallback: ChatMessage[],
+function buildPreferredNewestSingletonProjection(
+  messages: ChatMessage[],
+  preferredBytes: number,
   options: ToolLoopContextOptions,
+  fits: (candidate: ChatMessage[]) => boolean,
 ): ChatMessage[] | null {
-  const originalRound = collectToolRounds(originalMessages).rounds.at(-1);
+  const { rounds, otherCount } = collectToolRounds(messages);
+  const originalRound = rounds.at(-1);
   if (!originalRound || originalRound.evidence.length !== 1) return null;
 
   const evidence = originalRound.evidence[0]!;
@@ -265,29 +267,27 @@ function restorePreferredNewestSingletonResult(
   ));
   if (!originalResult || originalResult.toolName !== evidence.toolName) return null;
 
-  // The byte fallback must still retain this same newest balanced round. Do
-  // not inject an exact result into a summary or an unrelated historical call.
-  const fallbackRound = collectToolRounds(fallback).rounds.at(-1);
-  if (
-    !fallbackRound
-    || fallbackRound.evidence.length !== 1
-    || fallbackRound.evidence[0]?.toolCallId !== evidence.toolCallId
-    || fallbackRound.evidence[0]?.toolName !== evidence.toolName
-  ) return null;
-
-  const fallbackResultIndex = fallback.indexOf(fallbackRound.result);
-  if (fallbackResultIndex < 0) return null;
-  const restoredResult: ChatMessage = {
-    ...fallbackRound.result,
-    content: mapBlocks(fallbackRound.result, block => (
-      block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
-        ? { ...block, output: originalResult.output }
-        : block
-    )),
-  };
-  const preferred = [...fallback];
-  preferred[fallbackResultIndex] = restoredResult;
-  return preferred;
+  const task = buildTaskAnchor(messages);
+  const summary = buildLedgerSummary(rounds.slice(0, -1), otherCount, options);
+  for (const perPayload of PAYLOAD_LIMITS) {
+    const compacted = compactRound(originalRound, perPayload, options);
+    const exactResult: ChatMessage = {
+      ...compacted.result,
+      content: mapBlocks(compacted.result, block => (
+        block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
+          ? { ...block, output: originalResult.output }
+          : block
+      )),
+    };
+    const preferred = [
+      task,
+      ...(summary ? [summary] : []),
+      compacted.assistant,
+      exactResult,
+    ];
+    if (jsonBytes(preferred) <= preferredBytes && fits(preferred)) return preferred;
+  }
+  return null;
 }
 
 /** Build one evidence-preserving projection under a UTF-8 byte ceiling. */
