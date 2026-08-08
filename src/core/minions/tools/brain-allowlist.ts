@@ -34,6 +34,11 @@ import {
   omitProposalBindingFromSchema,
   type IngestionProposalToolBinding,
 } from '../ingestion-proposal-tool-binding.ts';
+import {
+  PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
+  PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
+  PROPOSAL_UPDATE_PAGE_JSON_SCHEMA,
+} from '../../ingestion-proposal-contract.ts';
 
 /**
  * v0.15 brain-tool allow-list. Review carefully when extending. Op names
@@ -216,6 +221,32 @@ function namespacedPutPageSchema(
   return { ...base, properties: props };
 }
 
+/** Describe the exact create/update proposal page union shown to agent models. */
+function stageIngestionProposalPageSchema(op: Operation): Record<string, unknown> {
+  const base = paramsToInputSchema(op);
+  const properties = {
+    ...((base.properties as Record<string, Record<string, unknown>> | undefined) ?? {}),
+  };
+
+  // ParamDef cannot describe nested object fields. Replace its bare inventory
+  // item with the exact ordered-plan entry accepted by the operation parser.
+  properties.page_inventory = {
+    ...properties.page_inventory,
+    items: PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
+  };
+
+  // Singleton effect enums make these anyOf branches disjoint while keeping
+  // the schema compatible with both Anthropic tools and OpenAI Responses.
+  properties.page = {
+    description: properties.page?.description,
+    anyOf: [
+      PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
+      PROPOSAL_UPDATE_PAGE_JSON_SCHEMA,
+    ],
+  };
+  return { ...base, properties, additionalProperties: false };
+}
+
 /** Args required to build the registry for a given subagent job. */
 export interface BuildBrainToolsOpts {
   subagentId: number;
@@ -312,6 +343,8 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   return picked.map<ToolDef>(op => {
     const baseSchema = op.name === 'put_page'
       ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
+      : op.name === 'stage_ingestion_proposal_page'
+        ? stageIngestionProposalPageSchema(op)
       : paramsToInputSchema(op);
     const schema = omitProposalBindingFromSchema(op.name, baseSchema, opts.proposalBinding);
 
@@ -384,6 +417,7 @@ export const __testing = {
   sanitizeToolName,
   paramsToInputSchema,
   namespacedPutPageSchema,
+  stageIngestionProposalPageSchema,
   bindProposalToolInput,
   ANTHROPIC_NAME_RE,
 };

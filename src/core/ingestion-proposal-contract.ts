@@ -51,6 +51,20 @@ export interface ProposalPageInventoryEntry {
   effect: 'create' | 'update';
 }
 
+/** Exact fields accepted for one ordered proposal inventory entry. */
+export const PROPOSAL_PAGE_INVENTORY_ENTRY_KEYS = ['slug', 'effect'] as const;
+
+/** Canonical model schema for one ordered proposal inventory entry. */
+export const PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    effect: { type: 'string', enum: ['create', 'update'] },
+  },
+  required: PROPOSAL_PAGE_INVENTORY_ENTRY_KEYS,
+  additionalProperties: false,
+} as const;
+
 /** Successful staging receipt, including the next incomplete inventory slot. */
 export interface StageProposalPageResult extends ProposalPageDigest {
   nextExpectedSlot: ({ sequence: number } & ProposalPageInventoryEntry) | null;
@@ -64,12 +78,43 @@ export interface ScopedProposalCreatePage {
   bodyMarkdown: string;
 }
 
+/** Exact fields accepted for a complete create-page proposal. */
+export const PROPOSAL_CREATE_PAGE_KEYS = ['slug', 'effect', 'title', 'bodyMarkdown'] as const;
+
+/** Canonical model schema for a complete create-page proposal. */
+export const PROPOSAL_CREATE_PAGE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    effect: { type: 'string', enum: ['create'] },
+    title: { type: 'string' },
+    bodyMarkdown: { type: 'string' },
+  },
+  required: PROPOSAL_CREATE_PAGE_KEYS,
+  additionalProperties: false,
+} as const;
+
 /** Compact append intent for one existing page. */
 export interface ScopedProposalUpdatePage {
   slug: string;
   effect: 'update';
   appendMarkdown: string;
 }
+
+/** Exact fields accepted for a compact update-page proposal. */
+export const PROPOSAL_UPDATE_PAGE_KEYS = ['slug', 'effect', 'appendMarkdown'] as const;
+
+/** Canonical model schema for a compact update-page proposal. */
+export const PROPOSAL_UPDATE_PAGE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    effect: { type: 'string', enum: ['update'] },
+    appendMarkdown: { type: 'string' },
+  },
+  required: PROPOSAL_UPDATE_PAGE_KEYS,
+  additionalProperties: false,
+} as const;
 
 /** Reject append text that could create or close a server-managed region. */
 function assertNoManagedRegionMarker(markdown: string): void {
@@ -268,7 +313,7 @@ function parseInventoryEntries(raw: unknown, totalPages?: number): ProposalPageI
   }
   return raw.map((entry, index) => {
     const record = readRecord(entry, `page_inventory[${index}]`);
-    assertExactKeys(record, ['slug', 'effect'], `page_inventory[${index}]`);
+    assertExactKeys(record, PROPOSAL_PAGE_INVENTORY_ENTRY_KEYS, `page_inventory[${index}]`);
     const slug = readCanonicalSlug(record.slug, `page_inventory[${index}].slug`);
     if (record.effect !== 'create' && record.effect !== 'update') {
       throw new AgentJobProposalError(
@@ -287,8 +332,8 @@ export function parseProposalPage(raw: unknown): ScopedProposalPage {
     throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
   }
   const allowed = page.effect === 'create'
-    ? ['slug', 'effect', 'title', 'bodyMarkdown']
-    : ['slug', 'effect', 'appendMarkdown'];
+    ? PROPOSAL_CREATE_PAGE_KEYS
+    : PROPOSAL_UPDATE_PAGE_KEYS;
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
   if (page.effect === 'update') {
@@ -370,7 +415,7 @@ function readCanonicalSlug(raw: unknown, name: string): string {
   return slug;
 }
 
-function assertExactKeys(record: Record<string, unknown>, expected: string[], name: string): void {
+function assertExactKeys(record: Record<string, unknown>, expected: readonly string[], name: string): void {
   const actual = Object.keys(record).sort();
   const wanted = [...expected].sort();
   if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
