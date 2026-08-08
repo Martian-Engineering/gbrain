@@ -56,7 +56,7 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
 
       // Mutate to pre-v0.18 shape: drop source_id and the sources FK target
       await db.exec(`
-        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key CASCADE;
         ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
         DROP INDEX IF EXISTS idx_pages_source_id;
         ALTER TABLE pages DROP COLUMN IF EXISTS source_id;
@@ -108,9 +108,10 @@ describe('PGLiteEngine#applyForwardReferenceBootstrap', () => {
 
       // Mutate to pre-v0.18 shape: strip the forward-referenced state.
       // Match the shape from #399's regression fixture; constraints first
-      // (so dropping columns succeeds).
+      // (so dropping columns succeeds). CASCADE removes foreign keys added by
+      // later schema versions; the forward migration path recreates them.
       await db.exec(`
-        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key;
+        ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_source_slug_key CASCADE;
         ALTER TABLE pages ADD CONSTRAINT pages_slug_key UNIQUE (slug);
         DROP INDEX IF EXISTS idx_pages_source_id;
         ALTER TABLE pages DROP COLUMN IF EXISTS source_id;

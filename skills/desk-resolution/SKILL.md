@@ -30,6 +30,15 @@ brain state, not app state, so an agent can settle one with the same two
 writes the Lore interface makes. Lore renders the result identically either
 way.
 
+## Contract
+
+- Resolve desk state only for the principal returned by `whoami`.
+- Preview every tag and attestation write with `dry_run: true` first.
+- Tag every event page in the group, then add exactly one source-page
+  attestation.
+- Stop without writing if either preview fails or the client has no
+  `bound_principal`.
+
 ## Who you act for
 
 Call `whoami` first. Your OAuth client's `bound_principal` (e.g.
@@ -67,7 +76,7 @@ Remove the `desk:done` / `desk:let-go` tag from every event slug in the
 group (`remove_tag`). Timeline attestations are append-only history; do not
 delete them — add a new entry noting the reversal if your principal asks.
 
-## What not to do
+## Anti-Patterns
 
 - Never attest as the person ("Marked done by Josh") — you are the agent,
   and the summary must say the settlement came through you.
@@ -75,3 +84,10 @@ delete them — add a new entry noting the reversal if your principal asks.
   and other viewers see it change.
 - Do not edit the event or meeting page bodies; tags and timeline entries
   are the whole contract.
+
+## Output Format
+
+Return a concise summary containing the principal, resolution (`done` or
+`let-go`), every tagged event slug, the attested source page, and whether both
+previews and committed writes succeeded. If no write occurred, name the failed
+precondition instead of claiming the desk item was resolved.

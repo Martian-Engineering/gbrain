@@ -186,9 +186,15 @@ describe('gbrain extract --stale', () => {
     // the precision gap is deterministic regardless of the engine's now() granularity.
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.putPage('companies/acme', companyPage('Acme', '[Alice](people/alice) advises [Acme](companies/acme).'));
-    // Microsecond-precision updated_at, recent (after LINK_EXTRACTOR_VERSION_TS) so the
-    // version arm doesn't fire — the edited arm is what must clear.
-    await engine.executeRaw(`UPDATE pages SET updated_at = '2026-06-02 08:18:58.999166+00'`);
+    // Microsecond-precision updated_at, after LINK_EXTRACTOR_VERSION_TS so the
+    // version arm doesn't fire — the edited arm is what must clear. Derive the
+    // fixture from the current version watermark so a future extractor bump
+    // cannot silently invalidate this precision regression test.
+    await engine.executeRaw(
+      `UPDATE pages
+          SET updated_at = $1::timestamptz + interval '999166 microseconds'`,
+      [LINK_EXTRACTOR_VERSION_TS],
+    );
     expect(await engine.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS })).toBe(2);
 
     await runExtract(engine, ['--stale']);

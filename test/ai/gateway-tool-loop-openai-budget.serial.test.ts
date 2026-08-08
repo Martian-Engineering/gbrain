@@ -1,3 +1,12 @@
+/**
+ * Serial process isolation: the production-sized regression fixture performs
+ * synchronous exact-token accounting over a large prompt and tool result.
+ * In a long-lived matrix process with an already accumulated heap, that work
+ * can spend minutes in GC while blocking Bun's per-test timeout timer. The
+ * serial runner gives this file a fresh process while preserving the real
+ * production-size fixture and token-fit assertion.
+ */
+
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
   __setChatTransportForTests,

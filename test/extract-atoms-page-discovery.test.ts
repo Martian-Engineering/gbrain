@@ -219,17 +219,14 @@ describe('v0.41.2.1: discoverExtractablePages SQL contract', () => {
   });
 
   test('executeRaw failure returns [] (fail-soft, transcript path proceeds)', async () => {
-    // Inject a SQL error by passing a sourceId that breaks the query —
-    // actually easier: temporarily replace executeRaw to throw.
-    const realExecute = engine.executeRaw.bind(engine);
-    (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw =
-      async () => { throw new Error('synthetic discovery failure'); };
-    try {
-      const discovered = await discoverExtractablePages(engine, 'default');
-      expect(discovered).toEqual([]);
-    } finally {
-      (engine as unknown as { executeRaw: typeof engine.executeRaw }).executeRaw = realExecute;
-    }
+    // Use a dedicated failing test double rather than replacing executeRaw on
+    // the shared PGLite instance. Restoring a bound method as an own property
+    // changes the engine's dispatch path and can deadlock later page writes.
+    const failingEngine = {
+      executeRaw: async () => { throw new Error('synthetic discovery failure'); },
+    } as unknown as PGLiteEngine;
+    const discovered = await discoverExtractablePages(failingEngine, 'default');
+    expect(discovered).toEqual([]);
   });
 });
 
