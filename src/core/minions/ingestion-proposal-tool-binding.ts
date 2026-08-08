@@ -1,3 +1,5 @@
+import type { BrainEngine } from '../engine.ts';
+
 /** Immutable proposal identity owned by the submitted agent job. */
 export interface IngestionProposalToolBinding {
   artifactId: string;
@@ -43,6 +45,48 @@ export function proposalToolBindingFromJobData(
       ? { admissionScope: data.proposal_admission_scope }
       : {}),
   };
+}
+
+/** Refresh proposal identity from the durable job before one proposal tool call. */
+export async function refreshProposalToolBindingForJob(
+  engine: BrainEngine,
+  jobId: number,
+  toolName: string,
+  initialBinding: IngestionProposalToolBinding | undefined,
+): Promise<IngestionProposalToolBinding | undefined> {
+  if (
+    !initialBinding
+    || !PROPOSAL_IDENTITY_TOOL_NAMES.has(shortToolName(toolName))
+  ) {
+    return initialBinding;
+  }
+  // The first staged page may freeze a scope after the tool registry was
+  // constructed, so the job row—not the registry snapshot—is authoritative.
+  const rows = await engine.executeRaw<ProposalToolBindingJobData>(
+    `SELECT data->>'proposal_artifact_id' AS proposal_artifact_id,
+            data->>'source_id' AS source_id,
+            data->>'proposal_admission_scope' AS proposal_admission_scope
+       FROM minion_jobs
+      WHERE id = $1`,
+    [jobId],
+  );
+  const durableBinding = rows[0]
+    ? proposalToolBindingFromJobData(rows[0])
+    : undefined;
+  // Artifact and source can never move. A scope present at claim time is
+  // equally immutable; only an initially-absent scope may appear later.
+  if (
+    !durableBinding
+    || durableBinding.artifactId !== initialBinding.artifactId
+    || durableBinding.sourceId !== initialBinding.sourceId
+    || (
+      initialBinding.admissionScope !== undefined
+      && durableBinding.admissionScope !== initialBinding.admissionScope
+    )
+  ) {
+    throw new Error('Durable proposal tool identity does not match the claimed agent job.');
+  }
+  return durableBinding;
 }
 
 /** Remove server-bound identity fields from a proposal tool's model schema. */

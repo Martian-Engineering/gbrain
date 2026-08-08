@@ -32,6 +32,7 @@ import type { ToolCtx, ToolDef } from '../types.ts';
 import {
   bindProposalToolInput,
   omitProposalBindingFromSchema,
+  refreshProposalToolBindingForJob,
   type IngestionProposalToolBinding,
 } from '../ingestion-proposal-tool-binding.ts';
 import {
@@ -373,7 +374,13 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
           sourceId: opts.sourceId,
         });
-        const boundInput = bindProposalToolInput(op.name, input, opts.proposalBinding);
+        const proposalBinding = await refreshProposalToolBindingForJob(
+          ctx.engine,
+          ctx.jobId,
+          op.name,
+          opts.proposalBinding,
+        );
+        const boundInput = bindProposalToolInput(op.name, input, proposalBinding);
         const params = (boundInput && typeof boundInput === 'object')
           ? boundInput as Record<string, unknown>
           : {};

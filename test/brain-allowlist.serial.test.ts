@@ -20,6 +20,7 @@ import {
 } from '../src/core/minions/tools/brain-allowlist.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import type { ToolCtx } from '../src/core/minions/types.ts';
+import { assertProposalToolTurnPersistableForJob } from '../src/core/minions/agent-job-proposals.ts';
 import {
   PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
   PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
@@ -342,6 +343,151 @@ describe('buildBrainTools', () => {
       sourceId: 'company',
       admissionScope: 'Include project delivery notes.',
     });
+  });
+
+  test('proposal finalization refreshes a scope frozen after tool construction', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name)
+       VALUES ('company', 'Company')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const jobs = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::text::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'lore-client',
+        source_id: 'company',
+        proposal_artifact_id: 'artifact-derived-scope',
+        proposal_capture_page_slug: 'sources/derived-scope',
+        allowed_slug_prefixes: ['sources/*'],
+      })],
+    );
+    const jobId = Number(jobs[0]!.id);
+    const proposalBinding = {
+      artifactId: 'artifact-derived-scope',
+      sourceId: 'company',
+    };
+    const tools = buildBrainTools({
+      subagentId: jobId,
+      engine,
+      config,
+      sourceId: 'company',
+      allowedSlugPrefixes: ['sources/*'],
+      proposalBinding,
+    });
+    const ctx: ToolCtx = { engine, jobId, remote: true };
+    const stage = tools.find(tool => tool.name === 'brain_stage_ingestion_proposal_page')!;
+    const finalize = tools.find(tool => tool.name === 'brain_finalize_ingestion_proposal')!;
+
+    await expect(stage.execute({
+      admission_scope: 'Include substantive product delivery discussion.',
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: [{ slug: 'sources/derived-scope', effect: 'create' }],
+      page: {
+        slug: 'sources/derived-scope',
+        effect: 'create',
+        title: 'Derived scope example',
+        bodyMarkdown: '# Derived scope example',
+      },
+    }, ctx)).resolves.toMatchObject({ sequence: 1, nextExpectedSlot: null });
+    await expect(finalize.execute({
+      admission_scope: 'Admit the substantive product-delivery conversation.',
+      total_pages: 1,
+      summary: 'Ready for review.',
+    }, ctx)).resolves.toMatchObject({
+      status: 'staged_proposal',
+      artifactId: 'artifact-derived-scope',
+      sourceId: 'company',
+      admissionScope: 'Include substantive product delivery discussion.',
+    });
+  });
+
+  test('later proposal stages refresh the scope frozen by the first page', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name)
+       VALUES ('company', 'Company')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const jobs = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::text::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'lore-client',
+        source_id: 'company',
+        proposal_artifact_id: 'artifact-multi-page',
+        proposal_capture_page_slug: 'sources/multi-page',
+        allowed_slug_prefixes: ['sources/*', 'projects/*'],
+      })],
+    );
+    const jobId = Number(jobs[0]!.id);
+    const proposalBinding = {
+      artifactId: 'artifact-multi-page',
+      sourceId: 'company',
+    };
+    const tools = buildBrainTools({
+      subagentId: jobId,
+      engine,
+      config,
+      sourceId: 'company',
+      allowedSlugPrefixes: ['sources/*', 'projects/*'],
+      proposalBinding,
+    });
+    const ctx: ToolCtx = { engine, jobId, remote: true };
+    const stage = tools.find(tool => tool.name === 'brain_stage_ingestion_proposal_page')!;
+    const pageInventory = [
+      { slug: 'sources/multi-page', effect: 'create' },
+      { slug: 'projects/multi-page', effect: 'create' },
+    ];
+
+    await expect(stage.execute({
+      admission_scope: 'Include reviewed delivery decisions.',
+      sequence: 1,
+      total_pages: 2,
+      page_inventory: pageInventory,
+      page: {
+        slug: 'sources/multi-page',
+        effect: 'create',
+        title: 'Multi-page source',
+        bodyMarkdown: '# Multi-page source',
+      },
+    }, ctx)).resolves.toMatchObject({ sequence: 1, nextExpectedSlot: pageInventory[1] });
+
+    const secondStageInput = {
+      admission_scope: 'Admit the reviewed product delivery decisions.',
+      sequence: 2,
+      total_pages: 2,
+      page_inventory: pageInventory,
+      page: {
+        slug: 'projects/multi-page',
+        effect: 'create',
+        title: 'Multi-page project',
+        bodyMarkdown: '# Multi-page project',
+      },
+    };
+    await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
+      type: 'tool-call',
+      toolName: stage.name,
+      input: secondStageInput,
+    }], proposalBinding)).resolves.toBeUndefined();
+    await expect(stage.execute(secondStageInput, ctx)).resolves.toMatchObject({
+      sequence: 2,
+      nextExpectedSlot: null,
+    });
+
+    const fragments = await engine.executeRaw<{ admission_scope: string }>(
+      `SELECT admission_scope
+         FROM agent_job_proposal_fragments
+        WHERE job_id = $1
+        ORDER BY sequence`,
+      [jobId],
+    );
+    expect(fragments.map(fragment => fragment.admission_scope)).toEqual([
+      'Include reviewed delivery decisions.',
+      'Include reviewed delivery decisions.',
+    ]);
   });
 
   test('execute() on put_page with valid namespace slug succeeds', async () => {

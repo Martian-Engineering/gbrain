@@ -42,6 +42,7 @@ import {
 } from './ingestion-proposal-authority.ts';
 import {
   bindProposalToolInput,
+  refreshProposalToolBindingForJob,
   type IngestionProposalToolBinding,
 } from './ingestion-proposal-tool-binding.ts';
 
@@ -267,17 +268,23 @@ export async function assertProposalToolTurnPersistableForJob(
   proposalBinding?: IngestionProposalToolBinding,
 ): Promise<void> {
   assertProposalToolTurnPersistable(blocks);
-  const boundBlocks = blocks.map((block) => {
+  const boundBlocks = await Promise.all(blocks.map(async (block) => {
     const name = typeof block.name === 'string'
       ? block.name
       : typeof block.toolName === 'string'
         ? block.toolName
         : '';
+    const currentBinding = await refreshProposalToolBindingForJob(
+      engine,
+      jobId,
+      name,
+      proposalBinding,
+    );
     return {
       ...block,
-      input: bindProposalToolInput(name, block.input, proposalBinding),
+      input: bindProposalToolInput(name, block.input, currentBinding),
     };
-  });
+  }));
   if (proposalBinding) assertProposalToolTurnPersistable(boundBlocks);
   const stageCall = proposalToolCalls(boundBlocks)
     .find((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
