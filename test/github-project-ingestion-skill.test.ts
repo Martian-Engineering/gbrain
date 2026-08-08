@@ -43,7 +43,7 @@ const expectedPrefixes = [
 
 describe('github-project-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.3.0');
+    expect(skill).toContain('version: 1.3.1');
     expect(getSkillAgentBindings(skillsDir, 'github-project-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -151,6 +151,20 @@ describe('github-project-ingestion skill', () => {
     );
     expect(skill).toMatch(
       /Citing with relative Markdown links, or nesting Markdown links inside a\s+`\[Source: \.\.\.\]` citation bracket\./,
+    );
+  });
+
+  test('keeps the fixed capture anchor outside resolver-selected taxonomy', () => {
+    expect(skill).toMatch(
+      /exact prompt-supplied `capturePageSlug` is a pre-authorized operational\s+provenance page/,
+    );
+    expect(skill).toMatch(/It is not a raw import/);
+    expect(skill).toMatch(/exempt from resolver taxonomy\s+and path-selection rules/);
+    expect(skill).toMatch(
+      /Only that exact capture anchor is exempt; every\s+derived page path follows\s+the resolver-selected taxonomy/,
+    );
+    expect(skill).toMatch(
+      /capture page\s+body and every derived page remain subject to the resolver's exclusions and\s+privacy limits/,
     );
   });
 

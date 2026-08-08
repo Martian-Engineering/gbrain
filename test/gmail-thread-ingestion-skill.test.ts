@@ -44,6 +44,7 @@ const expectedPrefixes = [
 
 describe('gmail-thread-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
+    expect(skill).toContain('version: 1.1.1');
     expect(getSkillAgentBindings(skillsDir, 'gmail-thread-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -85,6 +86,20 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('frozen resolver decision');
     expect(skill).toContain('admission facts');
     expect(skill).toContain('prompt_injection_suspected');
+  });
+
+  test('keeps the fixed capture anchor outside resolver-selected taxonomy', () => {
+    expect(skill).toMatch(
+      /exact prompt-supplied `capturePageSlug` is a pre-authorized operational\s+provenance page/,
+    );
+    expect(skill).toMatch(/It is not a raw import/);
+    expect(skill).toMatch(/exempt from resolver taxonomy\s+and path-selection rules/);
+    expect(skill).toMatch(
+      /Only that exact capture anchor is exempt; every\s+derived page path follows\s+the resolver-selected taxonomy/,
+    );
+    expect(skill).toMatch(
+      /capture page\s+body and every derived page remain subject to the resolver's exclusions and\s+privacy limits/,
+    );
   });
 
   test('uses Lore artifact integrity as the transport-completeness authority', () => {

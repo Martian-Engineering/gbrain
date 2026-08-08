@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.3.0
+version: 1.3.1
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -54,6 +54,12 @@ These instructions are self-contained for a source-bound remote Minion.
   resolver text and revision before writing. Resolver ambiguity returns a
   classed `needs_attention` receipt without mutation. Partial disqualification
   returns a complete `staged_proposal` manifest without corpus mutation.
+- The exact prompt-supplied `capturePageSlug` is a pre-authorized operational
+  provenance page. It is not a raw import and is exempt from resolver taxonomy
+  and path-selection rules. Only that exact capture anchor is exempt; every
+  derived page path follows the resolver-selected taxonomy. The capture page
+  body and every derived page remain subject to the resolver's exclusions and
+  privacy limits.
 - An omitted `mode` preserves the normal write path. `mode: propose` performs
   the normal analysis, search, and deduplication but performs zero mutations.
   `mode: apply` executes only the prompt-supplied frozen plan.
@@ -453,7 +459,11 @@ revision before continuing.
 
 ### 5. Write the analyzed meeting
 
-Create or update a `meetings/` page containing:
+The derived analyzed meeting page must follow the resolver-selected taxonomy.
+When the resolver places an owner-unambiguous partner meeting under
+`partners/<partner>/meetings/`, use that path; use `meetings/` only when the
+resolver selects the generic meeting namespace. Create or update that canonical
+meeting page with:
 
 - title, date, attendees, and a link to the raw source page;
 - a concise source-grounded summary;

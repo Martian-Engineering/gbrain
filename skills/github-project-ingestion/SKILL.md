@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.3.0
+version: 1.3.1
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -55,6 +55,12 @@ a source-bound remote Minion.
   resolver text and revision before writing. Resolver ambiguity returns a
   classed `needs_attention` receipt without mutation. Partial disqualification
   returns a complete `staged_proposal` manifest without corpus mutation.
+- The exact prompt-supplied `capturePageSlug` is a pre-authorized operational
+  provenance page. It is not a raw import and is exempt from resolver taxonomy
+  and path-selection rules. Only that exact capture anchor is exempt; every
+  derived page path follows the resolver-selected taxonomy. The capture page
+  body and every derived page remain subject to the resolver's exclusions and
+  privacy limits.
 - An omitted `mode` preserves the normal write path. `mode: propose` performs
   the normal analysis, search, and deduplication but performs zero mutations.
   `mode: apply` executes only the prompt-supplied frozen plan.
