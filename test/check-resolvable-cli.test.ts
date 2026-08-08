@@ -80,10 +80,11 @@ interface RunResult {
   json: any;
 }
 
-function run(args: string[]): RunResult {
+function run(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): RunResult {
   const res = spawnSync('bun', [CLI, 'check-resolvable', ...args], {
     encoding: 'utf-8',
-    cwd: REPO_ROOT,
+    cwd: options.cwd ?? REPO_ROOT,
+    env: options.env,
     maxBuffer: 10 * 1024 * 1024,
   });
   let json: any = null;
@@ -139,8 +140,8 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
   });
 
   it('v0.31.7: empty cwd falls back to install-path (finds bundled skills/)', () => {
-    // Temporarily chdir to a guaranteed-empty tmpdir. findRepoRoot from cwd
-    // walks up and fails — but autoDetectSkillsDirReadOnly's tier-5
+    // Resolve from a guaranteed-empty tmpdir with an isolated HOME. The cwd
+    // walk fails, but autoDetectSkillsDirReadOnly's tier-5
     // install-path fallback then walks up from the gbrain module's own
     // location and finds the bundled skills/ dir. This is the v0.31.7
     // capability: doctor and check-resolvable work from anywhere.
@@ -149,17 +150,53 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     // in test/repo-root.test.ts that drive autoDetectSkillsDirReadOnly
     // with mocked env to suppress the install-path success.
     const empty = mkdtempSync(join(tmpdir(), 'empty-for-resolve-'));
-    const original = process.cwd();
     try {
-      process.chdir(empty);
-      const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
+      const r = resolveSkillsDir(
+        { help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null },
+        {
+          startDir: empty,
+          env: {
+            ...process.env,
+            HOME: empty,
+            OPENCLAW_WORKSPACE: undefined,
+            GBRAIN_SKILLS_DIR: undefined,
+          },
+        },
+      );
       // Install-path fallback succeeds when test runs inside the gbrain repo.
       expect(r.error).toBeNull();
       expect(r.dir).toMatch(/\/skills$/);
       expect(r.source).toBe('install_path');
     } finally {
-      process.chdir(original);
       rmSync(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the injected home fallback instead of ambient developer config', () => {
+    const empty = mkdtempSync(join(tmpdir(), 'empty-for-resolve-'));
+    const fakeHome = mkdtempSync(join(tmpdir(), 'fake-home-for-resolve-'));
+    const workspace = join(fakeHome, '.openclaw', 'workspace');
+    mkdirSync(join(workspace, 'skills'), { recursive: true });
+    writeFileSync(join(workspace, 'AGENTS.md'), '# Test workspace\n');
+
+    try {
+      const r = resolveSkillsDir(
+        { help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null },
+        {
+          startDir: empty,
+          env: {
+            HOME: fakeHome,
+            OPENCLAW_WORKSPACE: undefined,
+            GBRAIN_SKILLS_DIR: undefined,
+          },
+        },
+      );
+      expect(r.error).toBeNull();
+      expect(r.dir).toBe(join(workspace, 'skills'));
+      expect(r.source).toBe('openclaw_workspace_home_root');
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 
@@ -185,24 +222,23 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     mkdirSync(join(workspace, 'skills'), { recursive: true });
     writeFileSync(join(workspace, 'skills', 'RESOLVER.md'), '# RESOLVER\n');
 
-    const prev = process.env.OPENCLAW_WORKSPACE;
-    process.env.OPENCLAW_WORKSPACE = workspace;
     try {
-      const r = resolveSkillsDir({
-        help: false,
-        json: false,
-        fix: false,
-        dryRun: false,
-        verbose: false,
-        strict: false,
-        skillsDir: explicit,
-      });
+      const r = resolveSkillsDir(
+        {
+          help: false,
+          json: false,
+          fix: false,
+          dryRun: false,
+          verbose: false,
+          strict: false,
+          skillsDir: explicit,
+        },
+        { env: { ...process.env, OPENCLAW_WORKSPACE: workspace } },
+      );
       expect(r.error).toBeNull();
       expect(r.dir).toBe(explicit);
       expect(r.source).toBe('explicit');
     } finally {
-      if (prev === undefined) delete process.env.OPENCLAW_WORKSPACE;
-      else process.env.OPENCLAW_WORKSPACE = prev;
       rmSync(explicit, { recursive: true, force: true });
       rmSync(workspace, { recursive: true, force: true });
     }
@@ -383,12 +419,17 @@ describe('gbrain check-resolvable CLI — integration', () => {
   it('v0.31.7 D6: --fix refuses when source is install_path', () => {
     // Run from a guaranteed-empty tempdir so the install-path fallback fires.
     const empty = mkdtempSync(join(tmpdir(), 'cr-fix-installpath-'));
+    const isolatedHome = mkdtempSync(join(tmpdir(), 'cr-fix-home-'));
     try {
       // Pass --fix; expect refusal exit + clear error message.
-      const r = spawnSync('bun', ['run', CLI, 'check-resolvable', '--fix'], {
+      const r = run(['--fix'], {
         cwd: empty,
-        env: { ...process.env, OPENCLAW_WORKSPACE: '', GBRAIN_SKILLS_DIR: '' },
-        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          HOME: isolatedHome,
+          OPENCLAW_WORKSPACE: '',
+          GBRAIN_SKILLS_DIR: '',
+        },
       });
       expect(r.status).toBe(1);
       expect(r.stderr).toContain('install-path fallback');
@@ -396,6 +437,7 @@ describe('gbrain check-resolvable CLI — integration', () => {
       expect(r.stderr).toMatch(/GBRAIN_SKILLS_DIR|OPENCLAW_WORKSPACE|--skills-dir/);
     } finally {
       rmSync(empty, { recursive: true, force: true });
+      rmSync(isolatedHome, { recursive: true, force: true });
     }
   });
 });

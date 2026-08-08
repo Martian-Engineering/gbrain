@@ -10,6 +10,10 @@
  * OperationContext shapes (remote MCP, local CLI, subagent with jobId)
  * and asserts that captured rows carry the expected origin metadata.
  *
+ * This file configures the process-global AI gateway, so the serial suffix
+ * gives it a dedicated Bun process and prevents provider state leaking to or
+ * from other test files.
+ *
  * Capture is fire-and-forget from the caller — but the INSERT fires on
  * the same tick, so awaiting a microtask boundary is enough to let the
  * row land before we assert.
@@ -21,12 +25,12 @@ import { operations } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import type { PageInput } from '../src/core/types.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
-const savedKey = process.env.OPENAI_API_KEY;
 
 beforeAll(async () => {
-  delete process.env.OPENAI_API_KEY; // force keyword-only path so tests don't need live credentials
+  configureGateway({ env: {} });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -66,9 +70,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (savedKey === undefined) delete process.env.OPENAI_API_KEY;
-  else process.env.OPENAI_API_KEY = savedKey;
   await engine.disconnect();
+  resetGateway();
 });
 
 beforeEach(async () => {
@@ -119,7 +122,7 @@ describe('op-layer capture — query', () => {
     expect(row.query).toBe('alice');
     expect(row.remote).toBe(true);
     expect(row.expand_enabled).toBe(true); // default
-    expect(row.vector_enabled).toBe(false); // OPENAI_API_KEY deleted
+    expect(row.vector_enabled).toBe(false); // provider-free test gateway
     expect(row.job_id).toBeNull();
     expect(row.subagent_id).toBeNull();
   });

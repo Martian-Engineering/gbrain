@@ -391,7 +391,6 @@
   "test/mcp-client-hardening.test.ts": 305,
   "test/mcp-client.test.ts": 65,
   "test/mcp-dispatch-summarize.test.ts": 6,
-  "test/mcp-eval-capture.test.ts": 25246,
   "test/mcp-tool-defs.test.ts": 15,
   "test/metric-glossary.test.ts": 16,
   "test/migrate-extensions.test.ts": 3,

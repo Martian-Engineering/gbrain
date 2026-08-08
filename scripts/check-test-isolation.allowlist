@@ -23,7 +23,6 @@ test/scripts/check-test-isolation.test.ts
 test/autopilot-install.test.ts
 test/bootstrap.test.ts
 test/brain-resolver.test.ts
-test/check-resolvable-cli.test.ts
 test/claw-test-cli.test.ts
 test/code-def-refs.test.ts
 test/core/cycle.test.ts
@@ -40,7 +39,6 @@ test/helpers/with-env.test.ts
 test/http-transport.test.ts
 test/init-migrate-only.test.ts
 test/integrations.test.ts
-test/mcp-eval-capture.test.ts
 test/migrate.test.ts
 test/migration-orchestrator-v0_31_0.test.ts
 test/migration-resume.test.ts
