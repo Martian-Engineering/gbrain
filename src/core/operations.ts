@@ -6012,7 +6012,11 @@ const get_agent_job_proposal: Operation = {
       );
     } catch (error) {
       if (error instanceof proposal.AgentJobProposalError) {
-        const code = error.code === 'permission_denied' ? 'permission_denied' : 'invalid_params';
+        const permissionCodes = new Set([
+          'permission_denied',
+          'proposal_authority_unavailable',
+        ]);
+        const code = permissionCodes.has(error.code) ? 'permission_denied' : 'invalid_params';
         throw new OperationError(code, error.message);
       }
       throw error;

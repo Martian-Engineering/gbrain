@@ -25,6 +25,7 @@ import {
   logBatchRetry as auditLogBatchRetry,
   logBatchExhausted as auditLogBatchExhausted,
 } from '../audit/batch-retry-audit.ts';
+import { cleanupExpiredIngestionProposalAuthorities } from './ingestion-proposal-authority.ts';
 
 /** Options for opting into protected-job-name submission. Passed as a separate
  *  4th arg to `MinionQueue.add()` (NOT folded into `opts`) so user-spread
@@ -523,16 +524,19 @@ export class MinionQueue {
     const statuses = opts?.status ?? ['completed', 'dead', 'cancelled'];
     const olderThan = opts?.olderThan ?? new Date(Date.now() - 30 * 86400000);
 
-    const rows = await this.engine.executeRaw<{ count: string }>(
-      `WITH pruned AS (
-         DELETE FROM minion_jobs
-         WHERE status = ANY($1) AND updated_at < $2
-         RETURNING id
-       )
-       SELECT count(*)::text as count FROM pruned`,
-      [statuses, olderThan.toISOString()]
-    );
-    return parseInt(rows[0]?.count ?? '0', 10);
+    return this.engine.transaction(async (tx) => {
+      await cleanupExpiredIngestionProposalAuthorities(tx);
+      const rows = await tx.executeRaw<{ count: string }>(
+        `WITH pruned AS (
+           DELETE FROM minion_jobs
+           WHERE status = ANY($1) AND updated_at < $2
+           RETURNING id
+         )
+         SELECT count(*)::text as count FROM pruned`,
+        [statuses, olderThan.toISOString()]
+      );
+      return parseInt(rows[0]?.count ?? '0', 10);
+    });
   }
 
   /** Get job statistics. */

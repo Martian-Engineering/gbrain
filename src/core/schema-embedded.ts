@@ -1130,6 +1130,72 @@ CREATE TABLE IF NOT EXISTS agent_job_proposals (
 CREATE INDEX IF NOT EXISTS idx_agent_job_proposals_owner_digest
   ON agent_job_proposals (owner_client_id, proposal_digest);
 
+-- Finalized proposal authority outlives its disposable origin job. The public
+-- proposal id initially equals the origin job id, while origin_job_id is only
+-- an audit link and is nulled by ordinary job retention.
+CREATE TABLE IF NOT EXISTS ingestion_proposal_authorities (
+  proposal_id      BIGINT      PRIMARY KEY,
+  origin_job_id    BIGINT      REFERENCES minion_jobs(id) ON DELETE SET NULL,
+  owner_client_id  TEXT        NOT NULL,
+  source_id        TEXT        NOT NULL,
+  artifact_id      TEXT        NOT NULL,
+  admission_scope  TEXT        NOT NULL,
+  capture_page_slug TEXT       NOT NULL,
+  total_pages      INTEGER     NOT NULL CHECK (total_pages >= 1),
+  page_digests     JSONB       NOT NULL,
+  plan             JSONB       NOT NULL,
+  proposal_digest  TEXT        NOT NULL,
+  manifest         JSONB       NOT NULL,
+  finalized_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at       TIMESTAMPTZ NOT NULL,
+  CONSTRAINT chk_ingestion_proposal_authority_digest
+    CHECK (proposal_digest ~ '^[a-f0-9]{64}\$'),
+  CONSTRAINT chk_ingestion_proposal_authority_expiry
+    CHECK (expires_at > finalized_at)
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_owner_digest
+  ON ingestion_proposal_authorities (owner_client_id, proposal_digest);
+CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_expiry
+  ON ingestion_proposal_authorities (expires_at);
+
+-- Exact pages and private optimistic baselines are authority-owned. They are
+-- removed only by explicit authority expiry cleanup, never by job pruning.
+CREATE TABLE IF NOT EXISTS ingestion_proposal_authority_pages (
+  proposal_id      BIGINT      NOT NULL REFERENCES ingestion_proposal_authorities(proposal_id) ON DELETE CASCADE,
+  sequence         INTEGER     NOT NULL,
+  total_pages      INTEGER     NOT NULL,
+  page             JSONB       NOT NULL,
+  page_digest      TEXT        NOT NULL,
+  baseline_title   TEXT,
+  baseline_markdown TEXT,
+  baseline_content_hash TEXT,
+  applied_previous_content_hash TEXT,
+  applied_content_hash TEXT,
+  applied_rebased  BOOLEAN,
+  applied_at       TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (proposal_id, sequence),
+  CONSTRAINT chk_ingestion_proposal_authority_page_sequence
+    CHECK (sequence >= 1 AND total_pages >= sequence),
+  CONSTRAINT chk_ingestion_proposal_authority_page_digest
+    CHECK (page_digest ~ '^[a-f0-9]{64}\$'),
+  CONSTRAINT chk_ingestion_proposal_authority_page_baseline CHECK (
+    (baseline_title IS NULL AND baseline_markdown IS NULL AND baseline_content_hash IS NULL)
+    OR
+    (baseline_title IS NOT NULL AND baseline_markdown IS NOT NULL
+      AND baseline_content_hash ~ '^[a-f0-9]{64}\$')
+  ),
+  CONSTRAINT chk_ingestion_proposal_authority_page_receipt CHECK (
+    (applied_previous_content_hash IS NULL AND applied_content_hash IS NULL
+      AND applied_rebased IS NULL AND applied_at IS NULL)
+    OR
+    (applied_content_hash ~ '^[a-f0-9]{64}\$'
+      AND (applied_previous_content_hash IS NULL
+        OR applied_previous_content_hash ~ '^[a-f0-9]{64}\$')
+      AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
+  )
+);
+
 -- Rate-lease table — concurrency cap on outbound providers (e.g.
 -- anthropic:messages). Acquire: INSERT if active < max_concurrent under
 -- advisory lock. Release: DELETE. Stale leases (expires_at past) auto-prune
@@ -1578,6 +1644,8 @@ BEGIN
     ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
     ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
     ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ingestion_proposal_authorities ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ingestion_proposal_authority_pages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
     ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;

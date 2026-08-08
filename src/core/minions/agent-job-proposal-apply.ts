@@ -108,7 +108,7 @@ export interface ApprovedProposalAuthority {
   plan: ScopedAdmissionProposalPlan;
 }
 
-/** Load one finalized proposal and its original durable job fence by exact owner. */
+/** Load one finalized proposal and its durable capture fence by exact owner. */
 export async function getOwnedApprovedProposalAuthority(
   engine: BrainEngine,
   proposalJobId: number,
@@ -128,17 +128,16 @@ export async function getOwnedApprovedProposalAuthority(
     capture_page_slug: string | null;
   }>(
     `SELECT p.source_id, p.artifact_id, p.admission_scope,
-            j.data->>'proposal_capture_page_slug' AS capture_page_slug
-       FROM agent_job_proposals p
-       JOIN minion_jobs j ON j.id = p.job_id
-      WHERE p.job_id = $1 AND p.owner_client_id = $2 AND p.proposal_digest = $3`,
+            p.capture_page_slug
+       FROM ingestion_proposal_authorities p
+      WHERE p.proposal_id = $1 AND p.owner_client_id = $2 AND p.proposal_digest = $3`,
     [proposalJobId, ownerClientId, proposalDigest],
   );
   const row = rows[0];
   if (!row?.capture_page_slug) {
     throw new AgentJobProposalError(
-      'permission_denied',
-      'Approved proposal authority is unavailable for this OAuth client.',
+      'proposal_authority_unavailable',
+      'This finalized ingestion proposal authority is unavailable for the approved owner and digest.',
     );
   }
   const capturePageSlug = readCanonicalSlug(
@@ -291,26 +290,44 @@ async function readApplyProposalRow(
   applyBinding: ApplyJobBinding,
   input: ApplyProposalPageInput,
 ): Promise<ApplyProposalRow> {
+  const authorities = await engine.executeRaw<{ expired: boolean }>(
+    `SELECT expires_at <= now() AS expired
+       FROM ingestion_proposal_authorities
+      WHERE proposal_id = $1 AND owner_client_id = $2 AND proposal_digest = $3
+      FOR UPDATE`,
+    [input.proposal_job_id, applyBinding.ownerClientId, input.proposal_digest],
+  );
+  if (!authorities[0]) {
+    throw new AgentJobProposalError(
+      'proposal_authority_unavailable',
+      'This finalized ingestion proposal authority is unavailable for the approved owner and digest.',
+    );
+  }
+  if (authorities[0].expired) {
+    throw new AgentJobProposalError(
+      'proposal_authority_expired',
+      'This finalized ingestion proposal has expired and must be proposed again.',
+    );
+  }
   const rows = await engine.executeRaw<ApplyProposalRow>(
-    `SELECT f.sequence, f.total_pages, f.owner_client_id, f.source_id,
-            f.artifact_id, f.admission_scope, f.page, f.page_digest,
+    `SELECT f.sequence, f.total_pages, p.owner_client_id, p.source_id,
+            p.artifact_id, p.admission_scope, f.page, f.page_digest,
             f.baseline_title, f.baseline_markdown, f.baseline_content_hash,
             f.applied_previous_content_hash, f.applied_content_hash,
             f.applied_rebased, f.applied_at,
             p.owner_client_id AS proposal_owner_client_id,
             p.source_id AS proposal_source_id, p.proposal_digest,
             p.page_digests, p.plan
-       FROM agent_job_proposal_fragments f
-       JOIN agent_job_proposals p ON p.job_id = f.job_id
-      WHERE f.job_id = $1 AND f.sequence = $2
-        AND p.owner_client_id = $3
+       FROM ingestion_proposal_authority_pages f
+       JOIN ingestion_proposal_authorities p ON p.proposal_id = f.proposal_id
+      WHERE f.proposal_id = $1 AND f.sequence = $2
       FOR UPDATE`,
-    [input.proposal_job_id, input.sequence, applyBinding.ownerClientId],
+    [input.proposal_job_id, input.sequence],
   );
   if (!rows[0]) {
     throw new AgentJobProposalError(
-      'permission_denied',
-      'The apply job is not authorized for the requested finalized proposal page.',
+      'proposal_authority_page_missing',
+      'The selected page is missing from the finalized ingestion proposal authority.',
     );
   }
   return rows[0];
@@ -610,10 +627,10 @@ async function recordAppliedPage(
   },
 ): Promise<ApplyProposalPageResult> {
   await engine.executeRaw(
-    `UPDATE agent_job_proposal_fragments
+    `UPDATE ingestion_proposal_authority_pages
         SET applied_previous_content_hash = $3, applied_content_hash = $4,
             applied_rebased = $5, applied_at = now()
-      WHERE job_id = $1 AND sequence = $2 AND applied_at IS NULL`,
+      WHERE proposal_id = $1 AND sequence = $2 AND applied_at IS NULL`,
     [input.proposal_job_id, input.sequence, outcome.previousContentHash, outcome.contentHash, outcome.rebased],
   );
   return {

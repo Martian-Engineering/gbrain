@@ -81,7 +81,7 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.setConfig('version', '134');
 
     const first = await runMigrations(engine);
-    expect(first).toEqual({ applied: 3, current: 137 });
+    expect(first).toEqual({ applied: 4, current: 138 });
     const columns = await engine.executeRaw<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable
          FROM information_schema.columns
@@ -120,6 +120,6 @@ describe('migration v135 — timeline reference columns', () => {
 
     await engine.setConfig('version', '134');
     const second = await runMigrations(engine);
-    expect(second).toEqual({ applied: 3, current: 137 });
+    expect(second).toEqual({ applied: 4, current: 138 });
   }, 30_000);
 });

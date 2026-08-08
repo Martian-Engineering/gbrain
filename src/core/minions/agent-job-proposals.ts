@@ -32,6 +32,12 @@ import {
   type StageProposalPageInput,
   type StageProposalPageResult,
 } from '../ingestion-proposal-contract.ts';
+import {
+  finalizedIngestionProposalExists,
+  promoteIngestionProposalAuthority,
+  readIngestionProposalAuthorityPages,
+  readOwnedIngestionProposalAuthority,
+} from './ingestion-proposal-authority.ts';
 
 export {
   AgentJobProposalError,
@@ -248,11 +254,7 @@ export async function stageAgentJobProposalPage(
     const frozenInventory = parseFrozenPageInventory(binding, candidate.totalPages);
     if (frozenInventory) assertExactPageInventory(frozenInventory, candidate.pageInventory);
     assertPageMatchesInventorySlot(candidate);
-    const finalized = await tx.executeRaw<{ proposal_digest: string }>(
-      `SELECT proposal_digest FROM agent_job_proposals WHERE job_id = $1`,
-      [jobId],
-    );
-    if (finalized.length > 0) {
+    if (await finalizedIngestionProposalExists(tx, jobId)) {
       throw new AgentJobProposalError('proposal_finalized', 'This job proposal is already finalized.');
     }
 
@@ -454,7 +456,39 @@ export async function finalizeAgentJobProposal(
     if (!stored[0] || stored[0].proposal_digest !== proposalDigest) {
       throw new AgentJobProposalError('conflicting_finalization', 'This job already has a different finalized proposal.');
     }
-    return stored[0].manifest;
+
+    const authority = await promoteIngestionProposalAuthority<FinalizedProposalManifest>(tx, {
+      proposalId: jobId,
+      ownerClientId: binding.ownerClientId,
+      sourceId: binding.sourceId,
+      artifactId: binding.artifactId,
+      admissionScope: boundScope,
+      capturePageSlug: binding.capturePageSlug,
+      totalPages,
+      pageDigestsJson: canonicalProposalJson(pageDigests),
+      planJson,
+      proposalDigest,
+      manifestJson,
+    });
+    if (
+      !authority
+      || authority.proposalDigest !== proposalDigest
+      || canonicalProposalJson(authority.manifest) !== manifestJson
+      || authority.pages.length !== totalPages
+      || pageDigests.some((entry, index) => (
+        entry.digest !== authority.pages[index]?.page_digest
+        || entry.digest !== digestFrozenProposalPage(
+          parseProposalPage(authority.pages[index]?.page),
+          baselineFromFragment(authority.pages[index]!),
+        )
+      ))
+    ) {
+      throw new AgentJobProposalError(
+        'conflicting_finalization',
+        'This stable proposal authority conflicts with the finalized job evidence.',
+      );
+    }
+    return authority.manifest;
   });
 }
 
@@ -477,26 +511,33 @@ export async function getOwnedAgentJobProposal(
   if (!SHA256_RE.test(proposalDigest)) {
     throw new AgentJobProposalError('invalid_digest', 'proposal_digest must be 64 lowercase hexadecimal characters.');
   }
-  const rows = await engine.executeRaw<{
-    owner_client_id: string;
-    proposal_digest: string;
-    page_digests: ProposalPageDigest[];
-    plan: ScopedAdmissionProposalPlan;
-  }>(
-    `SELECT owner_client_id, proposal_digest, page_digests, plan
-       FROM agent_job_proposals
-      WHERE job_id = $1 AND owner_client_id = $2 AND proposal_digest = $3`,
-    [jobId, ownerClientId, proposalDigest],
+  const authority = await readOwnedIngestionProposalAuthority<
+    ScopedAdmissionProposalPlan,
+    ProposalPageDigest[]
+  >(
+    engine,
+    jobId,
+    ownerClientId,
+    proposalDigest,
   );
-  if (!rows[0]) {
-    throw new AgentJobProposalError('permission_denied', 'Agent job proposal is not owned by this OAuth client or its digest does not match.');
+  if (!authority) {
+    throw new AgentJobProposalError(
+      'proposal_authority_unavailable',
+      'This finalized ingestion proposal authority is unavailable for the approved owner and digest.',
+    );
   }
-  const plan = rows[0].plan;
+  if (authority.expired) {
+    throw new AgentJobProposalError(
+      'proposal_authority_expired',
+      'This finalized ingestion proposal has expired and must be proposed again.',
+    );
+  }
+  const plan = authority.plan;
   if (digestProposalValue(plan) !== proposalDigest) {
     throw new AgentJobProposalError('digest_mismatch', 'Stored proposal content does not match its digest.');
   }
-  const pageDigests = rows[0].page_digests;
-  const fragments = await readStoredFragments(engine, jobId);
+  const pageDigests = authority.pageDigests;
+  const fragments = await readIngestionProposalAuthorityPages(engine, jobId);
   if (
     !Array.isArray(pageDigests)
     || pageDigests.length !== plan.proposedPages.length
