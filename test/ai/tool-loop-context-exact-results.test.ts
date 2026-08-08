@@ -105,6 +105,77 @@ describe('tool-loop exact non-mutating result retention', () => {
     expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_BASELINE_');
   });
 
+  it('summarizes the latest successful inventory ahead of a later rejected inventory', () => {
+    const successfulInventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/accepted', effect: 'update' },
+    ];
+    const rejectedInventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/rejected', effect: 'create' },
+    ];
+    const successfulRound = buildRound('Stage the reviewed proposal.', [{
+      id: 'successful-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        sequence: 1,
+        total_pages: 2,
+        page_inventory: successfulInventory,
+        page: {
+          slug: 'sources/example',
+          effect: 'create',
+          bodyMarkdown: `SUCCESSFUL_STAGE_BODY_${'a'.repeat(22_000)}`,
+        },
+      },
+      output: { staged: true },
+    }]);
+    const rejectedRound = buildRound('unused', [{
+      id: 'rejected-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        sequence: 2,
+        total_pages: 2,
+        page_inventory: rejectedInventory,
+        page: {
+          slug: 'projects/rejected',
+          effect: 'create',
+          bodyMarkdown: `REJECTED_STAGE_BODY_${'b'.repeat(22_000)}`,
+        },
+      },
+      output: { error: 'inventory_mismatch' },
+      isError: true,
+    }]);
+    const latestReadRound = buildRound('unused', [{
+      id: 'latest-read',
+      callName: 'get_page',
+      input: { slug: 'projects/current' },
+      output: { slug: 'projects/current', body: `LATEST_EXACT_READ_${'c'.repeat(8_000)}` },
+    }]);
+
+    const compacted = compactToolLoopMessages([
+      successfulRound[0]!,
+      successfulRound[1]!,
+      successfulRound[2]!,
+      rejectedRound[1]!,
+      rejectedRound[2]!,
+      latestReadRound[1]!,
+      latestReadRound[2]!,
+    ], 4_000, {
+      mutatingToolNames: new Set(),
+      preferredProjectionBytes: 20_000,
+      preferredProjectionFits: () => true,
+    });
+    const summary = compacted
+      .filter(message => typeof message.content === 'string')
+      .map(message => message.content)
+      .join('\n');
+
+    expect(summary).toContain(`page_inventory=${JSON.stringify(successfulInventory)}`);
+    expect(summary).toContain('call_id=successful-stage outcome=complete');
+    expect(summary).not.toContain(JSON.stringify(rejectedInventory));
+    expect(summary).not.toContain('retained tool error');
+  });
+
   it('omits instruction-shaped fields from malformed failed stage input and its ledger summary', () => {
     const unsafeInput = {
       artifact_id: 'artifact-1',

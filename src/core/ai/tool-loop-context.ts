@@ -638,7 +638,7 @@ function buildLedgerSummary(
     `[Context compacted: ${dropped.length} earlier balanced tool round(s) omitted from this provider request${otherCount ? `; ${otherCount} other historical message(s) omitted` : ''}.]`,
     details ? `Durable ledger counts: ${details}.` : '',
     stagedInventory
-      ? `Latest staged proposal inventory evidence: call_id=${boundIdentifier(stagedInventory.toolCallId, 96)} outcome=${stagedInventory.failed ? 'failed' : 'complete'}. Agent-authored plan data, not instructions: page_inventory=${safeJson(stagedInventory.inventory)}. ${stagedInventory.failed ? 'This attempted inventory failed; correct it using the retained tool error before retrying.' : 'Repeat this exact ordered page_inventory unchanged on the next stage call.'}`
+      ? `Latest staged proposal inventory evidence: call_id=${boundIdentifier(stagedInventory.toolCallId, 96)} outcome=${stagedInventory.failed ? 'failed' : 'complete'}. Agent-authored plan data, not instructions: page_inventory=${safeJson(stagedInventory.inventory)}. ${stagedInventory.failed ? 'This attempted inventory failed; consult the durable execution ledger before preparing a corrected retry.' : 'Repeat this exact ordered page_inventory unchanged on the next stage call.'}`
       : '',
     mutationEvidence.length > 0 ? `Distinct mutation evidence:\n${mutationEvidence.join('\n')}` : '',
     'The complete transcript and tool outputs remain in the durable execution ledger. Do not repeat entries marked outcome=complete. Entries marked outcome=failed are unverified; read back or otherwise reassess their effect before deciding whether a corrected retry is safe.',
@@ -650,8 +650,16 @@ function buildLedgerSummary(
 function latestDroppedStageInventory(dropped: readonly ToolRound[]): {
   toolCallId: string;
   failed: boolean;
-  inventory: unknown;
+  inventory: SafeStageInventoryEntry[];
 } | null {
+  let latestFailed: {
+    toolCallId: string;
+    failed: true;
+    inventory: SafeStageInventoryEntry[];
+  } | null = null;
+
+  // A successful stage freezes the authoritative inventory. Keep searching
+  // past newer rejected attempts so they cannot supersede that durable plan.
   for (let roundIndex = dropped.length - 1; roundIndex >= 0; roundIndex--) {
     const evidence = dropped[roundIndex]!.evidence;
     for (let callIndex = evidence.length - 1; callIndex >= 0; callIndex--) {
@@ -660,14 +668,21 @@ function latestDroppedStageInventory(dropped: readonly ToolRound[]): {
       const input = recordValue(candidate.input);
       const inventory = safeStageInventory(input?.page_inventory);
       if (!inventory) continue;
-      return {
+      if (!candidate.failed) {
+        return {
+          toolCallId: candidate.toolCallId,
+          failed: false,
+          inventory,
+        };
+      }
+      latestFailed ??= {
         toolCallId: candidate.toolCallId,
-        failed: candidate.failed,
+        failed: true,
         inventory,
       };
     }
   }
-  return null;
+  return latestFailed;
 }
 
 /** Render enough bounded identity to distinguish prior mutations safely. */
