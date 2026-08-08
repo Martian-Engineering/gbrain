@@ -5340,6 +5340,14 @@ const submit_agent: Operation = {
       type: 'string',
       description: 'Exact resolver admission scope, or omit so the first staged page freezes it',
     },
+    approved_proposal_job_id: {
+      type: 'number',
+      description: 'Exact finalized proposal job approved for this apply job',
+    },
+    approved_proposal_digest: {
+      type: 'string',
+      description: 'Exact finalized proposal digest approved for this apply job',
+    },
   },
   mutating: true,
   scope: 'agent' as any,
@@ -5432,9 +5440,67 @@ const submit_agent: Operation = {
     const proposalAdmissionScope = typeof p.proposal_admission_scope === 'string'
       ? p.proposal_admission_scope.trim()
       : '';
-    const usesProposalTools = requestedTools.some((tool) => (
+    const approvedProposalJobId = Number.isSafeInteger(p.approved_proposal_job_id)
+      && Number(p.approved_proposal_job_id) > 0
+      ? Number(p.approved_proposal_job_id)
+      : null;
+    const approvedProposalDigest = typeof p.approved_proposal_digest === 'string'
+      ? p.approved_proposal_digest.trim()
+      : '';
+    const usesApplyProposalTool = requestedTools.includes('apply_ingestion_proposal_page');
+    const hasApprovedProposalAuthority = approvedProposalJobId !== null
+      && approvedProposalDigest.length > 0;
+    const usesStagingProposalTool = requestedTools.some(tool => (
       tool === 'stage_ingestion_proposal_page' || tool === 'finalize_ingestion_proposal'
     ));
+    const usesApprovedPlanMutationTool = usesApplyProposalTool;
+    const usesProposalTools = hasApprovedProposalAuthority || requestedTools.some((tool) => (
+      tool === 'stage_ingestion_proposal_page'
+      || tool === 'finalize_ingestion_proposal'
+      || tool === 'apply_ingestion_proposal_page'
+    ));
+    if ((approvedProposalJobId !== null) !== (approvedProposalDigest.length > 0)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: approved proposal job id and digest must be supplied together.',
+      );
+    }
+    if (usesApplyProposalTool && (!approvedProposalJobId || !approvedProposalDigest)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: apply jobs require an exact approved proposal job id and digest.',
+      );
+    }
+    if (hasApprovedProposalAuthority && !usesApprovedPlanMutationTool) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: approved proposal authority requires an approved-plan mutation tool.',
+      );
+    }
+    if (hasApprovedProposalAuthority && usesStagingProposalTool) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: proposal staging and approved proposal application require separate jobs.',
+      );
+    }
+    const extraApprovedMutations = hasApprovedProposalAuthority
+      ? requestedTools.filter(tool => (
+        tool !== 'apply_ingestion_proposal_page'
+        && agentMutatingOperationNames().has(tool)
+      ))
+      : [];
+    if (extraApprovedMutations.length > 0) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: only apply_ingestion_proposal_page may mutate in an approved proposal apply job.',
+      );
+    }
+    if (approvedProposalDigest && !/^[a-f0-9]{64}$/.test(approvedProposalDigest)) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: approved proposal digest must be a lowercase SHA-256 value.',
+      );
+    }
     if ((proposalArtifactId.length > 0) !== (proposalCapturePageSlug.length > 0)) {
       throw new OperationError(
         'invalid_params',
@@ -5468,6 +5534,12 @@ const submit_agent: Operation = {
     }
     if (usesProposalTools && requestedSlugPrefixes.length === 0) {
       throw new OperationError('invalid_params', 'submit_agent: proposal-tool jobs require a non-empty slug fence.');
+    }
+    if (hasApprovedProposalAuthority && !proposalAdmissionScope) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: apply jobs require the exact approved admission scope.',
+      );
     }
     if (proposalCapturePageSlug) {
       validatePageSlug(proposalCapturePageSlug);
@@ -5519,21 +5591,76 @@ const submit_agent: Operation = {
       }
     }
 
-    // A retried caller key resolves before the concurrency cap so its own
-    // live job cannot turn a safe replay into a rate-limit failure.
+    // Resolve an existing owner-scoped idempotency key before dereferencing
+    // proposal rows. A safe retry must still return the durable apply job if
+    // the reviewed proposal has since been pruned.
     if (!ctx.dryRun && queueIdempotencyKey) {
       const existing = await sql`
-        SELECT id
+        SELECT id, data
           FROM minion_jobs
          WHERE idempotency_key = ${queueIdempotencyKey}
+           AND data->>'__owner_client_id' = ${clientId}
          LIMIT 1
       `;
       if (existing.length > 0) {
+        const data = existing[0]!.data as Record<string, unknown>;
+        if (
+          hasApprovedProposalAuthority
+          && (
+            Number(data.approved_proposal_job_id) !== approvedProposalJobId
+            || data.approved_proposal_digest !== approvedProposalDigest
+          )
+        ) {
+          throw new OperationError(
+            'invalid_params',
+            'submit_agent: idempotency key is already bound to different approved proposal authority.',
+          );
+        }
         return {
           id: Number(existing[0]!.id),
           name: 'subagent',
           client_id: clientId,
         };
+      }
+    }
+
+    let approvedAuthority: {
+      proposalJobId: number;
+      proposalDigest: string;
+      sourceId: string;
+      artifactId: string;
+      admissionScope: string;
+      capturePageSlug: string;
+      pageDigests: Array<{ sequence: number; slug: string; digest: string }>;
+    } | undefined;
+    if (approvedProposalJobId && approvedProposalDigest) {
+      const proposal = await import('./minions/agent-job-proposal-apply.ts');
+      try {
+        approvedAuthority = await proposal.getOwnedApprovedProposalAuthority(
+          ctx.engine,
+          approvedProposalJobId,
+          clientId,
+          approvedProposalDigest,
+        );
+      } catch (error) {
+        if (error instanceof proposal.AgentJobProposalError) {
+          throw new OperationError('permission_denied', error.message);
+        }
+        throw error;
+      }
+      if (
+        approvedAuthority.sourceId !== boundSource
+        || approvedAuthority.artifactId !== proposalArtifactId
+        || approvedAuthority.admissionScope !== proposalAdmissionScope
+        || approvedAuthority.capturePageSlug !== proposalCapturePageSlug
+        || approvedAuthority.pageDigests.some(
+          page => !matchesSlugAllowList(page.slug, requestedSlugPrefixes),
+        )
+      ) {
+        throw new OperationError(
+          'permission_denied',
+          'submit_agent: approved proposal does not match the requested source, artifact, admission scope, capture page, or slug fence.',
+        );
       }
     }
 
@@ -5622,6 +5749,8 @@ const submit_agent: Operation = {
         proposal_artifact_id: proposalArtifactId || null,
         proposal_capture_page_slug: proposalCapturePageSlug || null,
         proposal_admission_scope: proposalAdmissionScope || null,
+        approved_proposal_job_id: approvedAuthority?.proposalJobId ?? null,
+        approved_proposal_digest: approvedAuthority?.proposalDigest ?? null,
       };
     }
 
@@ -5638,6 +5767,7 @@ const submit_agent: Operation = {
       allowed_slug_prefixes: requestedSlugPrefixes,
       use_gateway_loop: true,
       __owner_client_id: clientId,
+      ...(ctx.auth?.boundPrincipal ? { __owner_principal: ctx.auth.boundPrincipal } : {}),
     };
     if (skillBody && skillName && skillSha256) {
       jobData.system = skillBody;
@@ -5652,6 +5782,11 @@ const submit_agent: Operation = {
       jobData.proposal_artifact_id = proposalArtifactId;
       jobData.proposal_capture_page_slug = proposalCapturePageSlug;
       if (proposalAdmissionScope) jobData.proposal_admission_scope = proposalAdmissionScope;
+    }
+    if (approvedAuthority) {
+      jobData.approved_proposal_job_id = approvedAuthority.proposalJobId;
+      jobData.approved_proposal_digest = approvedAuthority.proposalDigest;
+      jobData.approved_proposal_page_digests = approvedAuthority.pageDigests;
     }
     const job = await queue.add(
       'subagent',
@@ -5752,6 +5887,45 @@ const finalize_ingestion_proposal: Operation = {
     } catch (error) {
       if (error instanceof proposal.AgentJobProposalError) {
         throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+};
+
+const apply_ingestion_proposal_page: Operation = {
+  name: 'apply_ingestion_proposal_page',
+  description: 'Apply one exact reviewed create or compact update from the proposal authority frozen on this agent job. Safe replays return already_applied; collisions and stale non-append edits fail without mutation.',
+  params: {
+    proposal_job_id: { type: 'number', required: true, description: 'Exact approved proposal job id', trace: { kind: 'job' } },
+    proposal_digest: { type: 'string', required: true, description: 'Exact approved proposal digest', trace: { kind: 'proposal' } },
+    sequence: { type: 'number', required: true, description: 'One-based approved page sequence' },
+    page_digest: { type: 'string', required: true, description: 'Exact private-bound page digest', trace: { kind: 'proposal' } },
+    source_id: { type: 'string', required: true, description: 'Exact approved source id', trace: { kind: 'source' } },
+  },
+  mutating: true,
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError(
+        'permission_denied',
+        'apply_ingestion_proposal_page is available only inside an authorized apply agent job.',
+      );
+    }
+    const proposal = await import('./minions/agent-job-proposal-apply.ts');
+    try {
+      return await proposal.applyAgentJobProposalPage(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        const permissionCodes = new Set([
+          'permission_denied',
+          'job_not_bound',
+          'slug_not_allowed',
+        ]);
+        throw new OperationError(
+          permissionCodes.has(error.code) ? 'permission_denied' : error.code,
+          error.message,
+        );
       }
       throw error;
     }
@@ -5930,9 +6104,16 @@ const get_agent_job_execution_evidence: Operation = {
 // used to construct every subagent tool surface.
 function agentMutatingToolNames(): ReadonlySet<string> {
   return new Set(
+    [...agentMutatingOperationNames()].map(name => `brain_${name}`),
+  );
+}
+
+/** Return canonical operation names that can mutate durable state. */
+function agentMutatingOperationNames(): ReadonlySet<string> {
+  return new Set(
     operations
       .filter((operation) => operation.mutating)
-      .map((operation) => `brain_${operation.name}`),
+      .map((operation) => operation.name),
   );
 }
 
@@ -8757,6 +8938,7 @@ export const operations: Operation[] = [
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
   submit_agent, stage_ingestion_proposal_page, finalize_ingestion_proposal,
+  apply_ingestion_proposal_page,
   get_agent_job, get_agent_job_proposal, get_agent_job_execution_evidence,
   // Orphans
   find_orphans,

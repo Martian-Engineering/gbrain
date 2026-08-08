@@ -16,6 +16,7 @@ tools:
   - get_backlinks
   - stage_ingestion_proposal_page
   - finalize_ingestion_proposal
+  - apply_ingestion_proposal_page
   - put_page
   - add_link
   - add_timeline_entry
@@ -117,9 +118,11 @@ reviewCutoff: <ISO timestamp | null>
 attempt: <positive integer>
 mode: <propose | apply | omit for normal mode>
 admissionScope: <required in propose and apply modes>
-proposedPages: <required frozen proposal pages in apply mode>
-proposedTimelineEntries: <optional frozen timeline entries in apply mode>
-proposedLinks: <optional frozen typed links in apply mode>
+approvedProposal: # required in apply mode
+  jobId: <positive proposal job id>
+  digest: <64-character lowercase digest>
+  sourceId: <same immutable source id>
+  pages: <ordered sequence, slug, effect, pageDigest manifest>
 manifest: <complete manifest.json object, including admission facts>
 contentMarkdown: <complete provider header and routing Markdown>
 transcriptMarkdown: <complete normalized thread and extracted evidence Markdown>
@@ -132,7 +135,6 @@ priorAttempt: # optional; omitted when there is no prior write evidence
   updatedPages: <optional source-qualified page identifiers>
   verifiedPages: <optional source-qualified page identifiers>
   pageResults: <optional bounded page result ledger without error fields>
-  slugAdjustments: <optional bounded slug adjustment ledger>
   timelineResults: <optional bounded timeline result ledger without error fields>
   linkResults: <optional bounded link result ledger without error fields>
 ```
@@ -198,10 +200,7 @@ Every proposed page has exactly one of these shapes:
 {
   "slug": "projects/example",
   "effect": "update",
-  "title": "Example",
-  "bodyMarkdown": "complete intended page body",
-  "baseMarkdown": "complete reviewed baseline",
-  "expectedContentHash": "64 lowercase hex characters"
+  "appendMarkdown": "exact reviewed Markdown to append"
 }
 ```
 
@@ -228,8 +227,8 @@ before staging; never reserve a second inventory slot for the same slug. Use `se
 full page bodies. Never request more than one `get_page` in the same assistant
 turn or tool batch.
 For an update, call exactly one `get_page` only when ready to construct and stage
-that entry. Copy its exact body and `content_hash` into `baseMarkdown` and
-`expectedContentHash`. After an update target's `get_page` returns, the very next
+that entry. Draft only the exact new `appendMarkdown`; the stage operation
+freezes the title, body, and content hash privately. After an update target's `get_page` returns, the very next
 assistant turn must call `brain_stage_ingestion_proposal_page` for that same
 update, as the only tool call in that turn. Do not call `get_page` for another
 target, or make any other large read, between that baseline read and its staging
@@ -277,54 +276,47 @@ Return the finalizer's compact manifest as `staged_proposal`:
 
 ### Apply mode
 
-In `apply` mode, execute only the prompt-supplied frozen plan. Do not
-reanalyze the artifact, invent or omit a mutation, change a title or body, or
-call either staging tool. Before any read or mutation, validate the entire
-frozen plan. Require one to 32 uniquely slugged canonical pages, with
-`capturePageSlug` present exactly once. A create has exactly `slug`, `effect`,
-`title`, and `bodyMarkdown`; an update additionally has a complete
-`baseMarkdown` and 64-character lowercase hexadecimal `expectedContentHash`.
-Treat omitted timeline and link arrays as empty; otherwise require at most 40
-exactly shaped entries of each kind. Every timeline entry has a canonical
-planned `pageSlug`, strict `YYYY-MM-DD` date, non-empty text, and `ref` equal to
-`capturePageSlug`. Every link has a canonical planned `from`, canonical `to`,
-and non-empty type. Reject duplicate mutations and any canonical plan or escaped
-representation above 98,304 UTF-8 bytes. Return `failed` without mutation when
-any preflight check fails.
+In `apply` mode, the nested `approvedProposal` object is the sole page-write
+authority. Require exactly `jobId`, `digest`, `sourceId`, and ordered
+`pages`. Require the nested `sourceId` to equal the top-level `sourceId`,
+the digest and every `pageDigest` to be lowercase SHA-256 values, and pages to
+be one-based, contiguous, ordered entries with exactly `sequence`, `slug`,
+`effect`, and `pageDigest`. Do not accept page bodies, append text, private
+baselines, expected hashes, or slug adjustments in the apply prompt.
 
-After plan preflight, read every page target before the first mutation. A create
-must still be absent apart from the non-capture mechanical collision adjustment
-below; an update must match its reviewed `expectedContentHash`. If any target
-cannot follow one of those exact paths, return a complete `failed` apply receipt
-with `refresh_required` and make no mutation.
+Apply each manifest page in sequence with
+`brain_apply_ingestion_proposal_page`. Send exactly:
 
-Apply proposed pages in order with `put_page`, using `expected_content_hash:
-null` for creates and the reviewed hash for updates. Read each page back before
-marking it verified. The only permitted plan change is a mechanical
-create-collision suffix `-<suffix>` for a non-capture page, where the suffix is
-1-16 lowercase alphanumeric characters; freeze all such adjustments before the
-first write and apply the mapping to exact slug references in frozen bodies,
-timeline entries, and links. `capturePageSlug` is never adjusted. No
-differently slugged legacy source page qualifies as a collision target or
-update target.
+```json
+{
+  "proposal_job_id": 123,
+  "proposal_digest": "64 lowercase hex characters",
+  "sequence": 1,
+  "page_digest": "64 lowercase hex characters",
+  "source_id": "verified source id"
+}
+```
 
-After every page is verified, apply frozen timeline entries and then frozen
-links in order. Verify timeline entries with `get_page`, and verify links with
-both `get_links` and `get_backlinks`. Never execute a mutation absent from the
-approved plan. Preserve `canonicalExternalId` and `captureExternalId` exactly
-from the prompt, set `sourcePageSlug` to the source-qualified applied capture
-slug, and retain Gmail completion attestations alongside the generic audited
-mutation ledgers.
+Copy every value from `approvedProposal`; never send `slug`, `effect`,
+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
+content hash. The operation resolves the frozen page server-side, rejects
+authority or create collisions, performs the conditional write, safely rebases
+only an append-only update, records a durable per-sequence receipt, and verifies
+the resulting page state. Do not pre-read or reimplement its compare-and-swap
+logic with `get_page` or `put_page`.
 
-Initialize one `pageResults` entry per proposed page, one `timelineResults`
-entry per proposed timeline entry, and one `linkResults` entry per proposed
-link. Preserve proposal order. Page statuses are `pending`, `written`,
-`applied`, `rebased`, `already_applied`, `refresh_required`, or `failed`;
-timeline and link statuses are `pending`, `applied`, or `failed`. Include
-`slugAdjustments`, even when empty. Stop after the first failed or unverified
-mutation and leave later entries `pending`. On retry, use `priorAttempt` only
-to choose read-back checks; durable page and graph state determines whether an
-exact frozen mutation still needs execution.
+A successful call returns `status` `applied` or `already_applied`, plus the
+bound `effect`, `slug`, hashes, and `rebased` flag. Record that exact
+bounded result. Stop after the first failed call and leave later sequences
+pending. Retry only failed or pending sequences with the identical authority;
+replaying a completed sequence is safe only through the same operation, which
+returns `already_applied` after checking current durable page state.
+
+This operation authorizes pages only. If the approved proposal contains
+timeline or typed-link mutations, return `failed` without calling generic
+`add_timeline_entry`, `add_link`, or `put_page`; those effects require
+their own server-bound proposal operations. Never report the proposal fully
+applied while any planned effect lacks an authorized actionable outcome.
 
 ## Phases
 
@@ -541,8 +533,7 @@ For normal write outcomes, return exactly one JSON object:
 }
 ```
 
-For apply mode, retain the same Gmail identity and completion fields and add
-the complete resumable mutation ledger:
+For apply mode, retain the Gmail identity fields and add the complete ordered page ledger:
 
 ```json
 {
@@ -553,40 +544,39 @@ the complete resumable mutation ledger:
   "canonicalExternalId": "copied exactly from the prompt",
   "captureExternalId": "copied exactly from the prompt",
   "sourcePageSlug": "<sourceId>:<capturePageSlug>",
-  "substantiveSummaryVerified": true,
-  "datedFactCount": 1,
-  "createdPages": ["<sourceId>:<actual-slug>"],
-  "updatedPages": ["<sourceId>:<actual-slug>"],
-  "verifiedPages": ["<sourceId>:<actual-slug>"],
-  "readBackVerifiedPages": ["<sourceId>:<actual-slug>"],
-  "linksVerified": true,
+  "createdPages": ["<sourceId>:<slug>"],
+  "updatedPages": ["<sourceId>:<slug>"],
+  "verifiedPages": ["<sourceId>:<slug>"],
   "pageResults": [
     {
-      "proposedSlug": "sources/google-gmail/example",
-      "appliedPage": "<sourceId>:sources/google-gmail/example",
+      "proposalSequence": 1,
+      "proposedSlug": "sources/example",
       "effect": "create | update",
-      "status": "pending | written | applied | rebased | already_applied | refresh_required | failed",
-      "expectedContentHash": null,
-      "appliedContentHash": "verified final hash or null",
-      "error": null
+      "status": "pending | applied | already_applied | failed",
+      "previousContentHash": "64 lowercase hex characters or null",
+      "appliedContentHash": "64 lowercase hex characters or null",
+      "rebased": false,
+      "error": "null or compact failure"
     }
   ],
-  "slugAdjustments": [],
   "timelineResults": [],
   "linkResults": [],
   "unresolved": []
 }
 ```
 
-For `succeeded`, `datedFactCount` is at least one,
-`readBackVerifiedPages` contains every entry in `createdPages` and
-`updatedPages`, and `linksVerified` is `true`. For `needs_attention` or
-`failed`, use `false` or zero for any incomplete attestation and list the exact
-defect in `unresolved`.
+Populate `createdPages`, `updatedPages`, and `verifiedPages` only from exact
+successful operation results. A failed call has null output-derived fields until
+an authorized retry succeeds. Keep every unattempted sequence pending.
+
+For `succeeded`, every approved page sequence has an `applied` or
+`already_applied` result and no approved relation effect remains unauthorized.
+For `needs_attention` or `failed`, use false or zero for incomplete Gmail
+attestations and list the exact defect in `unresolved`.
 
 ## Tools Used
 
 Use schema inspection, search, query, page reads, slug resolution, outgoing and
-incoming links, proposal staging/finalization, page writes, typed links,
-timeline entries, and link validation exactly as declared in frontmatter. Do
-not request any other tool.
+incoming links, proposal staging/finalization, and the server-bound proposal
+page operation exactly as declared in frontmatter. Do not request any other
+tool.

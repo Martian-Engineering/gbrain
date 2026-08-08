@@ -28,6 +28,7 @@ const submit_agent = operationsByName['submit_agent'];
 const get_agent_job = operationsByName['get_agent_job'];
 const stage_ingestion_proposal_page = operationsByName['stage_ingestion_proposal_page'];
 const finalize_ingestion_proposal = operationsByName['finalize_ingestion_proposal'];
+const apply_ingestion_proposal_page = operationsByName['apply_ingestion_proposal_page'];
 const get_agent_job_proposal = operationsByName['get_agent_job_proposal'];
 const get_agent_job_execution_evidence =
   operationsByName['get_agent_job_execution_evidence'];
@@ -147,6 +148,8 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(submit_agent.params.proposal_artifact_id).toBeDefined();
       expect(submit_agent.params.proposal_capture_page_slug).toBeDefined();
       expect(submit_agent.params.proposal_admission_scope).toBeDefined();
+      expect(submit_agent.params.approved_proposal_job_id).toBeDefined();
+      expect(submit_agent.params.approved_proposal_digest).toBeDefined();
       expect(stage_ingestion_proposal_page?.scope).toBe('agent');
       expect(stage_ingestion_proposal_page?.mutating).toBe(false);
       expect(stage_ingestion_proposal_page?.params.total_pages.description)
@@ -164,6 +167,17 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         .toContain('(1-32)');
       expect(finalize_ingestion_proposal?.params.page_digests).toBeUndefined();
       expect(get_agent_job_proposal?.scope).toBe('agent');
+      expect(apply_ingestion_proposal_page).toMatchObject({
+        scope: 'agent',
+        mutating: true,
+      });
+      expect(Object.keys(apply_ingestion_proposal_page!.params).sort()).toEqual([
+        'page_digest',
+        'proposal_digest',
+        'proposal_job_id',
+        'sequence',
+        'source_id',
+      ]);
     });
   });
 
@@ -925,6 +939,73 @@ describe('get_agent_job owner-scoped receipt', () => {
     ]);
   });
 
+  it('projects authority-bound deterministic page apply evidence without private text', async () => {
+    await seedClient('lore', { bound_tools: ['apply_ingestion_proposal_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'company' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'apply-page-1', 'brain_apply_ingestion_proposal_page',
+               $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          sequence: 2,
+          page_digest: 'b'.repeat(64),
+          source_id: 'company',
+          appendMarkdown: 'private reviewed text',
+        }),
+        JSON.stringify({
+          status: 'applied',
+          effect: 'update',
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          sequence: 2,
+          page_digest: 'b'.repeat(64),
+          source_id: 'company',
+          slug: 'sources/example',
+          previous_content_hash: 'c'.repeat(64),
+          content_hash: 'd'.repeat(64),
+          rebased: true,
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence).toMatchObject({
+      availability: 'complete',
+      unsupported_mutation_count: 0,
+      operations: [{
+        sequence: 0,
+        operation: 'apply_ingestion_proposal_page',
+        execution_status: 'complete',
+        source_id: 'company',
+        proposal_job_id: 41,
+        proposal_sequence: 2,
+        proposal_digest: 'a'.repeat(64),
+        page_digest: 'b'.repeat(64),
+        effect: 'update',
+        slug: 'sources/example',
+        previous_content_hash: 'c'.repeat(64),
+        applied_content_hash: 'd'.repeat(64),
+        rebased: true,
+        outcome: 'applied',
+      }],
+    });
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain('private reviewed text');
+  });
+
   it('returns bounded authoritative write evidence without raw content or errors', async () => {
     await seedClient('lore', { bound_tools: ['get_page', 'put_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
@@ -1461,6 +1542,98 @@ describe('staged proposal operation contract', () => {
         unresolved: [],
       },
     });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('company', 'Company') ON CONFLICT (id) DO NOTHING`,
+    );
+    await seedClient('lore', {
+      bound_tools: ['apply_ingestion_proposal_page'],
+      bound_source_id: 'company',
+      bound_slug_prefixes: ['sources/'],
+      bound_max_concurrent: 3,
+    });
+    const applyJob = await callSubmitAgent(makeCtx({ clientId: 'lore' }), {
+      prompt: 'Apply the exact approved proposal.',
+      allowed_tools: ['apply_ingestion_proposal_page'],
+      allowed_slug_prefixes: ['sources/'],
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+      idempotency_key: 'approved-create-plan',
+    });
+    const [applyRow] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      `SELECT data FROM minion_jobs WHERE id = $1`,
+      [applyJob.id],
+    );
+    expect(applyRow!.data).toMatchObject({
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+      approved_proposal_page_digests: manifest.pageDigests,
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+    });
+    await expect(callSubmitAgent(makeCtx({ clientId: 'lore' }), {
+      prompt: 'Apply a tampered proposal.',
+      allowed_tools: ['apply_ingestion_proposal_page'],
+      allowed_slug_prefixes: ['sources/'],
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: 'f'.repeat(64),
+    })).rejects.toMatchObject({ code: 'permission_denied' });
+    const createOnlyPreview = await callSubmitAgent(
+      makeCtx({ clientId: 'lore', dryRun: true }),
+      {
+        prompt: 'Apply the exact approved create.',
+        allowed_tools: ['apply_ingestion_proposal_page'],
+        allowed_slug_prefixes: ['sources/'],
+        proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include delivery notes.',
+        approved_proposal_job_id: row.id,
+        approved_proposal_digest: manifest.proposalDigest,
+      },
+    );
+    expect(createOnlyPreview).toMatchObject({
+      dry_run: true,
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+    });
+    await seedClient('lore', {
+      bound_tools: ['stage_ingestion_proposal_page', 'apply_ingestion_proposal_page'],
+      bound_source_id: 'company',
+      bound_slug_prefixes: ['sources/'],
+      bound_max_concurrent: 3,
+    });
+    await expect(callSubmitAgent(makeCtx({ clientId: 'lore', dryRun: true }), {
+      prompt: 'Mix propose and apply.',
+      allowed_tools: ['stage_ingestion_proposal_page', 'apply_ingestion_proposal_page'],
+      allowed_slug_prefixes: ['sources/'],
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+    })).rejects.toThrow(/staging and approved proposal application require separate jobs/i);
+    await seedClient('lore', {
+      bound_tools: ['apply_ingestion_proposal_page', 'put_page', 'add_link'],
+      bound_source_id: 'company',
+      bound_slug_prefixes: ['sources/'],
+      bound_max_concurrent: 3,
+    });
+    await expect(callSubmitAgent(makeCtx({ clientId: 'lore', dryRun: true }), {
+      prompt: 'Mix bound and generic mutation authority.',
+      allowed_tools: ['apply_ingestion_proposal_page', 'put_page'],
+      allowed_slug_prefixes: ['sources/'],
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+    })).rejects.toThrow(/only apply_ingestion_proposal_page may mutate/i);
     await expect(get_agent_job_proposal!.handler(
       makeCtx({ clientId: 'other' }),
       { id: row.id, proposal_digest: manifest.proposalDigest },
@@ -1469,6 +1642,20 @@ describe('staged proposal operation contract', () => {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include delivery notes.',
       sequence: 1, total_pages: 1, page: {},
     })).rejects.toMatchObject({ code: 'permission_denied' });
+
+    await engine.executeRaw('DELETE FROM agent_job_proposals WHERE job_id = $1', [row.id]);
+    const replayedApplyJob = await callSubmitAgent(makeCtx({ clientId: 'lore' }), {
+      prompt: 'Retry after losing the submit response.',
+      allowed_tools: ['apply_ingestion_proposal_page'],
+      allowed_slug_prefixes: ['sources/'],
+      proposal_artifact_id: 'artifact-1',
+      proposal_capture_page_slug: 'sources/example',
+      proposal_admission_scope: 'Include delivery notes.',
+      approved_proposal_job_id: row.id,
+      approved_proposal_digest: manifest.proposalDigest,
+      idempotency_key: 'approved-create-plan',
+    });
+    expect(replayedApplyJob.id).toBe(applyJob.id);
   });
 });
 

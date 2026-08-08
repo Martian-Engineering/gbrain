@@ -19,6 +19,7 @@ import {
 } from '../src/core/minions/agent-job-proposals.ts';
 import { compactToolLoopMessages } from '../src/core/ai/tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../src/core/ingestion-proposal-context-policy.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 import type { ChatMessage } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -64,11 +65,16 @@ async function seedStoredPage(
     `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
     [sourceId],
   );
-  await engine.executeRaw(
-    `INSERT INTO pages (source_id, slug, type, title, compiled_truth, deleted_at)
-     VALUES ($1, $2, 'note', 'Existing page', '# Existing', CASE WHEN $3 THEN now() ELSE NULL END)`,
-    [sourceId, slug, deleted],
-  );
+  await importFromContent(engine, slug, '# Existing page\n\nExisting body.', {
+    noEmbed: true,
+    sourceId,
+  });
+  if (deleted) {
+    await engine.executeRaw(
+      `UPDATE pages SET deleted_at = now() WHERE source_id = $1 AND slug = $2`,
+      [sourceId, slug],
+    );
+  }
 }
 
 function createPage(slug: string, bodyMarkdown = '# Page'): ScopedProposalPage {
@@ -79,10 +85,7 @@ function updatePage(slug: string, suffix = ''): ScopedProposalPage {
   return {
     slug,
     effect: 'update',
-    title: 'Page',
-    bodyMarkdown: `# Updated${suffix}`,
-    baseMarkdown: '# Existing',
-    expectedContentHash: 'a'.repeat(64),
+    appendMarkdown: `## Updated${suffix}`,
   };
 }
 
@@ -150,15 +153,16 @@ describe('durable agent-job proposal staging', () => {
       .resolves.toMatchObject({ slug: 'sources/東京' });
   });
 
-  it('rejects blank page bodies and update baselines', async () => {
+  it('rejects blank create bodies and update appends', async () => {
     const createJob = await seedJob();
     await expect(stage(createJob, 1, 1, createPage('sources/example', ' \n\t ')))
       .rejects.toMatchObject({ code: 'invalid_string' });
 
     const updateJob = await seedJob();
     await expect(stage(updateJob, 1, 1, {
-      ...updatePage('sources/example'),
-      baseMarkdown: '   ',
+      slug: 'sources/example',
+      effect: 'update',
+      appendMarkdown: '   ',
     })).rejects.toMatchObject({ code: 'invalid_string' });
   });
 
@@ -691,11 +695,18 @@ describe('durable agent-job proposal staging', () => {
     await stage(duplicatePageJob, 1, 2, uniquePages[0]!, undefined, uniqueInventory);
     await stage(duplicatePageJob, 2, 2, uniquePages[1]!, undefined, uniqueInventory);
     const duplicatePage = updatePage('sources/same');
+    const privateBaseline = await engine.getPage('projects/other', { sourceId: 'company' });
+    const duplicateDigest = digestProposalValue({
+      page: duplicatePage,
+      baselineTitle: privateBaseline!.title,
+      baselineMarkdown: privateBaseline!.compiled_truth,
+      baselineContentHash: privateBaseline!.content_hash,
+    });
     await engine.executeRaw(
       `UPDATE agent_job_proposal_fragments
           SET page = $2::text::jsonb, page_digest = $3
         WHERE job_id = $1 AND sequence = 2`,
-      [duplicatePageJob, canonicalProposalJson(duplicatePage), digestProposalValue(duplicatePage)],
+      [duplicatePageJob, canonicalProposalJson(duplicatePage), duplicateDigest],
     );
     await expect(finalizeAgentJobProposal(engine, duplicatePageJob, {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
@@ -834,7 +845,9 @@ describe('durable agent-job proposal staging', () => {
     };
     const remaining = PROPOSAL_ESCAPED_PLAN_MAX_BYTES -
       Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8');
-    pages[pageCount - 1]!.bodyMarkdown += 'y'.repeat(remaining);
+    const boundaryPage = pages[pageCount - 1]!;
+    if (boundaryPage.effect !== 'create') throw new Error('Expected create boundary page');
+    boundaryPage.bodyMarkdown += 'y'.repeat(remaining);
     for (let sequence = 1; sequence <= pageCount; sequence++) {
       await stage(jobId, sequence, pageCount, pages[sequence - 1]!);
     }

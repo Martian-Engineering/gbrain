@@ -596,12 +596,34 @@ CREATE TABLE IF NOT EXISTS agent_job_proposal_fragments (
   total_pages     INTEGER     NOT NULL,
   page            JSONB       NOT NULL,
   page_digest     TEXT        NOT NULL,
+  baseline_title  TEXT,
+  baseline_markdown TEXT,
+  baseline_content_hash TEXT,
+  applied_previous_content_hash TEXT,
+  applied_content_hash TEXT,
+  applied_rebased BOOLEAN,
+  applied_at      TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (job_id, sequence),
   CONSTRAINT chk_agent_job_proposal_fragment_sequence
     CHECK (sequence >= 1 AND total_pages >= sequence),
   CONSTRAINT chk_agent_job_proposal_fragment_digest
-    CHECK (page_digest ~ '^[a-f0-9]{64}$')
+    CHECK (page_digest ~ '^[a-f0-9]{64}$'),
+  CONSTRAINT chk_agent_job_proposal_fragment_baseline CHECK (
+    (baseline_title IS NULL AND baseline_markdown IS NULL AND baseline_content_hash IS NULL)
+    OR
+    (baseline_title IS NOT NULL AND baseline_markdown IS NOT NULL
+      AND baseline_content_hash ~ '^[a-f0-9]{64}$')
+  ),
+  CONSTRAINT chk_agent_job_proposal_fragment_applied_receipt CHECK (
+    (applied_previous_content_hash IS NULL AND applied_content_hash IS NULL
+      AND applied_rebased IS NULL AND applied_at IS NULL)
+    OR
+    (applied_content_hash ~ '^[a-f0-9]{64}$'
+      AND (applied_previous_content_hash IS NULL
+        OR applied_previous_content_hash ~ '^[a-f0-9]{64}$')
+      AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_fragments_owner
   ON agent_job_proposal_fragments (owner_client_id, job_id);

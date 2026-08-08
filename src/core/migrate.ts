@@ -6068,6 +6068,62 @@ export const MIGRATIONS: Migration[] = [
       `,
     },
   },
+  {
+    version: 137,
+    name: 'agent_job_compact_append_baselines',
+    // Update proposals expose only bounded append intent. The exact title,
+    // body, and optimistic hash stay in this server-private fragment ledger;
+    // apply receipts are recorded on the same immutable job+sequence row.
+    idempotent: true,
+    sql: `
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS baseline_title TEXT;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS baseline_markdown TEXT;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS baseline_content_hash TEXT;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS applied_previous_content_hash TEXT;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS applied_content_hash TEXT;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS applied_rebased BOOLEAN;
+      ALTER TABLE agent_job_proposal_fragments
+        ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ;
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = 'chk_agent_job_proposal_fragment_baseline'
+             AND conrelid = 'agent_job_proposal_fragments'::regclass
+        ) THEN
+          ALTER TABLE agent_job_proposal_fragments
+            ADD CONSTRAINT chk_agent_job_proposal_fragment_baseline CHECK (
+              (baseline_title IS NULL AND baseline_markdown IS NULL AND baseline_content_hash IS NULL)
+              OR
+              (baseline_title IS NOT NULL AND baseline_markdown IS NOT NULL
+                AND baseline_content_hash ~ '^[a-f0-9]{64}$')
+            );
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+           WHERE conname = 'chk_agent_job_proposal_fragment_applied_receipt'
+             AND conrelid = 'agent_job_proposal_fragments'::regclass
+        ) THEN
+          ALTER TABLE agent_job_proposal_fragments
+            ADD CONSTRAINT chk_agent_job_proposal_fragment_applied_receipt CHECK (
+              (applied_previous_content_hash IS NULL AND applied_content_hash IS NULL
+                AND applied_rebased IS NULL AND applied_at IS NULL)
+              OR
+              (applied_content_hash ~ '^[a-f0-9]{64}$'
+                AND (applied_previous_content_hash IS NULL
+                  OR applied_previous_content_hash ~ '^[a-f0-9]{64}$')
+                AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
+            );
+        END IF;
+      END $$;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

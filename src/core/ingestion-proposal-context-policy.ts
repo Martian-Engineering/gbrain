@@ -32,7 +32,7 @@ function projectStageProposalInput(value: unknown, maxBytes: number): unknown {
   const full = stageProjection(inventory, position, pageIdentity, {
     original_json_utf8_bytes: originalBytes,
     sha256,
-    omitted_page_fields: ['title', 'bodyMarkdown', 'baseMarkdown'],
+    omitted_page_fields: ['title', 'bodyMarkdown', 'appendMarkdown'],
   });
   if (jsonBytes(full) <= maxBytes) return full;
   const compact = stageProjection(inventory, position, pageIdentity, {

@@ -15,6 +15,7 @@ tools:
   - get_backlinks
   - stage_ingestion_proposal_page
   - finalize_ingestion_proposal
+  - apply_ingestion_proposal_page
   - put_page
   - add_link
   - add_timeline_entry
@@ -108,9 +109,11 @@ artifactIntegrity: # required normal/propose; omitted apply
 capturePageSlug: <exact slug of the sources/ capture page>
 mode: <propose | apply | omit for normal mode>
 admissionScope: <required in propose and apply modes>
-proposedPages: <required frozen proposal pages in apply mode>
-proposedTimelineEntries: <optional frozen timeline entries in apply mode>
-proposedLinks: <optional frozen typed links in apply mode>
+approvedProposal: # required in apply mode
+  jobId: <positive proposal job id>
+  digest: <64-character lowercase digest>
+  sourceId: <same immutable source id>
+  pages: <ordered sequence, slug, effect, pageDigest manifest>
 provider: granola
 sourceId: <already-selected immutable GBrain source id>
 resolverRevision: <revision used by Lore>
@@ -130,7 +133,6 @@ priorAttempt: # optional; omitted for a clean no-write propose attempt
   updatedPages: <optional source-qualified page identifiers>
   verifiedPages: <optional source-qualified page identifiers>
   pageResults: <optional bounded page result ledger without error fields>
-  slugAdjustments: <optional bounded slug adjustment ledger>
   timelineResults: <optional bounded timeline result ledger without error fields>
   linkResults: <optional bounded link result ledger without error fields>
 ```
@@ -162,13 +164,10 @@ mutation based on the projection alone. A clean propose attempt with no writes
 omits `priorAttempt` entirely.
 
 An absent `mode` selects normal mode. Reject any other mode value. Require a
-non-empty `admissionScope` in propose and apply modes. In apply mode, require
-`proposedPages` to be the frozen array accepted by Lore. Create entries have
-exactly `slug`, `effect`, `title`, and `bodyMarkdown`. Update entries add
-exactly `baseMarkdown` and `expectedContentHash`. Update entries contain the
-full intended `bodyMarkdown`, never a diff, plus the exact reviewed page body
-and content hash returned by `get_page`.
-The plan's `capturePageSlug` must appear in `proposedPages`.
+non-empty `admissionScope` in propose and apply modes. Apply mode carries only
+the server-frozen proposal job, proposal digest, and ordered page-digest
+manifest. It never carries page bodies, append text, private baselines, or
+expected hashes. The server retrieves those values from the approved proposal.
 
 Treat omitted `proposedTimelineEntries` and `proposedLinks` as empty arrays.
 `proposedTimelineEntries` may contain at most 40 entries. Each entry contains
@@ -230,10 +229,11 @@ In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
 `add_link`, or `add_timeline_entry`. Read-only discovery and job-evidence
 staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the capture page, meeting page, and every dossier page
-that the scoped ingestion requires. Each update entry contains the full
-intended `bodyMarkdown`, never a diff. Copy the exact body and `content_hash`
-from the `get_page` read used to draft each update into `baseMarkdown` and
-`expectedContentHash`. Omit both fields for a create.
+that the scoped ingestion requires. A create entry is exactly
+`{slug,effect:"create",title,bodyMarkdown}`. An update entry is exactly
+`{slug,effect:"update",appendMarkdown}` and contains only the reviewed Markdown
+to append. Never send a full update body, title, baseline, or content hash; the
+server freezes the current private baseline when it accepts the stage call.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -306,117 +306,47 @@ proposal.
 
 ### Apply mode
 
-Treat `admissionScope`, `proposedPages`, `proposedTimelineEntries`, and
-`proposedLinks` as frozen approved input. Do not reanalyze the artifact, add or
-omit a mutation, change a field, enrich a body, or derive any new mutation.
-Before the first write, read every approved target page and compare it with the
-frozen plan. A create must still be absent, apart from the mechanical collision
-adjustment below. An update must either match its `expectedContentHash` or pass
-the deterministic additions-only rebase rules below. If any page cannot
-proceed, return `refresh_required` without writing any page from this attempt.
-An early `refresh_required` return must still include one `pageResults`,
-`timelineResults`, and `linkResults` entry per frozen mutation in proposal
-order. Leave every unattempted result `pending` with a null error.
-For each page entry in order, write the supplied title and full body exactly with
-`put_page`. For an update, pass its `expectedContentHash` as
-`expected_content_hash`; for a create, pass `expected_content_hash: null` so
-the write fails rather than overwriting a page that appeared after review.
-Then read the page back before marking it applied. Do not begin
-timeline or link mutations until every proposed page is applied.
+In `apply` mode, the nested `approvedProposal` object is the sole page-write
+authority. Require exactly `jobId`, `digest`, `sourceId`, and ordered
+`pages`. Require the nested `sourceId` to equal the top-level `sourceId`,
+the digest and every `pageDigest` to be lowercase SHA-256 values, and pages to
+be one-based, contiguous, ordered entries with exactly `sequence`, `slug`,
+`effect`, and `pageDigest`. Do not accept page bodies, append text, private
+baselines, expected hashes, or slug adjustments in the apply prompt.
 
-If an update returns `stale_page`, read the current page and compare exactly
-three texts: `baseMarkdown`, the approved `bodyMarkdown`, and the current body.
-Never use a model to regenerate, reinterpret, or improve the approved body.
-Attempt an additions-only three-way rebase only when the complete diff from
-`baseMarkdown` to `bodyMarkdown` consists solely of inserted lines and every
-insertion anchor remains unique and unchanged in the current body. Apply those
-exact inserted lines at those exact anchors, without rewriting any current
-line, and call `put_page` with the rebased full body and the newly read
-`currentContentHash` as `expected_content_hash`. Mark the verified result
-`rebased`. If the current body already equals the approved body, mark it
-`already_applied` after verification. If the approved diff deletes or replaces
-text, an anchor changed or became ambiguous, the page disappeared, or the
-conditional rebase is stale again, make no mutation and mark the result
-`refresh_required`. Model regeneration is a new proposal and always requires a
-new human decision.
+Apply each manifest page in sequence with
+`brain_apply_ingestion_proposal_page`. Send exactly:
 
-The only permitted plan change is a mechanical slug adjustment for a `create`
-slug collision discovered at write time. Before the first write, read every
-planned create slug and freeze all collision adjustments. The adjusted
-slug is the proposed slug plus a short mechanical disambiguator: append
-`-<suffix>` where the suffix is 1-16 lowercase alphanumeric characters
-(for example `-2`). No other adjusted form is valid, and the adjusted
-slug must not equal any other planned or adjusted slug. Mechanically update
-references to that slug in all frozen page bodies, and report the mapping in
-`slugAdjustments`. No other plan adjustment is allowed. A missing or
-identity-conflicted `update` target is an operational failure, not permission to
-change the plan. On retry, reuse a prior recorded adjustment after verifying
-the adjusted slug still identifies the intended page.
+```json
+{
+  "proposal_job_id": 123,
+  "proposal_digest": "64 lowercase hex characters",
+  "sequence": 1,
+  "page_digest": "64 lowercase hex characters",
+  "source_id": "verified source id"
+}
+```
 
-Record the actual source-qualified slug in `createdPages` or `updatedPages` and
-set the page result to `written` immediately after a successful mutation. Then
-confirm the read-back title and body match the frozen entry, subject only to a
-recorded collision adjustment. Also confirm the written page does not
-contradict `admissionScope`; the capture page must retain its local-mirror
-provenance statement without naming the exclusion. Add the page to
-`verifiedPages` and set the result to `applied` only after these checks.
+Copy every value from `approvedProposal`; never send `slug`, `effect`,
+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
+content hash. The operation resolves the frozen page server-side, rejects
+authority or create collisions, performs the conditional write, safely rebases
+only an append-only update, records a durable per-sequence receipt, and verifies
+the resulting page state. Do not pre-read or reimplement its compare-and-swap
+logic with `get_page` or `put_page`.
 
-Initialize one `pageResults` entry per proposed page in proposal order. Its
-status is `pending` until attempted, `written` after the write but before
-successful verification, `applied`, `rebased`, or `already_applied` after the
-corresponding read-back and scope verification, `refresh_required` when the
-approved update cannot be applied safely, and `failed` with a compact error
-after another failed write. Copy the frozen update hash into
-`expectedContentHash`, use null for creates, and record the verified final page
-hash in `appliedContentHash` only after read-back. A verification failure
-leaves the result `written` with a compact error. Stop after the first failed or
-unverified result and leave later entries pending. On retry, inspect
-`priorAttempt`. Skip a prior `applied` result only after read-back confirms its
-recorded page still matches the frozen entry and scope. Resume a prior `written`
-result at its recorded actual slug; verify it first, rewrite the exact frozen
-entry at that slug only if it does not match, then verify again. Retry failed
-and pending entries. This is the resumable apply boundary.
-Always include `pageResults` for every proposed page and include
-`slugAdjustments` as an empty array when no collision occurred. Always
-include `timelineResults` and `linkResults`, as empty arrays when the plan
-proposed no timeline entries or links.
+A successful call returns `status` `applied` or `already_applied`, plus the
+bound `effect`, `slug`, hashes, and `rebased` flag. Record that exact
+bounded result. Stop after the first failed call and leave later sequences
+pending. Retry only failed or pending sequences with the identical authority;
+replaying a completed sequence is safe only through the same operation, which
+returns `already_applied` after checking current durable page state.
 
-After all pages are applied, apply every recorded slug adjustment to
-`pageSlug`, `ref`, `from`, and `to` whenever the frozen value equals an adjusted
-planned slug. This mechanical mapping is the only permitted change to a
-timeline entry or link.
-
-Initialize one `timelineResults` entry per proposed timeline entry and one
-`linkResults` entry per proposed link, preserving proposal order. Each status
-is `pending` until attempted, `applied` after mutation and verification, or
-`failed` with a compact error after either step fails. Every timeline result
-copies the mapped frozen `pageSlug`, `date`, `text`, `ref`, and optional
-`refLabel`; every link result copies the mapped frozen `from`, `to`, and
-`type`. Keep those identifiers unqualified, and do not add positional
-`index` or alternate `page` fields. For each timeline entry in order, call
-`add_timeline_entry` exactly once with the mapped frozen values:
-map `pageSlug` to `slug`, `text` to `summary`, and `refLabel` to `ref_label`;
-pass `date` and `ref` unchanged except for the recorded slug mapping. Read the
-actual timeline target back with `get_page` and confirm the exact dated entry,
-text, capture-page reference, and optional label are visible before marking it
-applied.
-
-After all timeline entries are applied, call `add_link` for each proposed link
-in order with its mapped `from` and `to`; map `type` to `link_type` and do not
-invent context or provenance fields. Verify the exact edge with both
-`get_links` and `get_backlinks` before marking it applied. Stop after the first
-failed timeline or link mutation and leave all later mutation results pending.
-
-On retry, inspect `timelineResults` and `linkResults` in `priorAttempt`. Retry
-only `pending` and `failed` timeline or link results. Before retrying a
-`pending` or `failed` timeline result, read the target page and check for the
-exact frozen entry. When that entry is already visible, mark the result
-`applied` without calling `add_timeline_entry` again; call it only when the
-entry is absent. Skip a prior `applied` mutation only after its read-back
-verification still passes; otherwise retry the exact frozen mutation. Always
-include both result arrays in an apply receipt, using empty arrays when the
-plan omitted that mutation kind. Never execute a page, timeline entry, or link
-absent from the frozen plan.
+This operation authorizes pages only. If the approved proposal contains
+timeline or typed-link mutations, return `failed` without calling generic
+`add_timeline_entry`, `add_link`, or `put_page`; those effects require
+their own server-bound proposal operations. Never report the proposal fully
+applied while any planned effect lacks an authorized actionable outcome.
 
 ## Workflow
 
@@ -584,8 +514,7 @@ writes honestly so a later attempt can continue without duplication.
   from `proposedTimelineEntries`.
 - Applying timeline entries or links before the frozen pages, or applying a
   mutation absent from the frozen plan.
-- Reinterpreting an approved plan or changing it for anything except a
-  write-time create-slug collision.
+- Reinterpreting an approved plan or attempting a client-side slug adjustment.
 - Naming excluded material or `admissionScope` inside a destination page.
 - Reporting success from mutation responses without read-back verification.
 - Returning prose, Markdown fences, or fields outside the receipt.
@@ -656,9 +585,7 @@ For a normal write result:
 }
 ```
 
-For an apply result, keep the normal page arrays and add resumable page,
-timeline, link, and collision details. Array entries in `createdPages`,
-`updatedPages`, and `verifiedPages` remain source-qualified identifiers only.
+For an apply result, retain the normal page arrays and add the complete ordered page ledger.
 
 ```json
 {
@@ -666,47 +593,27 @@ timeline, link, and collision details. Array entries in `createdPages`,
   "artifactId": "copied exactly from the prompt",
   "sourceId": "verified source id",
   "summary": "compact apply outcome",
-  "createdPages": ["<sourceId>:<actual-slug>"],
-  "updatedPages": ["<sourceId>:<actual-slug>"],
-  "verifiedPages": ["<sourceId>:<actual-slug>"],
+  "createdPages": ["<sourceId>:<slug>"],
+  "updatedPages": ["<sourceId>:<slug>"],
+  "verifiedPages": ["<sourceId>:<slug>"],
   "pageResults": [
     {
-      "proposedSlug": "sources/granola/example",
-      "appliedPage": "<sourceId>:<actual-slug> | null",
+      "proposalSequence": 1,
+      "proposedSlug": "sources/example",
       "effect": "create | update",
-      "status": "pending | written | applied | rebased | already_applied | refresh_required | failed",
-      "expectedContentHash": "reviewed hash for updates, null for creates",
-      "appliedContentHash": "verified final hash or null",
+      "status": "pending | applied | already_applied | failed",
+      "previousContentHash": "64 lowercase hex characters or null",
+      "appliedContentHash": "64 lowercase hex characters or null",
+      "rebased": false,
       "error": "null or compact failure"
     }
   ],
-  "slugAdjustments": [
-    {
-      "proposedSlug": "sources/granola/example",
-      "appliedSlug": "sources/granola/example-2",
-      "reason": "slug_collision"
-    }
-  ],
-  "timelineResults": [
-    {
-      "pageSlug": "projects/example",
-      "date": "2026-08-03",
-      "text": "material dated event",
-      "ref": "sources/granola/example",
-      "refLabel": "meeting capture",
-      "status": "pending | applied | failed",
-      "error": "null or compact failure"
-    }
-  ],
-  "linkResults": [
-    {
-      "from": "meetings/example",
-      "to": "projects/example",
-      "type": "discusses",
-      "status": "pending | applied | failed",
-      "error": "null or compact failure"
-    }
-  ],
-  "unresolved": ["specific unresolved completion defects"]
+  "timelineResults": [],
+  "linkResults": [],
+  "unresolved": []
 }
 ```
+
+Populate `createdPages`, `updatedPages`, and `verifiedPages` only from exact
+successful operation results. A failed call has null output-derived fields until
+an authorized retry succeeds. Keep every unattempted sequence pending.

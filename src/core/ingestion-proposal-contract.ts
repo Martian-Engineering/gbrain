@@ -21,10 +21,11 @@ export const PROPOSAL_ADMISSION_SCOPE_MAX_CHARS = 4_000;
 /** Canonical operation used to stage one ingestion proposal page. */
 export const STAGE_PROPOSAL_TOOL_NAME = 'brain_stage_ingestion_proposal_page';
 
-const SHA256_RE = /^[a-f0-9]{64}$/;
 const CANONICAL_SLUG_CHARS = 'a-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af';
 const PAGE_SLUG_SEGMENT = `[${CANONICAL_SLUG_CHARS}][${CANONICAL_SLUG_CHARS}-]*`;
 const PAGE_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEGMENT}(\\/${PAGE_SLUG_SEGMENT})*$`);
+const MANAGED_REGION_MARKER_RE = /<!---?\s*gbrain:[a-z0-9_-]+:(?:begin|end)\s*-->/i;
+const TIMELINE_SENTINEL_RE = /<!--\s*timeline\s*-->|^\s*---\s+timeline\s+---\s*$|^\s*---\s*$[\r\n]+\s*##\s+(?:timeline|history)\b/im;
 
 /** Error raised when staged proposal evidence violates its durable contract. */
 export class AgentJobProposalError extends Error {
@@ -55,15 +56,39 @@ export interface StageProposalPageResult extends ProposalPageDigest {
   nextExpectedSlot: ({ sequence: number } & ProposalPageInventoryEntry) | null;
 }
 
-/** Complete page mutation admitted to one scoped ingestion proposal. */
-export interface ScopedProposalPage {
+/** Complete page creation admitted to one scoped ingestion proposal. */
+export interface ScopedProposalCreatePage {
   slug: string;
-  effect: 'create' | 'update';
+  effect: 'create';
   title: string;
   bodyMarkdown: string;
-  baseMarkdown?: string;
-  expectedContentHash?: string;
 }
+
+/** Compact append intent for one existing page. */
+export interface ScopedProposalUpdatePage {
+  slug: string;
+  effect: 'update';
+  appendMarkdown: string;
+}
+
+/** Reject append text that could create or close a server-managed region. */
+function assertNoManagedRegionMarker(markdown: string): void {
+  if (MANAGED_REGION_MARKER_RE.test(markdown)) {
+    throw new AgentJobProposalError(
+      'managed_region_marker',
+      'appendMarkdown must not contain a GBrain managed-region marker.',
+    );
+  }
+  if (TIMELINE_SENTINEL_RE.test(markdown)) {
+    throw new AgentJobProposalError(
+      'timeline_sentinel',
+      'appendMarkdown must not contain a structural timeline or history sentinel.',
+    );
+  }
+}
+
+/** One public page mutation admitted to a scoped ingestion proposal. */
+export type ScopedProposalPage = ScopedProposalCreatePage | ScopedProposalUpdatePage;
 
 /** External tool input for one ordered proposal page. */
 export interface StageProposalPageInput {
@@ -84,7 +109,6 @@ export interface ParsedStageProposalPageCore {
   sequence: number;
   totalPages: number;
   page: ScopedProposalPage;
-  pageDigest: string;
 }
 
 /** Fully validated page-stage input with its normalized repeated inventory. */
@@ -139,7 +163,6 @@ export function parseStageProposalPageCore(raw: unknown): ParsedStageProposalPag
     sequence,
     totalPages,
     page,
-    pageDigest: digestProposalValue(page),
   };
 }
 
@@ -257,7 +280,7 @@ function parseInventoryEntries(raw: unknown, totalPages?: number): ProposalPageI
   });
 }
 
-/** Parse one complete create or update page under the staged proposal contract. */
+/** Parse one complete create or compact update under the staged proposal contract. */
 export function parseProposalPage(raw: unknown): ScopedProposalPage {
   const page = readRecord(raw, 'page');
   if (page.effect !== 'create' && page.effect !== 'update') {
@@ -265,18 +288,18 @@ export function parseProposalPage(raw: unknown): ScopedProposalPage {
   }
   const allowed = page.effect === 'create'
     ? ['slug', 'effect', 'title', 'bodyMarkdown']
-    : ['slug', 'effect', 'title', 'bodyMarkdown', 'baseMarkdown', 'expectedContentHash'];
+    : ['slug', 'effect', 'appendMarkdown'];
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
+  if (page.effect === 'update') {
+    const appendMarkdown = readNonBlankString(page.appendMarkdown, 'page.appendMarkdown');
+    assertNoManagedRegionMarker(appendMarkdown);
+    return { slug, effect: page.effect, appendMarkdown };
+  }
   const title = readBoundedString(page.title, 'page.title', 1_000);
   const bodyMarkdown = readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
-  if (page.effect === 'create') return { slug, effect: page.effect, title, bodyMarkdown };
-  const baseMarkdown = readNonBlankString(page.baseMarkdown, 'page.baseMarkdown');
-  const expectedContentHash = readString(page.expectedContentHash, 'page.expectedContentHash');
-  if (!SHA256_RE.test(expectedContentHash)) {
-    throw new AgentJobProposalError('invalid_page', 'page.expectedContentHash must be a lowercase SHA-256 digest.');
-  }
-  return { slug, effect: page.effect, title, bodyMarkdown, baseMarkdown, expectedContentHash };
+  assertNoManagedRegionMarker(bodyMarkdown);
+  return { slug, effect: page.effect, title, bodyMarkdown };
 }
 
 /** Format one-based duplicate positions as a compact correction hint. */
