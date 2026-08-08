@@ -258,6 +258,10 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     const crossingInput = {
       artifact_id: 'artifact-1', source_id: 'company',
       admission_scope: 'Derived scope.', sequence: 2, total_pages: 2,
+      page_inventory: [
+        { slug: 'sources/large-1', effect: 'create' },
+        { slug: 'sources/large-2', effect: 'create' },
+      ],
       page: {
         slug: 'sources/large-2', effect: 'create', title: 'Large',
         bodyMarkdown: 'x'.repeat(80_000),

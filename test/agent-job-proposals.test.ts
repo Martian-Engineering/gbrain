@@ -14,9 +14,11 @@ import {
   finalizeAgentJobProposal,
   getOwnedAgentJobProposal,
   stageAgentJobProposalPage,
+  type ProposalPageInventoryEntry,
   type ScopedProposalPage,
 } from '../src/core/minions/agent-job-proposals.ts';
 import { compactToolLoopMessages } from '../src/core/ai/tool-loop-context.ts';
+import { proposalInventoryContextPolicy } from '../src/core/ingestion-proposal-context-policy.ts';
 import type { ChatMessage } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -53,6 +55,22 @@ async function seedJob(overrides: Record<string, unknown> = {}): Promise<number>
   return Number(rows[0]!.id);
 }
 
+async function seedStoredPage(
+  slug: string,
+  sourceId = 'company',
+  deleted = false,
+): Promise<void> {
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
+    [sourceId],
+  );
+  await engine.executeRaw(
+    `INSERT INTO pages (source_id, slug, type, title, compiled_truth, deleted_at)
+     VALUES ($1, $2, 'note', 'Existing page', '# Existing', CASE WHEN $3 THEN now() ELSE NULL END)`,
+    [sourceId, slug, deleted],
+  );
+}
+
 function createPage(slug: string, bodyMarkdown = '# Page'): ScopedProposalPage {
   return { slug, effect: 'create', title: 'Page', bodyMarkdown };
 }
@@ -68,12 +86,17 @@ function updatePage(slug: string, suffix = ''): ScopedProposalPage {
   };
 }
 
+function pageInventory(...pages: ScopedProposalPage[]): ProposalPageInventoryEntry[] {
+  return pages.map(({ slug, effect }) => ({ slug, effect }));
+}
+
 async function stage(
   jobId: number,
   sequence: number,
   totalPages: number,
   page: ScopedProposalPage,
   admissionScope = 'Include project delivery notes.',
+  inventory: ProposalPageInventoryEntry[] = pageInventory(page),
 ) {
   return stageAgentJobProposalPage(engine, jobId, {
     artifact_id: 'artifact-1',
@@ -81,6 +104,7 @@ async function stage(
     admission_scope: admissionScope,
     sequence,
     total_pages: totalPages,
+    page_inventory: inventory,
     page,
   });
 }
@@ -121,7 +145,8 @@ describe('durable agent-job proposal staging', () => {
       .rejects.toMatchObject({ code: 'invalid_slug' });
     await expect(stage(jobId, 1, 1, createPage('sources/αθήνα')))
       .rejects.toMatchObject({ code: 'invalid_slug' });
-    await expect(stage(jobId, 1, 1, createPage('sources/東京')))
+    const cjkJobId = await seedJob({ proposal_capture_page_slug: 'sources/東京' });
+    await expect(stage(cjkJobId, 1, 1, createPage('sources/東京')))
       .resolves.toMatchObject({ slug: 'sources/東京' });
   });
 
@@ -138,9 +163,15 @@ describe('durable agent-job proposal staging', () => {
   });
 
   it('stages exact pages, finalizes an ordered manifest, and retrieves the full owned plan', async () => {
+    await seedStoredPage('projects/example');
     const jobId = await seedJob();
-    const first = await stage(jobId, 1, 2, createPage('sources/example'));
-    const second = await stage(jobId, 2, 2, updatePage('projects/example'));
+    const pages = [createPage('sources/example'), updatePage('projects/example')];
+    const inventory = pageInventory(...pages);
+    const first = await stage(jobId, 1, 2, pages[0]!, undefined, inventory);
+    const second = await stage(jobId, 2, 2, pages[1]!, undefined, inventory);
+
+    expect(first.nextExpectedSlot).toEqual({ sequence: 2, ...inventory[1]! });
+    expect(second.nextExpectedSlot).toBeNull();
 
     const manifest = await finalizeAgentJobProposal(engine, jobId, {
       artifact_id: 'artifact-1',
@@ -158,7 +189,10 @@ describe('durable agent-job proposal staging', () => {
       unresolved: [],
     });
 
-    expect(manifest.pageDigests).toEqual([first, second]);
+    expect(manifest.pageDigests).toEqual([
+      { sequence: first.sequence, slug: first.slug, digest: first.digest },
+      { sequence: second.sequence, slug: second.slug, digest: second.digest },
+    ]);
     expect(manifest.status).toBe('staged_proposal');
     expect(manifest.proposalDigest).toMatch(/^[a-f0-9]{64}$/);
     const owned = await getOwnedAgentJobProposal(
@@ -176,23 +210,40 @@ describe('durable agent-job proposal staging', () => {
     expect(digestProposalValue(owned.plan)).toBe(manifest.proposalDigest);
   });
 
-  it('finalizes from the durable ordered manifest after old stage outputs compact away', async () => {
+  it('finalizes durably while the newest retained stage call carries the full inventory', async () => {
     const jobId = await seedJob();
+    const pages = [
+      createPage('sources/example'),
+      createPage('projects/example-2'),
+      createPage('projects/example-3'),
+      createPage('projects/example-4'),
+    ];
+    const inventory = pageInventory(...pages);
+    const largeBodyMarker = `LARGE_STAGED_PAGE_${'x'.repeat(22_000)}`;
     const staged = [
-      await stage(jobId, 1, 4, createPage('sources/example')),
-      await stage(jobId, 2, 4, createPage('projects/example-2')),
-      await stage(jobId, 3, 4, createPage('projects/example-3')),
-      await stage(jobId, 4, 4, createPage('projects/example-4')),
+      await stage(jobId, 1, 4, pages[0]!, undefined, inventory),
+      await stage(jobId, 2, 4, pages[1]!, undefined, inventory),
+      await stage(jobId, 3, 4, pages[2]!, undefined, inventory),
+      await stage(jobId, 4, 4, pages[3]!, undefined, inventory),
     ];
     const messages: ChatMessage[] = [{ role: 'user', content: 'Build the exact ingestion proposal.' }];
     for (const page of staged) {
+      const proposedPage = pages[page.sequence - 1]!;
       messages.push({
         role: 'assistant',
         content: [{
           type: 'tool-call',
           toolCallId: `stage-${page.sequence}`,
           toolName: 'brain_stage_ingestion_proposal_page',
-          input: { sequence: page.sequence, body: 'x'.repeat(1_500) },
+          input: {
+            artifact_id: 'artifact-1',
+            source_id: 'company',
+            admission_scope: 'Include project delivery notes.',
+            sequence: page.sequence,
+            total_pages: inventory.length,
+            page_inventory: inventory,
+            page: { ...proposedPage, bodyMarkdown: largeBodyMarker },
+          },
         }],
       });
       messages.push({
@@ -205,10 +256,21 @@ describe('durable agent-job proposal staging', () => {
         }],
       });
     }
-    const compacted = compactToolLoopMessages(messages, 2_000, { mutatingToolNames: new Set() });
+    const compacted = compactToolLoopMessages(messages, 5_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    });
     const compactedJson = JSON.stringify(compacted);
-    expect(compactedJson).not.toContain(staged[0]!.digest);
     expect(compactedJson).toContain(staged[3]!.digest);
+    expect(compactedJson).toContain('sources/example');
+    expect(compactedJson).toContain('working_context_projection');
+    expect(compactedJson).not.toContain('LARGE_STAGED_PAGE_');
+    const latestCall = compacted
+      .flatMap(message => typeof message.content === 'string' ? [] : message.content)
+      .findLast(block => block.type === 'tool-call');
+    expect(latestCall?.type).toBe('tool-call');
+    if (latestCall?.type !== 'tool-call') throw new Error('Missing retained stage call');
+    expect((latestCall.input as Record<string, unknown>).page_inventory).toEqual(inventory);
 
     const manifest = await finalizeAgentJobProposal(engine, jobId, {
       artifact_id: 'artifact-1',
@@ -217,12 +279,218 @@ describe('durable agent-job proposal staging', () => {
       total_pages: 4,
       summary: 'Ready after compaction.',
     });
-    expect(manifest.pageDigests).toEqual(staged);
+    expect(manifest.pageDigests).toEqual(staged.map(({ sequence, slug, digest }) => ({
+      sequence, slug, digest,
+    })));
+  });
+
+  it('rejects duplicate inventory only at execution and leaves first-stage binding untouched', async () => {
+    const jobId = await seedJob({ proposal_admission_scope: null });
+    const page = createPage('sources/example');
+    const input = {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Derived resolver scope.',
+      sequence: 1, total_pages: 2,
+      page_inventory: [
+        { slug: 'sources/example', effect: 'create' },
+        { slug: 'sources/example', effect: 'update' },
+      ],
+      page,
+    };
+
+    await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
+      type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input,
+    }])).resolves.toBeUndefined();
+    await expect(stageAgentJobProposalPage(engine, jobId, input))
+      .rejects.toMatchObject({
+        code: 'duplicate_page_inventory',
+        message: expect.stringMatching(/sources\/example.*positions 1 and 2.*consolidate.*retry/i),
+      });
+
+    const [row] = await engine.executeRaw<{ scope: string | null; inventory: unknown; fragment_count: string }>(
+      `SELECT data->>'proposal_admission_scope' AS scope,
+              data->'proposal_page_inventory' AS inventory,
+              (SELECT count(*)::text FROM agent_job_proposal_fragments WHERE job_id = minion_jobs.id) AS fragment_count
+         FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(row).toMatchObject({ scope: null, inventory: null, fragment_count: '0' });
+  });
+
+  it('validates the complete inventory before freezing it', async () => {
+    const cases: Array<{ inventory: unknown; page: ScopedProposalPage; code: string }> = [
+      {
+        inventory: [
+          { slug: 'sources/example', effect: 'create' },
+          { slug: 'projects/extra', effect: 'create' },
+        ],
+        page: createPage('sources/example'),
+        code: 'invalid_page_inventory',
+      },
+      {
+        inventory: [{ slug: 'projects/example', effect: 'create' }],
+        page: createPage('projects/example'),
+        code: 'missing_capture_inventory',
+      },
+      {
+        inventory: [
+          { slug: 'sources/example', effect: 'create' },
+          { slug: 'private/example', effect: 'create' },
+        ],
+        page: createPage('private/example'),
+        code: 'slug_not_allowed',
+      },
+      {
+        inventory: [{ slug: 'sources/example', effect: 'update' }],
+        page: createPage('sources/example'),
+        code: 'inventory_slot_mismatch',
+      },
+    ];
+
+    for (const testCase of cases) {
+      const jobId = await seedJob({ proposal_admission_scope: null });
+      await expect(stageAgentJobProposalPage(engine, jobId, {
+        artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Derived scope.',
+        sequence: testCase.code === 'slug_not_allowed' ? 2 : 1,
+        total_pages: testCase.code === 'invalid_page_inventory'
+          ? 1
+          : Array.isArray(testCase.inventory) ? testCase.inventory.length : 1,
+        page_inventory: testCase.inventory,
+        page: testCase.page,
+      })).rejects.toMatchObject({ code: testCase.code });
+      const [row] = await engine.executeRaw<{ scope: string | null; inventory: unknown }>(
+        `SELECT data->>'proposal_admission_scope' AS scope,
+                data->'proposal_page_inventory' AS inventory
+           FROM minion_jobs WHERE id = $1`,
+        [jobId],
+      );
+      expect(row).toEqual({ scope: null, inventory: null });
+    }
+  });
+
+  it('reports every first-stage effect mismatch without freezing the correctable plan', async () => {
+    await seedStoredPage('sources/example');
+    await seedStoredPage('projects/other-source', 'other');
+    await seedStoredPage('projects/deleted', 'company', true);
+    const jobId = await seedJob({ proposal_admission_scope: null });
+    const mismatchedInventory: ProposalPageInventoryEntry[] = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/missing', effect: 'update' },
+      { slug: 'projects/other-source', effect: 'create' },
+      { slug: 'projects/deleted', effect: 'create' },
+    ];
+
+    const mismatch = await stage(
+      jobId,
+      1,
+      mismatchedInventory.length,
+      createPage('sources/example'),
+      'Correctable scope.',
+      mismatchedInventory,
+    ).then(() => null, error => error as Error & { code: string });
+    expect(mismatch).toMatchObject({
+      code: 'inventory_effect_mismatch',
+      message: expect.stringMatching(
+        /sources\/example.*exists.*marked create.*use update.*exact baseline.*projects\/missing.*does not exist.*marked update.*use create.*projects\/deleted.*soft-deleted.*restore.*repair/is,
+      ),
+    });
+    const mismatchText = String(mismatch);
+    expect(mismatchText).not.toContain('projects/other-source');
+
+    const [untouched] = await engine.executeRaw<{
+      scope: string | null;
+      inventory: unknown;
+      fragment_count: string;
+    }>(
+      `SELECT data->>'proposal_admission_scope' AS scope,
+              data->'proposal_page_inventory' AS inventory,
+              (SELECT count(*)::text FROM agent_job_proposal_fragments WHERE job_id = minion_jobs.id) AS fragment_count
+         FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(untouched).toEqual({ scope: null, inventory: null, fragment_count: '0' });
+
+    await expect(stage(
+      jobId,
+      1,
+      1,
+      updatePage('sources/example'),
+      'Correctable scope.',
+      [{ slug: 'sources/example', effect: 'update' }],
+    )).resolves.toMatchObject({ nextExpectedSlot: null });
+  });
+
+  it('rejects a soft-deleted capture before freezing proposal state', async () => {
+    await seedStoredPage('sources/example', 'company', true);
+    const jobId = await seedJob({ proposal_admission_scope: null });
+
+    await expect(stage(
+      jobId,
+      1,
+      1,
+      createPage('sources/example'),
+      'Correctable scope.',
+    )).rejects.toMatchObject({
+      code: 'inventory_effect_mismatch',
+      message: expect.stringMatching(/sources\/example.*soft-deleted.*restore.*repair.*do not mark it create/is),
+    });
+
+    const [untouched] = await engine.executeRaw<{
+      scope: string | null;
+      inventory: unknown;
+      fragment_count: string;
+    }>(
+      `SELECT data->>'proposal_admission_scope' AS scope,
+              data->'proposal_page_inventory' AS inventory,
+              (SELECT count(*)::text FROM agent_job_proposal_fragments WHERE job_id = minion_jobs.id) AS fragment_count
+         FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(untouched).toEqual({ scope: null, inventory: null, fragment_count: '0' });
+  });
+
+  it('freezes one exact inventory and rejects changed later calls before inserting a fragment', async () => {
+    const jobId = await seedJob();
+    const pages = [createPage('sources/example'), createPage('projects/example')];
+    const inventory = pageInventory(...pages);
+    await stage(jobId, 1, 2, pages[0]!, undefined, inventory);
+
+    const [frozen] = await engine.executeRaw<{ inventory: unknown }>(
+      `SELECT data->'proposal_page_inventory' AS inventory FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(frozen!.inventory).toEqual(inventory);
+    await expect(stage(jobId, 2, 2, pages[1]!, undefined, [
+      inventory[0]!, { slug: 'projects/changed', effect: 'create' },
+    ])).rejects.toMatchObject({ code: 'inventory_mismatch' });
+    const [{ count }] = await engine.executeRaw<{ count: string }>(
+      `SELECT count(*)::text AS count FROM agent_job_proposal_fragments WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(count).toBe('1');
+  });
+
+  it('revalidates the frozen inventory against every fragment at finalization', async () => {
+    const jobId = await seedJob();
+    const page = createPage('sources/example');
+    await stage(jobId, 1, 1, page);
+    await engine.executeRaw(
+      `UPDATE minion_jobs
+          SET data = jsonb_set(data, '{proposal_page_inventory}', $2::text::jsonb, true)
+        WHERE id = $1`,
+      [jobId, JSON.stringify([{ slug: 'sources/example', effect: 'update' }])],
+    );
+
+    await expect(finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
+      total_pages: 1, summary: 'Tampered inventory.',
+    })).rejects.toMatchObject({ code: 'inventory_slot_mismatch' });
   });
 
   it('freezes a previously-null admission scope on the first stage only', async () => {
     const jobId = await seedJob({ proposal_admission_scope: null });
-    const page = createPage('sources/example');
+    const pages = [createPage('sources/example'), createPage('projects/example')];
+    const inventory = pageInventory(...pages);
+    const page = pages[0]!;
     const firstInput = {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Derived resolver scope.',
       sequence: 1, total_pages: 2, page,
@@ -235,14 +503,14 @@ describe('durable agent-job proposal staging', () => {
       [jobId],
     );
     expect(preflightRow!.scope).toBeNull();
-    const first = await stage(jobId, 1, 2, page, 'Derived resolver scope.');
-    expect(await stage(jobId, 1, 2, page, 'Derived resolver scope.')).toEqual(first);
+    const first = await stage(jobId, 1, 2, page, 'Derived resolver scope.', inventory);
+    expect(await stage(jobId, 1, 2, page, 'Derived resolver scope.', inventory)).toEqual(first);
     const [row] = await engine.executeRaw<{ scope: string | null }>(
       `SELECT data->>'proposal_admission_scope' AS scope FROM minion_jobs WHERE id = $1`,
       [jobId],
     );
     expect(row!.scope).toBe('Derived resolver scope.');
-    await expect(stage(jobId, 2, 2, createPage('projects/example'), 'Different scope.'))
+    await expect(stage(jobId, 2, 2, pages[1]!, 'Different scope.', inventory))
       .rejects.toMatchObject({ code: 'binding_mismatch' });
   });
 
@@ -282,12 +550,22 @@ describe('durable agent-job proposal staging', () => {
 
   it('fences proposed page, timeline target, link source, and exact capture provenance', async () => {
     const unauthorizedJob = await seedJob();
-    await expect(stage(unauthorizedJob, 1, 1, createPage('private/example')))
+    const unauthorizedPages = [createPage('sources/example'), createPage('private/example')];
+    await expect(stage(
+      unauthorizedJob,
+      2,
+      2,
+      unauthorizedPages[1]!,
+      undefined,
+      pageInventory(...unauthorizedPages),
+    ))
       .rejects.toMatchObject({ code: 'slug_not_allowed' });
 
     const jobId = await seedJob();
-    await stage(jobId, 1, 2, createPage('sources/example'));
-    await stage(jobId, 2, 2, createPage('projects/example'));
+    const pages = [createPage('sources/example'), createPage('projects/example')];
+    const inventory = pageInventory(...pages);
+    await stage(jobId, 1, 2, pages[0]!, undefined, inventory);
+    await stage(jobId, 2, 2, pages[1]!, undefined, inventory);
     const common = {
       artifact_id: 'artifact-1', source_id: 'company',
       admission_scope: 'Include project delivery notes.', total_pages: 2,
@@ -311,11 +589,8 @@ describe('durable agent-job proposal staging', () => {
     })).rejects.toMatchObject({ code: 'slug_not_allowed' });
 
     const missingCaptureJob = await seedJob();
-    await stage(missingCaptureJob, 1, 1, createPage('projects/example'));
-    await expect(finalizeAgentJobProposal(engine, missingCaptureJob, {
-      artifact_id: 'artifact-1', source_id: 'company',
-      admission_scope: 'Include project delivery notes.', total_pages: 1, summary: 'Missing capture.',
-    })).rejects.toMatchObject({ code: 'missing_capture_page' });
+    await expect(stage(missingCaptureJob, 1, 1, createPage('projects/example')))
+      .rejects.toMatchObject({ code: 'missing_capture_inventory' });
   });
 
   it('rejects duplicate canonical timeline and link mutations', async () => {
@@ -388,7 +663,11 @@ describe('durable agent-job proposal staging', () => {
 
   it('rejects gaps, corrupted stored digests, and duplicate page slugs', async () => {
     const gapJob = await seedJob();
-    await stage(gapJob, 1, 2, createPage('sources/gap'));
+    const gapPage = createPage('sources/gap');
+    await stage(gapJob, 1, 2, gapPage, undefined, [
+      { slug: gapPage.slug, effect: gapPage.effect },
+      { slug: 'sources/example', effect: 'create' },
+    ]);
     await expect(finalizeAgentJobProposal(engine, gapJob, {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       total_pages: 2, summary: 'Gap.',
@@ -405,9 +684,19 @@ describe('durable agent-job proposal staging', () => {
       total_pages: 1, summary: 'Mismatch.',
     })).rejects.toMatchObject({ code: 'digest_mismatch' });
 
-    const duplicatePageJob = await seedJob();
-    await stage(duplicatePageJob, 1, 2, createPage('sources/same'));
-    await stage(duplicatePageJob, 2, 2, updatePage('sources/same'));
+    const duplicatePageJob = await seedJob({ proposal_capture_page_slug: 'sources/same' });
+    await seedStoredPage('projects/other');
+    const uniquePages = [createPage('sources/same'), updatePage('projects/other')];
+    const uniqueInventory = pageInventory(...uniquePages);
+    await stage(duplicatePageJob, 1, 2, uniquePages[0]!, undefined, uniqueInventory);
+    await stage(duplicatePageJob, 2, 2, uniquePages[1]!, undefined, uniqueInventory);
+    const duplicatePage = updatePage('sources/same');
+    await engine.executeRaw(
+      `UPDATE agent_job_proposal_fragments
+          SET page = $2::text::jsonb, page_digest = $3
+        WHERE job_id = $1 AND sequence = 2`,
+      [duplicatePageJob, canonicalProposalJson(duplicatePage), digestProposalValue(duplicatePage)],
+    );
     await expect(finalizeAgentJobProposal(engine, duplicatePageJob, {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       total_pages: 2, summary: 'Duplicate page.',
@@ -455,7 +744,9 @@ describe('durable agent-job proposal staging', () => {
     const jobId = await seedJob();
     await expect(stageAgentJobProposalPage(engine, jobId, {
       artifact_id: 'other', source_id: 'company', admission_scope: 'Include project delivery notes.',
-      sequence: 1, total_pages: 1, page: createPage('sources/example'),
+      sequence: 1, total_pages: 1,
+      page_inventory: [{ slug: 'sources/example', effect: 'create' }],
+      page: createPage('sources/example'),
     })).rejects.toMatchObject({ code: 'binding_mismatch' });
 
     await stage(jobId, 1, 1, createPage('sources/example'));
@@ -487,16 +778,20 @@ describe('durable agent-job proposal staging', () => {
   });
 
   it('rejects cumulative staged pages over the aggregate ceiling without persisting the crossing fragment', async () => {
-    const jobId = await seedJob();
+    const jobId = await seedJob({ proposal_capture_page_slug: 'sources/large-1' });
     const pageCount = 2;
+    const pages = Array.from({ length: pageCount }, (_, index) => (
+      createPage(`sources/large-${index + 1}`, 'x'.repeat(80_000))
+    ));
+    const inventory = pageInventory(...pages);
     for (let sequence = 1; sequence < pageCount; sequence++) {
-      const page = createPage(`sources/large-${sequence}`, 'x'.repeat(80_000));
-      await stage(jobId, sequence, pageCount, page);
+      await stage(jobId, sequence, pageCount, pages[sequence - 1]!, undefined, inventory);
     }
     const crossingInput = {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       sequence: pageCount, total_pages: pageCount,
-      page: createPage(`sources/large-${pageCount}`, 'x'.repeat(80_000)),
+      page_inventory: inventory,
+      page: pages[pageCount - 1]!,
     };
     await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
       type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input: crossingInput,
@@ -504,7 +799,8 @@ describe('durable agent-job proposal staging', () => {
     const replayInput = {
       artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
       sequence: pageCount - 1, total_pages: pageCount,
-      page: createPage(`sources/large-${pageCount - 1}`, 'x'.repeat(80_000)),
+      page_inventory: inventory,
+      page: pages[pageCount - 2]!,
     };
     await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
       type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input: replayInput,

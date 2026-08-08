@@ -236,7 +236,16 @@ from the `get_page` read used to draft each update into `baseMarkdown` and
 `expectedContentHash`. Omit both fields for a create.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
-and stable `total_pages`; the inventory may contain at most 32 pages. Once the
+and stable `total_pages`; the inventory may contain at most 32 pages. Represent
+the inventory as exact `{slug,effect}` entries. Each canonical slug appears exactly
+once, the capture slug appears exactly once, and every entry is inside the job's
+slug fence. Each effect must match the current non-deleted page state in the bound source:
+when a slug exists but is marked `create`, use `update` and read its exact baseline;
+when a slug does not exist but is marked `update`, use `create`. Correct the full
+inventory and `total_pages`, then retry if staging reports either mismatch. A
+soft-deleted target requires restore or repair before proposal staging; never mark it `create`.
+Consolidate all source material for a slug into that one complete page
+entry before staging; never reserve a second inventory slot for the same slug. Once the
 inventory is frozen, use `search`, `query`, `list_pages`, and `resolve_slugs`
 results to work through it without preloading full page bodies. Never request
 more than one `get_page` in the same assistant turn or tool batch. For an update,
@@ -248,8 +257,12 @@ read, between that baseline read and its staging call.
 
 Call `brain_stage_ingestion_proposal_page` with the exact
 `artifact_id`, `source_id`, `admission_scope`, one-based `sequence`, stable
-`total_pages`, and page object. Stage only one page per turn. Preserve the
-returned `{sequence, slug, digest}`; later turns may rely on that durable digest
+`total_pages`, the complete ordered `page_inventory`, and page object. Repeat the
+same full `page_inventory` unchanged on every stage call so the newest retained
+call carries the complete plan through working-context compaction. The staged
+page's `slug` and `effect` must match its inventory slot. Stage only one page per
+turn. Follow the returned `nextExpectedSlot`; `null` means every slot is staged.
+Preserve the returned `{sequence, slug, digest}`; later turns may rely on that durable digest
 instead of retaining every old raw `get_page` output or proposed body in the
 working context. An identical retry is safe. Never change `total_pages`, reuse
 a sequence for different content, or stage after finalization. The exact

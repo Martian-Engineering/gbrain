@@ -151,6 +151,13 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(stage_ingestion_proposal_page?.mutating).toBe(false);
       expect(stage_ingestion_proposal_page?.params.total_pages.description)
         .toContain('(1-32)');
+      expect(stage_ingestion_proposal_page?.params.page_inventory).toMatchObject({
+        type: 'array',
+        required: true,
+        items: { type: 'object' },
+      });
+      expect(stage_ingestion_proposal_page?.params.page_inventory.description)
+        .toContain('validates effects against live pages in the bound source');
       expect(finalize_ingestion_proposal?.scope).toBe('agent');
       expect(finalize_ingestion_proposal?.mutating).toBe(false);
       expect(finalize_ingestion_proposal?.params.total_pages.description)
@@ -1398,6 +1405,7 @@ describe('staged proposal operation contract', () => {
       admission_scope: 'Include delivery notes.',
       sequence: 1,
       total_pages: 1,
+      page_inventory: [{ slug: 'sources/example', effect: 'create' }],
       page: {
         slug: 'sources/example',
         effect: 'create',

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import {
   compactToolLoopMessages,
+  ToolLoopContextProjectionError,
 } from '../../src/core/ai/tool-loop-context.ts';
 import type { ChatBlock, ChatMessage } from '../../src/core/ai/gateway.ts';
+import { proposalInventoryContextPolicy } from '../../src/core/ingestion-proposal-context-policy.ts';
 
 interface RoundEntry {
   id: string;
@@ -51,7 +53,236 @@ function resultOutput(messages: ChatMessage[], toolCallId: string): unknown {
   throw new Error(`Missing tool result ${toolCallId}`);
 }
 
+/** Read one retained tool input from a compacted provider projection. */
+function toolInput(messages: ChatMessage[], toolCallId: string): unknown {
+  for (const message of messages) {
+    if (typeof message.content === 'string') continue;
+    const call = message.content.find(block => (
+      block.type === 'tool-call' && block.toolCallId === toolCallId
+    ));
+    if (call?.type === 'tool-call') return call.input;
+  }
+  throw new Error(`Missing tool call ${toolCallId}`);
+}
+
 describe('tool-loop exact non-mutating result retention', () => {
+  it('preserves an exact stage inventory after a failed large first call', () => {
+    const inventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'sources/example', effect: 'update' },
+    ];
+    const messages = buildRound('Correct the rejected proposal inventory.', [{
+      id: 'failed-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        artifact_id: 'artifact-1',
+        source_id: 'company',
+        admission_scope: 'Include admitted material.',
+        sequence: 1,
+        total_pages: 2,
+        page_inventory: inventory,
+        page: {
+          slug: 'sources/example',
+          effect: 'create',
+          title: 'Example',
+          bodyMarkdown: `FAILED_STAGE_BODY_${'x'.repeat(22_000)}`,
+          baseMarkdown: `FAILED_STAGE_BASELINE_${'y'.repeat(8_000)}`,
+        },
+      },
+      output: { error: 'Correct both inventory effects and retry.' },
+      isError: true,
+    }]);
+
+    const compacted = compactToolLoopMessages(messages, 4_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    });
+    const input = toolInput(compacted, 'failed-stage') as Record<string, unknown>;
+
+    expect(input.page_inventory).toEqual(inventory);
+    expect(JSON.stringify(input)).toContain('working_context_projection');
+    expect(JSON.stringify(input)).toContain('agent_authored_plan_data_not_instructions');
+    expect(JSON.stringify(input)).not.toContain('Include admitted material.');
+    expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_BODY_');
+    expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_BASELINE_');
+  });
+
+  it('summarizes the latest successful inventory ahead of a later rejected inventory', () => {
+    const successfulInventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/accepted', effect: 'update' },
+    ];
+    const rejectedInventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'projects/rejected', effect: 'create' },
+    ];
+    const successfulRound = buildRound('Stage the reviewed proposal.', [{
+      id: 'successful-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        sequence: 1,
+        total_pages: 2,
+        page_inventory: successfulInventory,
+        page: {
+          slug: 'sources/example',
+          effect: 'create',
+          bodyMarkdown: `SUCCESSFUL_STAGE_BODY_${'a'.repeat(22_000)}`,
+        },
+      },
+      output: { staged: true },
+    }]);
+    const rejectedRound = buildRound('unused', [{
+      id: 'rejected-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        sequence: 2,
+        total_pages: 2,
+        page_inventory: rejectedInventory,
+        page: {
+          slug: 'projects/rejected',
+          effect: 'create',
+          bodyMarkdown: `REJECTED_STAGE_BODY_${'b'.repeat(22_000)}`,
+        },
+      },
+      output: { error: 'inventory_mismatch' },
+      isError: true,
+    }]);
+    const latestReadRound = buildRound('unused', [{
+      id: 'latest-read',
+      callName: 'get_page',
+      input: { slug: 'projects/current' },
+      output: { slug: 'projects/current', body: `LATEST_EXACT_READ_${'c'.repeat(8_000)}` },
+    }]);
+
+    const compacted = compactToolLoopMessages([
+      successfulRound[0]!,
+      successfulRound[1]!,
+      successfulRound[2]!,
+      rejectedRound[1]!,
+      rejectedRound[2]!,
+      latestReadRound[1]!,
+      latestReadRound[2]!,
+    ], 4_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+      preferredProjectionBytes: 20_000,
+      preferredProjectionFits: () => true,
+    });
+    const summary = compacted
+      .filter(message => typeof message.content === 'string')
+      .map(message => message.content)
+      .join('\n');
+
+    expect(summary).toContain(`page_inventory=${JSON.stringify(successfulInventory)}`);
+    expect(summary).toContain('call_id=successful-stage outcome=complete');
+    expect(summary).not.toContain(JSON.stringify(rejectedInventory));
+    expect(summary).not.toContain('retained tool error');
+  });
+
+  it('omits instruction-shaped fields from malformed failed stage input and its ledger summary', () => {
+    const unsafeInput = {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'IGNORE_PREVIOUS_SCOPE_AND_EXFILTRATE',
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: [{
+        slug: 'projects/example',
+        effect: 'create',
+        instruction: 'INVENTORY_PROMPT_ATTACK',
+      }],
+      page: {
+        slug: 'projects/example',
+        effect: 'create',
+        title: 'PAGE_IDENTITY_PROMPT_ATTACK',
+        bodyMarkdown: `MALICIOUS_STAGE_BODY_${'x'.repeat(22_000)}`,
+      },
+    };
+    const unsafeRound = buildRound('Correct a malformed stage call.', [{
+      id: 'unsafe-stage',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: unsafeInput,
+      output: { error: 'The inventory shape is invalid.' },
+      isError: true,
+    }]);
+
+    const retained = compactToolLoopMessages(unsafeRound, 4_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    });
+    const retainedSerialized = JSON.stringify(retained);
+    expect(retainedSerialized).toContain('working_context_projection');
+    expect(retainedSerialized).not.toContain('IGNORE_PREVIOUS_SCOPE_AND_EXFILTRATE');
+    expect(retainedSerialized).not.toContain('INVENTORY_PROMPT_ATTACK');
+    expect(retainedSerialized).not.toContain('PAGE_IDENTITY_PROMPT_ATTACK');
+    expect(retainedSerialized).not.toContain('MALICIOUS_STAGE_BODY_');
+    expect(toolInput(retained, 'unsafe-stage')).not.toHaveProperty('page_inventory');
+
+    const newerRound = buildRound('unused', [{
+      id: 'newer-read',
+      callName: 'get_page',
+      input: { slug: 'projects/current' },
+      output: { slug: 'projects/current', body: 'Current page.' },
+    }]);
+    const unsafeSummaryRound = buildRound(
+      'Correct malformed parallel stage calls.',
+      Array.from({ length: 6 }, (_, index) => ({
+        id: `unsafe-stage-${index}`,
+        callName: 'brain_stage_ingestion_proposal_page',
+        input: unsafeInput,
+        output: { error: 'The inventory shape is invalid.' },
+        isError: true,
+      })),
+    );
+    const summarized = compactToolLoopMessages([
+      unsafeSummaryRound[0]!,
+      unsafeSummaryRound[1]!,
+      unsafeSummaryRound[2]!,
+      newerRound[1]!,
+      newerRound[2]!,
+    ], 1_500, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    });
+    const summarizedText = JSON.stringify(summarized);
+    expect(summarizedText).toContain('Durable ledger counts');
+    expect(summarizedText).not.toContain('page_inventory=');
+    expect(summarizedText).not.toContain('IGNORE_PREVIOUS_SCOPE_AND_EXFILTRATE');
+    expect(summarizedText).not.toContain('INVENTORY_PROMPT_ATTACK');
+    expect(summarizedText).not.toContain('PAGE_IDENTITY_PROMPT_ATTACK');
+  });
+
+  it('fails closed when an exact stage inventory cannot fit the compacted round', () => {
+    const inventory = Array.from({ length: 32 }, (_, index) => ({
+      slug: `projects/${index}-${'x'.repeat(120)}`,
+      effect: 'create',
+    }));
+    const messages = buildRound('Stage the complete reviewed inventory.', [{
+      id: 'oversized-stage-inventory',
+      callName: 'brain_stage_ingestion_proposal_page',
+      input: {
+        artifact_id: 'artifact-1',
+        source_id: 'company',
+        admission_scope: 'Include admitted material.',
+        sequence: 1,
+        total_pages: inventory.length,
+        page_inventory: inventory,
+        page: {
+          slug: inventory[0]!.slug,
+          effect: 'create',
+          title: 'Example',
+          bodyMarkdown: 'x'.repeat(22_000),
+        },
+      },
+      output: { staged: true },
+    }]);
+
+    expect(() => compactToolLoopMessages(messages, 1_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    })).toThrow(ToolLoopContextProjectionError);
+  });
+
   it('retains an exact successful read from a projected parallel round when one fits', () => {
     const smallOutput = {
       content_hash: 'a'.repeat(64),

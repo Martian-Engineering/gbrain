@@ -5701,6 +5701,12 @@ const stage_ingestion_proposal_page: Operation = {
     admission_scope: { type: 'string', required: true, description: 'Exact admission scope bound at submit_agent time or frozen by the first staged page' },
     sequence: { type: 'number', required: true, description: 'One-based page position' },
     total_pages: { type: 'number', required: true, description: 'Total number of pages in the proposal (1-32)' },
+    page_inventory: {
+      type: 'array',
+      items: { type: 'object' },
+      required: true,
+      description: 'Complete ordered unique {slug,effect} page plan; first stage validates effects against live pages in the bound source, then every stage repeats it unchanged',
+    },
     page: { type: 'object', required: true, description: 'Exact create or update page proposal' },
   },
   scope: 'agent',

@@ -47,17 +47,25 @@ const STRUCTURAL_IDENTITY_KEYS = [
   'link_type',
 ] as const;
 
-interface ToolEvidence {
+/** Durable evidence exposed to optional domain-specific context policies. */
+export interface ToolLoopContextEvidence {
   toolCallId: string;
   toolName: string;
   input: unknown;
   failed: boolean;
 }
 
+/** Domain policy for projecting one tool's input and summarized evidence. */
+export interface ToolLoopContextPolicy {
+  readonly toolName: string;
+  projectInput(input: unknown, maxBytes: number): unknown;
+  summarizeDroppedEvidence(evidence: readonly ToolLoopContextEvidence[]): string | null;
+}
+
 interface ToolRound {
   assistant: ChatMessage;
   result: ChatMessage;
-  evidence: ToolEvidence[];
+  evidence: ToolLoopContextEvidence[];
 }
 
 interface ScoredToolRound {
@@ -86,6 +94,8 @@ function isOpenAiModel(model: string): boolean {
 export interface ToolLoopContextOptions {
   /** Tools whose effects must retain a distinct identity whenever context compacts. */
   mutatingToolNames?: ReadonlySet<string>;
+  /** Domain policies that retain validated working context for specific tools. */
+  toolPolicies?: readonly ToolLoopContextPolicy[];
   /**
    * Larger candidate ceiling for providers with an exact request-token check.
    * This is never an acceptance boundary by itself.
@@ -563,16 +573,19 @@ function compactRound(
       content: mapBlocks(round.assistant, block => {
         if (block.type === 'text') return { ...block, text: boundText(block.text, perPayloadBytes) };
         if (block.type !== 'tool-call') return block;
+        const policy = options.toolPolicies?.find(candidate => candidate.toolName === block.toolName);
         return {
           ...block,
-          input: boundValue(block.input, perPayloadBytes, {
-            kind: 'tool_input',
-            toolName: block.toolName,
-            preserveStructuralIdentity: isMutationSensitive(
-              block.toolName,
-              options.mutatingToolNames,
-            ),
-          }),
+          input: policy
+            ? policy.projectInput(block.input, perPayloadBytes)
+            : boundValue(block.input, perPayloadBytes, {
+              kind: 'tool_input',
+              toolName: block.toolName,
+              preserveStructuralIdentity: isMutationSensitive(
+                block.toolName,
+                options.mutatingToolNames,
+              ),
+            }),
         };
       }),
     },
@@ -610,8 +623,9 @@ function buildLedgerSummary(
   if (dropped.length === 0 && otherCount === 0) return null;
   const counts = new Map<string, { ok: number; failed: number }>();
   const mutationEvidence: string[] = [];
+  const droppedEvidence = dropped.flatMap(round => round.evidence);
 
-  for (const evidence of dropped.flatMap(round => round.evidence)) {
+  for (const evidence of droppedEvidence) {
     const count = counts.get(evidence.toolName) ?? { ok: 0, failed: 0 };
     if (evidence.failed) count.failed++;
     else count.ok++;
@@ -626,9 +640,13 @@ function buildLedgerSummary(
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, count]) => `${name}: ${count.ok} complete, ${count.failed} failed`)
     .join('; ');
+  const policySummaries = options.toolPolicies
+    ?.map(policy => policy.summarizeDroppedEvidence(droppedEvidence))
+    .filter((summary): summary is string => summary !== null) ?? [];
   const text = [
     `[Context compacted: ${dropped.length} earlier balanced tool round(s) omitted from this provider request${otherCount ? `; ${otherCount} other historical message(s) omitted` : ''}.]`,
     details ? `Durable ledger counts: ${details}.` : '',
+    ...policySummaries,
     mutationEvidence.length > 0 ? `Distinct mutation evidence:\n${mutationEvidence.join('\n')}` : '',
     'The complete transcript and tool outputs remain in the durable execution ledger. Do not repeat entries marked outcome=complete. Entries marked outcome=failed are unverified; read back or otherwise reassess their effect before deciding whether a corrected retry is safe.',
   ].filter(Boolean).join('\n');
@@ -636,7 +654,7 @@ function buildLedgerSummary(
 }
 
 /** Render enough bounded identity to distinguish prior mutations safely. */
-function formatMutationEvidence(evidence: ToolEvidence): string {
+function formatMutationEvidence(evidence: ToolLoopContextEvidence): string {
   const serialized = safeJson(evidence.input);
   const fingerprint = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
   const target = mutationTarget(evidence.input);
