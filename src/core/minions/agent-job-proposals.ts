@@ -1,11 +1,49 @@
-import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { assertValidSourceId } from '../source-id.ts';
 import { matchesSlugAllowList } from '../slug-allow-list.ts';
+import {
+  AgentJobProposalError,
+  PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+  PROPOSAL_MAX_PAGES,
+  PROPOSAL_STAGE_INPUT_MAX_BYTES,
+  STAGE_PROPOSAL_TOOL_NAME,
+  assertExactPageInventory,
+  assertPageMatchesInventorySlot,
+  canonicalProposalJson,
+  digestProposalValue,
+  isCanonicalProposalSlug,
+  nextExpectedInventorySlot,
+  parseProposalPage,
+  parseProposalPageInventory,
+  parseStageProposalPageCore,
+  parseStageProposalPageInput,
+  proposalToolInputBytes,
+  type ParsedStageProposalPageCore,
+  type ParsedStageProposalPageInput,
+  type ProposalPageDigest,
+  type ProposalPageInventoryEntry,
+  type ScopedProposalPage,
+  type StageProposalPageInput,
+  type StageProposalPageResult,
+} from '../ingestion-proposal-contract.ts';
 
-/** Maximum UTF-8 size of one page-staging tool input. */
-export const PROPOSAL_STAGE_INPUT_MAX_BYTES = 196_608;
-
+export {
+  AgentJobProposalError,
+  PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+  PROPOSAL_MAX_PAGES,
+  PROPOSAL_STAGE_INPUT_MAX_BYTES,
+  STAGE_PROPOSAL_TOOL_NAME,
+  canonicalProposalJson,
+  digestProposalValue,
+  proposalToolInputBytes,
+} from '../ingestion-proposal-contract.ts';
+export type {
+  ProposalPageDigest,
+  ProposalPageInventoryEntry,
+  ScopedProposalPage,
+  StageProposalPageInput,
+  StageProposalPageResult,
+} from '../ingestion-proposal-contract.ts';
 /** Maximum UTF-8 size of one finalized, canonical proposal plan. */
 export const PROPOSAL_AGGREGATE_MAX_BYTES = 98_304;
 
@@ -15,57 +53,10 @@ export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 98_304;
 /** Maximum UTF-8 size of the compact receipt manifest. */
 export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
 
-/** Maximum number of pages in one finalized proposal. */
-export const PROPOSAL_MAX_PAGES = 32;
-
-/** Maximum characters in the shared Lore/GBrain admission-scope contract. */
-export const PROPOSAL_ADMISSION_SCOPE_MAX_CHARS = 4_000;
-
-export const STAGE_PROPOSAL_TOOL_NAME = 'brain_stage_ingestion_proposal_page';
 export const FINALIZE_PROPOSAL_TOOL_NAME = 'brain_finalize_ingestion_proposal';
 
-const SHA256_RE = /^[a-f0-9]{64}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const CANONICAL_SLUG_CHARS = 'a-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af';
-const PAGE_SLUG_SEGMENT = `[${CANONICAL_SLUG_CHARS}][${CANONICAL_SLUG_CHARS}-]*`;
-const PAGE_SLUG_RE = new RegExp(`^${PAGE_SLUG_SEGMENT}(\\/${PAGE_SLUG_SEGMENT})*$`);
-
-/** Error raised when staged proposal evidence violates its durable contract. */
-export class AgentJobProposalError extends Error {
-  constructor(
-    public readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'AgentJobProposalError';
-  }
-}
-
-export interface ProposalPageDigest {
-  sequence: number;
-  slug: string;
-  digest: string;
-}
-
-/** One immutable page slot in a staged ingestion proposal. */
-export interface ProposalPageInventoryEntry {
-  slug: string;
-  effect: 'create' | 'update';
-}
-
-/** Successful staging receipt, including the next incomplete inventory slot. */
-export interface StageProposalPageResult extends ProposalPageDigest {
-  nextExpectedSlot: ({ sequence: number } & ProposalPageInventoryEntry) | null;
-}
-
-export interface ScopedProposalPage {
-  slug: string;
-  effect: 'create' | 'update';
-  title: string;
-  bodyMarkdown: string;
-  baseMarkdown?: string;
-  expectedContentHash?: string;
-}
+const SHA256_RE = /^[a-f0-9]{64}$/;
 
 export interface ScopedProposalTimelineEntry {
   pageSlug: string;
@@ -91,17 +82,6 @@ export interface ScopedAdmissionProposalPlan {
   proposedLinks: ScopedProposalLink[];
   unresolved: string[];
 }
-
-export interface StageProposalPageInput {
-  artifact_id: string;
-  source_id: string;
-  admission_scope: string;
-  sequence: number;
-  total_pages: number;
-  page_inventory: unknown;
-  page: unknown;
-}
-
 export interface FinalizeProposalInput {
   artifact_id: string;
   source_id: string;
@@ -135,21 +115,6 @@ interface JobBinding {
   allowedSlugPrefixes: string[];
   pageInventory: unknown;
 }
-
-interface ParsedStageProposalPageCore {
-  artifactId: string;
-  sourceId: string;
-  admissionScope: string;
-  sequence: number;
-  totalPages: number;
-  page: ScopedProposalPage;
-  pageDigest: string;
-}
-
-interface ParsedStageProposalPageInput extends ParsedStageProposalPageCore {
-  pageInventory: ProposalPageInventoryEntry[];
-}
-
 interface StoredProposalFragment {
   sequence: number;
   total_pages: number;
@@ -166,28 +131,6 @@ interface ProposalTurnBlock {
   name?: unknown;
   toolName?: unknown;
   input?: unknown;
-}
-
-/** Return the canonical JSON encoding used for every proposal digest. */
-export function canonicalProposalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalProposalJson).join(',')}]`;
-  }
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => (
-    `${JSON.stringify(key)}:${canonicalProposalJson(record[key])}`
-  )).join(',')}}`;
-}
-
-/** Hash one canonical proposal value with SHA-256. */
-export function digestProposalValue(value: unknown): string {
-  return createHash('sha256').update(canonicalProposalJson(value), 'utf8').digest('hex');
-}
-
-/** Measure one tool input using the same canonical UTF-8 representation persisted by GBrain. */
-export function proposalToolInputBytes(input: unknown): number {
-  return Buffer.byteLength(canonicalProposalJson(input ?? null), 'utf8');
 }
 
 /**
@@ -669,93 +612,6 @@ function requireBoundAdmissionScope(binding: JobBinding): string {
   return binding.admissionScope;
 }
 
-/** Parse one page-staging input without interpreting its inventory semantics. */
-function parseStageProposalPageCore(raw: unknown): ParsedStageProposalPageCore {
-  if (proposalToolInputBytes(raw) > PROPOSAL_STAGE_INPUT_MAX_BYTES) {
-    throw new AgentJobProposalError('stage_input_too_large', 'Proposal page input exceeds the staging byte limit.');
-  }
-  const input = readRecord(raw, 'stage proposal input');
-  const artifactId = readBoundedString(input.artifact_id, 'artifact_id', 255);
-  const sourceId = readBoundedString(input.source_id, 'source_id', 255);
-  assertValidSourceId(sourceId);
-  const admissionScope = readBoundedString(
-    input.admission_scope,
-    'admission_scope',
-    PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
-  );
-  const sequence = readPositiveInteger(input.sequence, 'sequence');
-  const totalPages = readProposalPageCount(input.total_pages);
-  if (sequence > totalPages) {
-    throw new AgentJobProposalError('invalid_sequence', 'sequence must be within 1..total_pages.');
-  }
-  const page = parseProposalPage(input.page);
-  return {
-    artifactId,
-    sourceId,
-    admissionScope,
-    sequence,
-    totalPages,
-    page,
-    pageDigest: digestProposalValue(page),
-  };
-}
-
-/** Parse and normalize a complete page-staging input at tool execution time. */
-function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput {
-  const core = parseStageProposalPageCore(raw);
-  const input = readRecord(raw, 'stage proposal input');
-  return {
-    ...core,
-    pageInventory: parsePageInventory(input.page_inventory, core.totalPages),
-  };
-}
-
-/** Parse the exact ordered page plan repeated with every staging call. */
-function parsePageInventory(raw: unknown, totalPages: number): ProposalPageInventoryEntry[] {
-  if (!Array.isArray(raw) || raw.length !== totalPages) {
-    throw new AgentJobProposalError(
-      'invalid_page_inventory',
-      `page_inventory must contain exactly ${totalPages} ordered entries to match total_pages.`,
-    );
-  }
-
-  const positionsBySlug = new Map<string, number[]>();
-  const inventory = raw.map((entry, index): ProposalPageInventoryEntry => {
-    const record = readRecord(entry, `page_inventory[${index}]`);
-    assertExactKeys(record, ['slug', 'effect'], `page_inventory[${index}]`);
-    const slug = readCanonicalSlug(record.slug, `page_inventory[${index}].slug`);
-    const effect = record.effect;
-    if (effect !== 'create' && effect !== 'update') {
-      throw new AgentJobProposalError(
-        'invalid_page_inventory',
-        `page_inventory[${index}].effect must be create or update.`,
-      );
-    }
-    const positions = positionsBySlug.get(slug) ?? [];
-    positions.push(index + 1);
-    positionsBySlug.set(slug, positions);
-    return { slug, effect };
-  });
-
-  const duplicates = [...positionsBySlug]
-    .filter(([, positions]) => positions.length > 1)
-    .map(([slug, positions]) => `${slug} at positions ${joinPositions(positions)}`);
-  if (duplicates.length > 0) {
-    throw new AgentJobProposalError(
-      'duplicate_page_inventory',
-      `page_inventory repeats ${duplicates.join('; ')}. Consolidate all material for each slug into one complete page entry, remove duplicates, renumber the inventory, and retry.`,
-    );
-  }
-  return inventory;
-}
-
-/** Format one-based duplicate positions as a compact human correction hint. */
-function joinPositions(positions: readonly number[]): string {
-  if (positions.length === 1) return String(positions[0]);
-  if (positions.length === 2) return `${positions[0]} and ${positions[1]}`;
-  return `${positions.slice(0, -1).join(', ')}, and ${positions.at(-1)}`;
-}
-
 /** Enforce capture provenance and the durable job slug fence for an inventory. */
 function assertPageInventoryForBinding(
   binding: JobBinding,
@@ -771,22 +627,6 @@ function assertPageInventoryForBinding(
   for (const entry of inventory) assertSlugAllowed(binding, entry.slug, 'Inventory page');
 }
 
-/** Require the staged page to implement its exact one-based inventory slot. */
-function assertPageMatchesInventorySlot(input: {
-  sequence: number;
-  page: Pick<ScopedProposalPage, 'slug' | 'effect'>;
-  pageInventory: readonly ProposalPageInventoryEntry[];
-}): void {
-  const expected = input.pageInventory[input.sequence - 1];
-  if (!expected || input.page.slug !== expected.slug || input.page.effect !== expected.effect) {
-    const wanted = expected ? `${expected.effect} ${expected.slug}` : 'a valid inventory entry';
-    throw new AgentJobProposalError(
-      'inventory_slot_mismatch',
-      `Sequence ${input.sequence} must stage ${wanted}; received ${input.page.effect} ${input.page.slug}. Correct this page call and retry the same inventory slot.`,
-    );
-  }
-}
-
 /** Read a previously frozen inventory without accepting malformed durable state. */
 function parseFrozenPageInventory(
   binding: JobBinding,
@@ -794,7 +634,7 @@ function parseFrozenPageInventory(
 ): ProposalPageInventoryEntry[] | null {
   if (binding.pageInventory === null || binding.pageInventory === undefined) return null;
   try {
-    return parsePageInventory(binding.pageInventory, totalPages);
+    return parseProposalPageInventory(binding.pageInventory, totalPages);
   } catch (error) {
     if (error instanceof AgentJobProposalError) {
       throw new AgentJobProposalError(
@@ -819,19 +659,6 @@ function requireFrozenPageInventory(
     );
   }
   return inventory;
-}
-
-/** Compare an incoming repeated inventory with the exact frozen plan. */
-function assertExactPageInventory(
-  frozen: readonly ProposalPageInventoryEntry[],
-  requested: readonly ProposalPageInventoryEntry[],
-): void {
-  if (canonicalProposalJson(frozen) !== canonicalProposalJson(requested)) {
-    throw new AgentJobProposalError(
-      'inventory_mismatch',
-      'page_inventory does not exactly match the inventory frozen by the first successful stage. Repeat the unchanged frozen inventory and retry.',
-    );
-  }
 }
 
 /** Check a newly proposed inventory against current live pages in its bound source. */
@@ -873,16 +700,6 @@ async function assertFirstInventoryEffectsMatchCorpus(
         + `${mismatches.join(' ')} Correct page_inventory and total_pages, then retry.`,
     );
   }
-}
-
-/** Identify the earliest inventory slot not present in the durable fragment ledger. */
-function nextExpectedInventorySlot(
-  inventory: readonly ProposalPageInventoryEntry[],
-  fragments: readonly Pick<StoredProposalFragment, 'sequence'>[],
-): ({ sequence: number } & ProposalPageInventoryEntry) | null {
-  const staged = new Set(fragments.map(fragment => Number(fragment.sequence)));
-  const index = inventory.findIndex((_, candidateIndex) => !staged.has(candidateIndex + 1));
-  return index < 0 ? null : { sequence: index + 1, ...inventory[index]! };
 }
 
 /** Read every staged fragment in deterministic sequence order. */
@@ -954,28 +771,6 @@ function assertSlugAllowed(binding: JobBinding, slug: string, label: string): vo
       `${label} ${slug} is outside the agent job slug fence.`,
     );
   }
-}
-
-function parseProposalPage(raw: unknown): ScopedProposalPage {
-  const page = readRecord(raw, 'page');
-  const effect = page.effect;
-  if (effect !== 'create' && effect !== 'update') {
-    throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
-  }
-  const allowed = effect === 'create'
-    ? ['slug', 'effect', 'title', 'bodyMarkdown']
-    : ['slug', 'effect', 'title', 'bodyMarkdown', 'baseMarkdown', 'expectedContentHash'];
-  assertExactKeys(page, allowed, 'page');
-  const slug = readCanonicalSlug(page.slug, 'page.slug');
-  const title = readBoundedString(page.title, 'page.title', 1_000);
-  const bodyMarkdown = readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
-  if (effect === 'create') return { slug, effect, title, bodyMarkdown };
-  const baseMarkdown = readNonBlankString(page.baseMarkdown, 'page.baseMarkdown');
-  const expectedContentHash = readString(page.expectedContentHash, 'page.expectedContentHash');
-  if (!SHA256_RE.test(expectedContentHash)) {
-    throw new AgentJobProposalError('invalid_page', 'page.expectedContentHash must be a lowercase SHA-256 digest.');
-  }
-  return { slug, effect, title, bodyMarkdown, baseMarkdown, expectedContentHash };
 }
 
 function parseTimelineEntries(raw: unknown): ScopedProposalTimelineEntry[] {
@@ -1119,17 +914,9 @@ function readBoundedString(raw: unknown, name: string, maxLength: number): strin
   return value;
 }
 
-function readNonBlankString(raw: unknown, name: string): string {
-  const value = readString(raw, name);
-  if (!value.trim()) {
-    throw new AgentJobProposalError('invalid_string', `${name} must not be blank.`);
-  }
-  return value;
-}
-
 function readCanonicalSlug(raw: unknown, name: string): string {
   const slug = readString(raw, name);
-  if (slug.length > 255 || !PAGE_SLUG_RE.test(slug)) {
+  if (!isCanonicalProposalSlug(slug)) {
     throw new AgentJobProposalError('invalid_slug', `${name} is not a canonical page slug.`);
   }
   return slug;

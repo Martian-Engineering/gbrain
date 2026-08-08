@@ -18,6 +18,7 @@ import {
   type ScopedProposalPage,
 } from '../src/core/minions/agent-job-proposals.ts';
 import { compactToolLoopMessages } from '../src/core/ai/tool-loop-context.ts';
+import { proposalInventoryContextPolicy } from '../src/core/ingestion-proposal-context-policy.ts';
 import type { ChatMessage } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -257,6 +258,7 @@ describe('durable agent-job proposal staging', () => {
     }
     const compacted = compactToolLoopMessages(messages, 5_000, {
       mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
     });
     const compactedJson = JSON.stringify(compacted);
     expect(compactedJson).toContain(staged[3]!.digest);

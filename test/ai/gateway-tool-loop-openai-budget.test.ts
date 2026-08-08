@@ -16,6 +16,7 @@ import {
   openAiToolLoopRequestFits,
   resolveToolLoopMessageBudgets,
 } from '../../src/core/ai/tool-loop-context.ts';
+import { proposalInventoryContextPolicy } from '../../src/core/ingestion-proposal-context-policy.ts';
 
 /** Find a persisted tool result in the provider-facing prompt. */
 function resultOutput(messages: ChatMessage[], toolCallId: string): unknown {
@@ -178,7 +179,7 @@ describe('OpenAI tool-loop context budgeting', () => {
     const byteSafeOnly = compactToolLoopMessages(
       durableMessages,
       budgets.byteSafeBytes,
-      { mutatingToolNames },
+      { mutatingToolNames, toolPolicies: [proposalInventoryContextPolicy] },
     );
     expect(resultOutput(byteSafeOnly, 'canonical-baseline')).not.toEqual(exactOutput);
     expect(JSON.stringify(resultOutput(byteSafeOnly, 'canonical-baseline')))

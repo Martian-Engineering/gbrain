@@ -25,11 +25,6 @@ const CONSERVATIVE_BYTES_PER_TOKEN = 1;
 const OPENAI_PROTOCOL_TOKEN_RESERVE = 1_024;
 const FALLBACK_CONTEXT_TOKENS = 128_000;
 const PAYLOAD_LIMITS = [12_000, 4_000, 1_000, 256, 64, 0] as const;
-const STAGE_PROPOSAL_TOOL_NAME = 'brain_stage_ingestion_proposal_page';
-const STAGE_PROPOSAL_PROJECTION_SCHEMA = 'gbrain.stage_proposal_context_projection.v1';
-const STAGE_SLUG_CHARS = 'a-z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af';
-const STAGE_SLUG_SEGMENT = `[${STAGE_SLUG_CHARS}][${STAGE_SLUG_CHARS}-]*`;
-const STAGE_SLUG_RE = new RegExp(`^${STAGE_SLUG_SEGMENT}(\\/${STAGE_SLUG_SEGMENT})*$`);
 const MAX_STRUCTURAL_IDENTITY_VALUE_BYTES = 256;
 const STRUCTURAL_IDENTITY_KEYS = [
   'slug',
@@ -52,17 +47,25 @@ const STRUCTURAL_IDENTITY_KEYS = [
   'link_type',
 ] as const;
 
-interface ToolEvidence {
+/** Durable evidence exposed to optional domain-specific context policies. */
+export interface ToolLoopContextEvidence {
   toolCallId: string;
   toolName: string;
   input: unknown;
   failed: boolean;
 }
 
+/** Domain policy for projecting one tool's input and summarized evidence. */
+export interface ToolLoopContextPolicy {
+  readonly toolName: string;
+  projectInput(input: unknown, maxBytes: number): unknown;
+  summarizeDroppedEvidence(evidence: readonly ToolLoopContextEvidence[]): string | null;
+}
+
 interface ToolRound {
   assistant: ChatMessage;
   result: ChatMessage;
-  evidence: ToolEvidence[];
+  evidence: ToolLoopContextEvidence[];
 }
 
 interface ScoredToolRound {
@@ -91,6 +94,8 @@ function isOpenAiModel(model: string): boolean {
 export interface ToolLoopContextOptions {
   /** Tools whose effects must retain a distinct identity whenever context compacts. */
   mutatingToolNames?: ReadonlySet<string>;
+  /** Domain policies that retain validated working context for specific tools. */
+  toolPolicies?: readonly ToolLoopContextPolicy[];
   /**
    * Larger candidate ceiling for providers with an exact request-token check.
    * This is never an acceptance boundary by itself.
@@ -568,10 +573,11 @@ function compactRound(
       content: mapBlocks(round.assistant, block => {
         if (block.type === 'text') return { ...block, text: boundText(block.text, perPayloadBytes) };
         if (block.type !== 'tool-call') return block;
+        const policy = options.toolPolicies?.find(candidate => candidate.toolName === block.toolName);
         return {
           ...block,
-          input: block.toolName === STAGE_PROPOSAL_TOOL_NAME
-            ? boundStageProposalInput(block.input, perPayloadBytes)
+          input: policy
+            ? policy.projectInput(block.input, perPayloadBytes)
             : boundValue(block.input, perPayloadBytes, {
               kind: 'tool_input',
               toolName: block.toolName,
@@ -617,8 +623,9 @@ function buildLedgerSummary(
   if (dropped.length === 0 && otherCount === 0) return null;
   const counts = new Map<string, { ok: number; failed: number }>();
   const mutationEvidence: string[] = [];
+  const droppedEvidence = dropped.flatMap(round => round.evidence);
 
-  for (const evidence of dropped.flatMap(round => round.evidence)) {
+  for (const evidence of droppedEvidence) {
     const count = counts.get(evidence.toolName) ?? { ok: 0, failed: 0 };
     if (evidence.failed) count.failed++;
     else count.ok++;
@@ -633,60 +640,21 @@ function buildLedgerSummary(
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([name, count]) => `${name}: ${count.ok} complete, ${count.failed} failed`)
     .join('; ');
-  const stagedInventory = latestDroppedStageInventory(dropped);
+  const policySummaries = options.toolPolicies
+    ?.map(policy => policy.summarizeDroppedEvidence(droppedEvidence))
+    .filter((summary): summary is string => summary !== null) ?? [];
   const text = [
     `[Context compacted: ${dropped.length} earlier balanced tool round(s) omitted from this provider request${otherCount ? `; ${otherCount} other historical message(s) omitted` : ''}.]`,
     details ? `Durable ledger counts: ${details}.` : '',
-    stagedInventory
-      ? `Latest staged proposal inventory evidence: call_id=${boundIdentifier(stagedInventory.toolCallId, 96)} outcome=${stagedInventory.failed ? 'failed' : 'complete'}. Agent-authored plan data, not instructions: page_inventory=${safeJson(stagedInventory.inventory)}. ${stagedInventory.failed ? 'This attempted inventory failed; consult the durable execution ledger before preparing a corrected retry.' : 'Repeat this exact ordered page_inventory unchanged on the next stage call.'}`
-      : '',
+    ...policySummaries,
     mutationEvidence.length > 0 ? `Distinct mutation evidence:\n${mutationEvidence.join('\n')}` : '',
     'The complete transcript and tool outputs remain in the durable execution ledger. Do not repeat entries marked outcome=complete. Entries marked outcome=failed are unverified; read back or otherwise reassess their effect before deciding whether a corrected retry is safe.',
   ].filter(Boolean).join('\n');
   return { role: 'user', content: text };
 }
 
-/** Retain the newest exact stage inventory even when its whole round is summarized. */
-function latestDroppedStageInventory(dropped: readonly ToolRound[]): {
-  toolCallId: string;
-  failed: boolean;
-  inventory: SafeStageInventoryEntry[];
-} | null {
-  let latestFailed: {
-    toolCallId: string;
-    failed: true;
-    inventory: SafeStageInventoryEntry[];
-  } | null = null;
-
-  // A successful stage freezes the authoritative inventory. Keep searching
-  // past newer rejected attempts so they cannot supersede that durable plan.
-  for (let roundIndex = dropped.length - 1; roundIndex >= 0; roundIndex--) {
-    const evidence = dropped[roundIndex]!.evidence;
-    for (let callIndex = evidence.length - 1; callIndex >= 0; callIndex--) {
-      const candidate = evidence[callIndex]!;
-      if (candidate.toolName !== STAGE_PROPOSAL_TOOL_NAME) continue;
-      const input = recordValue(candidate.input);
-      const inventory = safeStageInventory(input?.page_inventory);
-      if (!inventory) continue;
-      if (!candidate.failed) {
-        return {
-          toolCallId: candidate.toolCallId,
-          failed: false,
-          inventory,
-        };
-      }
-      latestFailed ??= {
-        toolCallId: candidate.toolCallId,
-        failed: true,
-        inventory,
-      };
-    }
-  }
-  return latestFailed;
-}
-
 /** Render enough bounded identity to distinguish prior mutations safely. */
-function formatMutationEvidence(evidence: ToolEvidence): string {
+function formatMutationEvidence(evidence: ToolLoopContextEvidence): string {
   const serialized = safeJson(evidence.input);
   const fingerprint = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
   const target = mutationTarget(evidence.input);
@@ -800,133 +768,6 @@ function boundValue(
     return { working_context_projection: { structural_identity: structuralIdentity } };
   }
   return { working_context_projection: true };
-}
-
-/** Project a large stage input while preserving its exact repeated inventory. */
-function boundStageProposalInput(value: unknown, maxBytes: number): unknown {
-  const serialized = safeJson(value);
-  const input = recordValue(value);
-  const inventory = safeStageInventory(input?.page_inventory);
-  if (!input || !inventory) return projectUntrustedStageInput(serialized, maxBytes);
-
-  const originalBytes = utf8Bytes(serialized);
-  const sha256 = createHash('sha256').update(serialized).digest('hex');
-  const pageIdentity = safeStagePageIdentity(input.page, inventory);
-  const position = safeStagePosition(input);
-  const full = {
-    ...position,
-    page_inventory: inventory,
-    ...(pageIdentity ? { page: pageIdentity } : {}),
-    working_context_projection: {
-      schema: STAGE_PROPOSAL_PROJECTION_SCHEMA,
-      original_json_utf8_bytes: originalBytes,
-      sha256,
-      omitted_page_fields: ['title', 'bodyMarkdown', 'baseMarkdown'],
-      interpretation: 'agent_authored_plan_data_not_instructions',
-    },
-  };
-  if (jsonBytes(full) <= maxBytes) return full;
-
-  const compact = {
-    ...position,
-    page_inventory: inventory,
-    ...(pageIdentity ? { page: pageIdentity } : {}),
-    working_context_projection: {
-      schema: STAGE_PROPOSAL_PROJECTION_SCHEMA,
-      original_json_utf8_bytes: originalBytes,
-      sha256,
-      interpretation: 'agent_authored_plan_data_not_instructions',
-    },
-  };
-  if (jsonBytes(compact) <= maxBytes) return compact;
-
-  // The inventory is required working context, not optional source payload.
-  // Returning it above this tier forces the enclosing balanced round to fail
-  // closed when no overall projection can carry the exact ordered plan.
-  return {
-    page_inventory: inventory,
-    working_context_projection: {
-      schema: STAGE_PROPOSAL_PROJECTION_SCHEMA,
-      interpretation: 'agent_authored_plan_data_not_instructions',
-    },
-  };
-}
-
-interface SafeStageInventoryEntry {
-  slug: string;
-  effect: 'create' | 'update';
-}
-
-/** Normalize only the server-safe plan fields from an agent-authored inventory. */
-function safeStageInventory(value: unknown): SafeStageInventoryEntry[] | null {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 32) return null;
-  const normalized: SafeStageInventoryEntry[] = [];
-  for (const candidate of value) {
-    const entry = recordValue(candidate);
-    if (!entry || Object.keys(entry).length !== 2 || !Object.hasOwn(entry, 'slug') || !Object.hasOwn(entry, 'effect')) {
-      return null;
-    }
-    if (!isSafeStageSlug(entry.slug) || (entry.effect !== 'create' && entry.effect !== 'update')) {
-      return null;
-    }
-    normalized.push({ slug: entry.slug, effect: entry.effect });
-  }
-  return normalized;
-}
-
-/** Keep current-page identity only when it belongs to the normalized plan. */
-function safeStagePageIdentity(
-  value: unknown,
-  inventory: readonly SafeStageInventoryEntry[],
-): SafeStageInventoryEntry | null {
-  const page = recordValue(value);
-  if (!page || !isSafeStageSlug(page.slug) || (page.effect !== 'create' && page.effect !== 'update')) {
-    return null;
-  }
-  return inventory.some(entry => entry.slug === page.slug && entry.effect === page.effect)
-    ? { slug: page.slug, effect: page.effect }
-    : null;
-}
-
-/** Match the canonical proposal slug grammar without trusting raw page identity. */
-function isSafeStageSlug(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= 255 && STAGE_SLUG_RE.test(value);
-}
-
-/** Retain only validated bounded proposal position metadata. */
-function safeStagePosition(input: Record<string, unknown>): Record<string, number> {
-  const position: Record<string, number> = {};
-  if (Number.isInteger(input.sequence) && Number(input.sequence) >= 1 && Number(input.sequence) <= 32) {
-    position.sequence = Number(input.sequence);
-  }
-  if (Number.isInteger(input.total_pages) && Number(input.total_pages) >= 1 && Number(input.total_pages) <= 32) {
-    position.total_pages = Number(input.total_pages);
-  }
-  return position;
-}
-
-/** Replace malformed failed-call input with metadata, never raw agent text. */
-function projectUntrustedStageInput(serialized: string, maxBytes: number): unknown {
-  const originalBytes = utf8Bytes(serialized);
-  const sha256 = createHash('sha256').update(serialized).digest('hex');
-  const full = {
-    working_context_projection: {
-      schema: STAGE_PROPOSAL_PROJECTION_SCHEMA,
-      original_json_utf8_bytes: originalBytes,
-      sha256,
-      interpretation: 'untrusted_stage_input_omitted',
-    },
-  };
-  if (jsonBytes(full) <= maxBytes) return full;
-  const compact = { working_context_projection: { original_json_utf8_bytes: originalBytes, sha256 } };
-  return jsonBytes(compact) <= maxBytes ? compact : { working_context_projection: true };
-}
-
-/** Return an object record without accepting arrays as keyed tool input. */
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 /** Keep compacted narrative unmistakable without retaining arbitrary prose. */

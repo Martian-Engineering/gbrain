@@ -4,6 +4,7 @@ import {
   ToolLoopContextProjectionError,
 } from '../../src/core/ai/tool-loop-context.ts';
 import type { ChatBlock, ChatMessage } from '../../src/core/ai/gateway.ts';
+import { proposalInventoryContextPolicy } from '../../src/core/ingestion-proposal-context-policy.ts';
 
 interface RoundEntry {
   id: string;
@@ -94,6 +95,7 @@ describe('tool-loop exact non-mutating result retention', () => {
 
     const compacted = compactToolLoopMessages(messages, 4_000, {
       mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
     });
     const input = toolInput(compacted, 'failed-stage') as Record<string, unknown>;
 
@@ -162,6 +164,7 @@ describe('tool-loop exact non-mutating result retention', () => {
       latestReadRound[2]!,
     ], 4_000, {
       mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
       preferredProjectionBytes: 20_000,
       preferredProjectionFits: () => true,
     });
@@ -205,6 +208,7 @@ describe('tool-loop exact non-mutating result retention', () => {
 
     const retained = compactToolLoopMessages(unsafeRound, 4_000, {
       mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
     });
     const retainedSerialized = JSON.stringify(retained);
     expect(retainedSerialized).toContain('working_context_projection');
@@ -236,7 +240,10 @@ describe('tool-loop exact non-mutating result retention', () => {
       unsafeSummaryRound[2]!,
       newerRound[1]!,
       newerRound[2]!,
-    ], 1_500, { mutatingToolNames: new Set() });
+    ], 1_500, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
+    });
     const summarizedText = JSON.stringify(summarized);
     expect(summarizedText).toContain('Durable ledger counts');
     expect(summarizedText).not.toContain('page_inventory=');
@@ -272,6 +279,7 @@ describe('tool-loop exact non-mutating result retention', () => {
 
     expect(() => compactToolLoopMessages(messages, 1_000, {
       mutatingToolNames: new Set(),
+      toolPolicies: [proposalInventoryContextPolicy],
     })).toThrow(ToolLoopContextProjectionError);
   });
 
