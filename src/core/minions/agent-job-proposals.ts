@@ -167,6 +167,46 @@ interface ProposalTurnBlock {
   input?: unknown;
 }
 
+const CORRECTABLE_STAGE_PARSE_ERROR_CODES = [
+  'invalid_object',
+  'invalid_string',
+  'invalid_integer',
+  'invalid_total_pages',
+  'invalid_sequence',
+  'invalid_page',
+  'invalid_keys',
+  'invalid_slug',
+  'managed_region_marker',
+  'timeline_sentinel',
+] as const;
+
+type CorrectableStageParseErrorCode = typeof CORRECTABLE_STAGE_PARSE_ERROR_CODES[number];
+type StageProposalPageCoreParser = (raw: unknown) => ParsedStageProposalPageCore;
+
+/** Return whether a parser failure is safe to return through the tool-result loop. */
+function isCorrectableStageParseError(
+  error: unknown,
+): error is AgentJobProposalError & { readonly code: CorrectableStageParseErrorCode } {
+  return error instanceof AgentJobProposalError
+    && CORRECTABLE_STAGE_PARSE_ERROR_CODES.some(code => code === error.code);
+}
+
+/** Parse a pre-persistence candidate while deferring only known correctable failures. */
+function parseStageProposalPageCoreForPersistence(
+  raw: unknown,
+  parser: StageProposalPageCoreParser = parseStageProposalPageCore,
+): ParsedStageProposalPageCore | null {
+  try {
+    return parser(raw);
+  } catch (error) {
+    if (isCorrectableStageParseError(error)) return null;
+    throw error;
+  }
+}
+
+/** Test seams for the fail-closed pre-persistence parser boundary. */
+export const __testing = { parseStageProposalPageCoreForPersistence };
+
 /**
  * Validate page-staging calls before an assistant turn is persisted.
  *
@@ -232,9 +272,11 @@ export async function assertProposalToolTurnPersistableForJob(
     .find((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
   if (!stageCall) return;
   // Inventory semantics intentionally remain an execution-time tool result so
-  // the agent can correct a bad plan in the same job. This pre-persistence
-  // boundary only enforces transcript size and cumulative staged page bytes.
-  const candidate = parseStageProposalPageCore(stageCall.input);
+  // the agent can correct a bad plan in the same job. Page-shape errors are
+  // equally correctable and already byte-bounded above, so defer them to the
+  // tool handler instead of aborting the job before it can receive the error.
+  const candidate = parseStageProposalPageCoreForPersistence(stageCall.input);
+  if (!candidate) return;
 
   await engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
