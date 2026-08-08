@@ -17,6 +17,8 @@ tools:
   - stage_ingestion_proposal_page
   - finalize_ingestion_proposal
   - apply_ingestion_proposal_page
+  - apply_ingestion_proposal_relation
+  - finalize_ingestion_proposal_application
   - put_page
   - add_link
   - add_timeline_entry
@@ -120,6 +122,9 @@ approvedProposal: # required in apply mode
   digest: <64-character lowercase digest>
   sourceId: <same immutable source id>
   pages: <ordered sequence, slug, effect, pageDigest manifest>
+  timelineDigests: <ordered sequence and digest manifest>
+  linkDigests: <ordered sequence and digest manifest>
+  inventoryDigest: <64-character lowercase digest>
 canonicalExternalId: <stable upstream object identity>
 captureExternalId: <exact captured revision identity>
 revision: <content revision>
@@ -321,12 +326,14 @@ proposal.
 
 ### Apply mode
 
-In `apply` mode, the nested `approvedProposal` object is the sole page-write
-authority. Require exactly `jobId`, `digest`, `sourceId`, and ordered
-`pages`. Require the nested `sourceId` to equal the top-level `sourceId`,
-the digest and every `pageDigest` to be lowercase SHA-256 values, and pages to
-be one-based, contiguous, ordered entries with exactly `sequence`, `slug`,
-`effect`, and `pageDigest`. Do not accept page bodies, append text, private
+In `apply` mode, the nested `approvedProposal` object is the sole proposal
+authority. Require exactly `jobId`, `digest`, `sourceId`, ordered `pages`,
+ordered `timelineDigests`, ordered `linkDigests`, and `inventoryDigest`.
+Require the nested `sourceId` to equal the top-level `sourceId`; require every
+digest to be lowercase SHA-256; and require each manifest to be independently
+one-based, contiguous, and ordered. Page entries contain exactly `sequence`,
+`slug`, `effect`, and `pageDigest`; relation entries contain exactly `sequence`
+and `digest`. Do not accept page bodies, relation content, append text, private
 baselines, expected hashes, or slug adjustments in the apply prompt.
 
 Apply each manifest page in sequence with
@@ -357,11 +364,38 @@ pending. Retry only failed or pending sequences with the identical authority;
 replaying a completed sequence is safe only through the same operation, which
 returns `already_applied` after checking current durable page state.
 
-This operation authorizes pages only. If the approved proposal contains
-timeline or typed-link mutations, return `failed` without calling generic
-`add_timeline_entry`, `add_link`, or `put_page`; those effects require
-their own server-bound proposal operations. Never report the proposal fully
-applied while any planned effect lacks an authorized actionable outcome.
+After the pages, apply timeline entries in manifest order and then links in
+manifest order with `brain_apply_ingestion_proposal_relation`. Send exactly:
+
+```json
+{
+  "proposal_job_id": 123,
+  "proposal_digest": "64 lowercase hex characters",
+  "relation_kind": "timeline | link",
+  "sequence": 1,
+  "source_id": "verified source id"
+}
+```
+
+Never send relation text, endpoints, type, reference, label, or the relation
+digest. The server selects that content from frozen proposal authority. After
+every page and relation succeeds, call
+`brain_finalize_ingestion_proposal_application` exactly once with:
+
+```json
+{
+  "proposal_job_id": 123,
+  "proposal_digest": "64 lowercase hex characters",
+  "source_id": "verified source id"
+}
+```
+
+The first server-bound apply call preflights the whole frozen inventory before
+any corpus mutation. Stop after any failed call. A later apply job may resume
+with the same authority; completed slots replay as `already_applied`. Never use
+generic `put_page`, `add_timeline_entry`, or `add_link` in apply mode. Report
+success only from the finalizer's `applied_proposal` or `already_finalized`
+receipt, which re-verifies every durable effect and inventory digest.
 
 ## Phases
 

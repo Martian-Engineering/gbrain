@@ -2,10 +2,12 @@ import type { BrainEngine } from '../engine.ts';
 import { assertValidSourceId } from '../source-id.ts';
 import { matchesSlugAllowList } from '../slug-allow-list.ts';
 import {
+  buildProposalApplicationDigestInventory,
   parseProposalLinks,
   parseProposalTimelineEntries,
   parseProposalUnresolved,
   validateProposalRelations,
+  type ProposalRelationDigest,
 } from './agent-job-proposal-relations.ts';
 import {
   AgentJobProposalError,
@@ -111,6 +113,9 @@ export interface FinalizedProposalManifest {
   admissionScope: string;
   summary: string;
   pageDigests: ProposalPageDigest[];
+  timelineDigests: ProposalRelationDigest[];
+  linkDigests: ProposalRelationDigest[];
+  inventoryDigest: string;
   proposalDigest: string;
   proposedTimelineEntries: ScopedProposalTimelineEntry[];
   proposedLinks: ScopedProposalLink[];
@@ -413,6 +418,11 @@ export async function finalizeAgentJobProposal(
       );
     }
     const proposalDigest = digestProposalValue(plan);
+    const applicationInventory = buildProposalApplicationDigestInventory(
+      pageDigests,
+      timeline,
+      links,
+    );
     const manifest: FinalizedProposalManifest = {
       status: 'staged_proposal',
       artifactId: binding.artifactId,
@@ -420,6 +430,9 @@ export async function finalizeAgentJobProposal(
       admissionScope: boundScope,
       summary,
       pageDigests,
+      timelineDigests: applicationInventory.timelineDigests,
+      linkDigests: applicationInventory.linkDigests,
+      inventoryDigest: applicationInventory.inventoryDigest,
       proposalDigest,
       proposedTimelineEntries: timeline,
       proposedLinks: links,
@@ -502,6 +515,9 @@ export async function getOwnedAgentJobProposal(
   id: number;
   proposal_digest: string;
   page_digests: ProposalPageDigest[];
+  timeline_digests: ProposalRelationDigest[];
+  link_digests: ProposalRelationDigest[];
+  inventory_digest: string;
   plan: ScopedAdmissionProposalPlan;
 }> {
   assertSafeJobId(jobId);
@@ -539,6 +555,15 @@ export async function getOwnedAgentJobProposal(
   const pageDigests = authority.pageDigests;
   const fragments = await readIngestionProposalAuthorityPages(engine, jobId);
   if (
+    fragments.length < plan.proposedPages.length
+    || plan.proposedPages.some((_, index) => fragments[index]?.sequence !== index + 1)
+  ) {
+    throw new AgentJobProposalError(
+      'proposal_authority_page_missing',
+      'A page is missing from the finalized ingestion proposal authority.',
+    );
+  }
+  if (
     !Array.isArray(pageDigests)
     || pageDigests.length !== plan.proposedPages.length
     || fragments.length !== plan.proposedPages.length
@@ -554,10 +579,18 @@ export async function getOwnedAgentJobProposal(
   ) {
     throw new AgentJobProposalError('digest_mismatch', 'Stored proposal page manifest does not match the frozen plan.');
   }
+  const applicationInventory = buildProposalApplicationDigestInventory(
+    pageDigests,
+    plan.proposedTimelineEntries,
+    plan.proposedLinks,
+  );
   return {
     id: jobId,
     proposal_digest: proposalDigest,
     page_digests: pageDigests,
+    timeline_digests: applicationInventory.timelineDigests,
+    link_digests: applicationInventory.linkDigests,
+    inventory_digest: applicationInventory.inventoryDigest,
     plan,
   };
 }

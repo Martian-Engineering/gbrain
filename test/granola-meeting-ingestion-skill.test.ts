@@ -23,6 +23,8 @@ const expectedTools = [
   'stage_ingestion_proposal_page',
   'finalize_ingestion_proposal',
   'apply_ingestion_proposal_page',
+  'apply_ingestion_proposal_relation',
+  'finalize_ingestion_proposal_application',
   'put_page',
   'add_link',
   'add_timeline_entry',
@@ -184,10 +186,15 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"appliedContentHash":');
     expect(skill).toContain('"rebased": false');
   });
-  test('fails closed for relation effects until they have server-bound proposal operations', () => {
-    expect(skill).toMatch(/This operation authorizes pages only/);
-    expect(skill).toMatch(/return `failed` without calling generic\s+`add_timeline_entry`, `add_link`, or `put_page`/);
-    expect(skill).toMatch(/Never report the proposal fully\s+applied while any planned effect lacks an authorized actionable outcome/);
+  test('applies relations through frozen server authority and requires final proof', () => {
+    expect(skill).toContain('brain_apply_ingestion_proposal_relation');
+    expect(skill).toContain('brain_finalize_ingestion_proposal_application');
+    expect(skill).toContain('timelineDigests: <ordered sequence and digest manifest>');
+    expect(skill).toContain('inventoryDigest: <64-character lowercase digest>');
+    expect(skill).toMatch(/Never send relation text, endpoints, type, reference, label, or the relation\s+digest/);
+    expect(skill).toMatch(/preflights the whole frozen inventory before\s+any corpus mutation/);
+    expect(skill).toMatch(/Never use\s+generic `put_page`, `add_timeline_entry`, or `add_link` in apply mode/);
+    expect(skill).toMatch(/Report\s+success only from the finalizer/);
     expect(skill).toContain('"timelineResults": []');
     expect(skill).toContain('"linkResults": []');
   });

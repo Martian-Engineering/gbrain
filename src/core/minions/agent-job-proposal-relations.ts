@@ -3,7 +3,9 @@
 import {
   AgentJobProposalError,
   canonicalProposalJson,
+  digestProposalValue,
   isCanonicalProposalSlug,
+  type ProposalPageDigest,
 } from '../ingestion-proposal-contract.ts';
 import { matchesSlugAllowList } from '../slug-allow-list.ts';
 
@@ -21,6 +23,50 @@ export interface ProposalLink {
   from: string;
   to: string;
   type: string;
+}
+
+/** Compact server-derived identity for one frozen relation slot. */
+export interface ProposalRelationDigest {
+  sequence: number;
+  digest: string;
+}
+
+/** Complete compact inventory frozen onto an approved application job. */
+export interface ProposalApplicationDigestInventory {
+  pageDigests: ProposalPageDigest[];
+  timelineDigests: ProposalRelationDigest[];
+  linkDigests: ProposalRelationDigest[];
+  inventoryDigest: string;
+}
+
+/** Derive one relation digest without exposing its content to an apply job. */
+export function digestProposalRelation(
+  kind: 'timeline' | 'link',
+  relation: ProposalTimelineEntry | ProposalLink,
+): string {
+  return digestProposalValue({ kind, relation });
+}
+
+/** Derive ordered relation manifests and their whole-inventory digest. */
+export function buildProposalApplicationDigestInventory(
+  pageDigests: ProposalPageDigest[],
+  timeline: readonly ProposalTimelineEntry[],
+  links: readonly ProposalLink[],
+): ProposalApplicationDigestInventory {
+  const timelineDigests = timeline.map((entry, index) => ({
+    sequence: index + 1,
+    digest: digestProposalRelation('timeline', entry),
+  }));
+  const linkDigests = links.map((entry, index) => ({
+    sequence: index + 1,
+    digest: digestProposalRelation('link', entry),
+  }));
+  return {
+    pageDigests,
+    timelineDigests,
+    linkDigests,
+    inventoryDigest: digestProposalValue({ pageDigests, timelineDigests, linkDigests }),
+  };
 }
 
 /** Parse and deduplicate bounded timeline mutations. */

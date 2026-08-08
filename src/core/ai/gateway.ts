@@ -3318,7 +3318,11 @@ export interface ToolLoopOpts {
     providerToolCallId: string,
   ) => Promise<{ gbrainToolUseId: string }>;
   onToolCallComplete?: (gbrainToolUseId: string, output: unknown) => Promise<void>;
-  onToolCallFailed?: (gbrainToolUseId: string, error: string) => Promise<void>;
+  onToolCallFailed?: (
+    gbrainToolUseId: string,
+    error: string,
+    errorCode?: string,
+  ) => Promise<void>;
   /**
    * Persist the tool-result user turn that closes each tool round, BEFORE it is
    * appended to the in-memory history. Without this the loop only kept the
@@ -3577,7 +3581,11 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
         opts.onHeartbeat?.('tool_result', { turn_idx: turnIdx, tool_name: call.toolName });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        await opts.onToolCallFailed?.(gbrainToolUseId, errMsg);
+        const errorCode = typeof err === 'object' && err !== null &&
+            typeof (err as { code?: unknown }).code === 'string'
+          ? (err as { code: string }).code
+          : undefined;
+        await opts.onToolCallFailed?.(gbrainToolUseId, errMsg, errorCode);
         toolResultBlocks.push({
           type: 'tool-result',
           toolCallId: call.toolCallId,

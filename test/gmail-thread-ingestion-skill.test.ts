@@ -25,6 +25,8 @@ const expectedTools = [
   'stage_ingestion_proposal_page',
   'finalize_ingestion_proposal',
   'apply_ingestion_proposal_page',
+  'apply_ingestion_proposal_relation',
+  'finalize_ingestion_proposal_application',
   'put_page',
   'add_link',
   'add_timeline_entry',
@@ -145,8 +147,13 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('approvedProposal: # required in apply mode');
     expect(skill).toContain('brain_apply_ingestion_proposal_page');
     expect(skill).toContain('"proposal_job_id": 123');
-    expect(skill).toMatch(/Do not accept page bodies, append text, private\s+baselines, expected hashes, or slug adjustments in the apply prompt/);
+    expect(skill).toMatch(/Do not accept page bodies, relation content, append text, private\s+baselines, expected hashes, or slug adjustments in the apply prompt/);
     expect(skill).toMatch(/Stop after the first failed call and leave later sequences\s+pending/);
+    expect(skill).toContain('brain_apply_ingestion_proposal_relation');
+    expect(skill).toContain('brain_finalize_ingestion_proposal_application');
+    expect(skill).toContain('timelineDigests: <ordered sequence and digest manifest>');
+    expect(skill).toMatch(/preflights the whole frozen inventory before\s+any corpus mutation/);
+    expect(skill).toMatch(/Report\s+success only from the finalizer/);
     expect(skill).toContain('"proposalSequence": 1');
   });
   test('stages each update immediately after its sole exact baseline read', () => {

@@ -81,6 +81,9 @@ async function seedApprovedApplyJob(
     approved_proposal_job_id: frozen.proposalJobId,
     approved_proposal_digest: frozen.manifest.proposalDigest,
     approved_proposal_page_digests: frozen.manifest.pageDigests,
+    approved_proposal_timeline_digests: frozen.manifest.timelineDigests,
+    approved_proposal_link_digests: frozen.manifest.linkDigests,
+    approved_proposal_inventory_digest: frozen.manifest.inventoryDigest,
     ...overrides,
   });
 }
@@ -200,6 +203,12 @@ describe('deterministic compact append application', () => {
     };
 
     const applied = await applyAgentJobProposalPage(engine, applyJobId, input);
+    await engine.executeRaw(
+      `UPDATE ingestion_proposal_authority_pages
+          SET applied_write_through = '{"written":true}'::jsonb
+        WHERE proposal_id = $1 AND sequence = 1`,
+      [frozen.proposalJobId],
+    );
     const replay = await applyAgentJobProposalPage(engine, applyJobId, input);
     const page = await engine.getPage('sources/example', { sourceId: 'company' });
 
@@ -216,7 +225,11 @@ describe('deterministic compact append application', () => {
       content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
       rebased: false,
     });
-    expect(replay).toEqual({ ...applied, status: 'already_applied' });
+    expect(replay).toEqual({
+      ...applied,
+      status: 'already_applied',
+      write_through: { written: true },
+    });
     expect(page?.compiled_truth).toBe(`${baseline}\n\n## Delivery\n\nApproved note.`);
     expect(JSON.stringify(applied)).not.toContain('Private baseline');
     expect(applied.write_through).toEqual({ written: false, skipped: 'no_repo_configured' });
@@ -315,6 +328,9 @@ describe('deterministic compact append application', () => {
       approved_proposal_job_id: proposalJobId,
       approved_proposal_digest: manifest.proposalDigest,
       approved_proposal_page_digests: manifest.pageDigests,
+      approved_proposal_timeline_digests: manifest.timelineDigests,
+      approved_proposal_link_digests: manifest.linkDigests,
+      approved_proposal_inventory_digest: manifest.inventoryDigest,
     });
     const authority = {
       proposal_job_id: proposalJobId,
@@ -392,6 +408,9 @@ describe('deterministic compact append application', () => {
       approved_proposal_job_id: proposalJobId,
       approved_proposal_digest: manifest.proposalDigest,
       approved_proposal_page_digests: manifest.pageDigests,
+      approved_proposal_timeline_digests: manifest.timelineDigests,
+      approved_proposal_link_digests: manifest.linkDigests,
+      approved_proposal_inventory_digest: manifest.inventoryDigest,
     });
 
     await expect(applyAgentJobProposalPage(engine, applyJobId, {

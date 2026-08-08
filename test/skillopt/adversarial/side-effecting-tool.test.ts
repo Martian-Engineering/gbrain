@@ -51,6 +51,7 @@ describe('adversarial: D13 read-only tool sandbox', () => {
     const FORBIDDEN_IN_SKILLOPT_ROLLOUTS: ReadonlySet<string> = new Set([
       'put_page',
       'apply_ingestion_proposal_page',
+      'apply_ingestion_proposal_relation',
       'submit_job',
       'file_upload',
       // Future mutating ops: add here when they ship in BRAIN_TOOL_ALLOWLIST.
