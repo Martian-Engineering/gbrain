@@ -6124,6 +6124,207 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 138,
+    name: 'durable_ingestion_proposal_authority',
+    // Finalized authority must survive ordinary minion retention. Keep only a
+    // nullable audit link to the origin job and expire the private ledger via
+    // an explicit lifecycle boundary.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS ingestion_proposal_authorities (
+        proposal_id BIGINT PRIMARY KEY,
+        origin_job_id BIGINT REFERENCES minion_jobs(id) ON DELETE SET NULL,
+        owner_client_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        admission_scope TEXT NOT NULL,
+        capture_page_slug TEXT NOT NULL,
+        total_pages INTEGER NOT NULL CHECK (total_pages >= 1),
+        page_digests JSONB NOT NULL,
+        plan JSONB NOT NULL,
+        proposal_digest TEXT NOT NULL,
+        manifest JSONB NOT NULL,
+        finalized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        CONSTRAINT chk_ingestion_proposal_authority_digest
+          CHECK (proposal_digest ~ '^[a-f0-9]{64}$'),
+        CONSTRAINT chk_ingestion_proposal_authority_expiry
+          CHECK (expires_at > finalized_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_owner_digest
+        ON ingestion_proposal_authorities (owner_client_id, proposal_digest);
+      CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_expiry
+        ON ingestion_proposal_authorities (expires_at);
+
+      CREATE TABLE IF NOT EXISTS ingestion_proposal_authority_pages (
+        proposal_id BIGINT NOT NULL REFERENCES ingestion_proposal_authorities(proposal_id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        total_pages INTEGER NOT NULL,
+        page JSONB NOT NULL,
+        page_digest TEXT NOT NULL,
+        baseline_title TEXT,
+        baseline_markdown TEXT,
+        baseline_content_hash TEXT,
+        applied_previous_content_hash TEXT,
+        applied_content_hash TEXT,
+        applied_rebased BOOLEAN,
+        applied_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (proposal_id, sequence),
+        CONSTRAINT chk_ingestion_proposal_authority_page_sequence
+          CHECK (sequence >= 1 AND total_pages >= sequence),
+        CONSTRAINT chk_ingestion_proposal_authority_page_digest
+          CHECK (page_digest ~ '^[a-f0-9]{64}$'),
+        CONSTRAINT chk_ingestion_proposal_authority_page_baseline CHECK (
+          (baseline_title IS NULL AND baseline_markdown IS NULL AND baseline_content_hash IS NULL)
+          OR
+          (baseline_title IS NOT NULL AND baseline_markdown IS NOT NULL
+            AND baseline_content_hash ~ '^[a-f0-9]{64}$')
+        ),
+        CONSTRAINT chk_ingestion_proposal_authority_page_receipt CHECK (
+          (applied_previous_content_hash IS NULL AND applied_content_hash IS NULL
+            AND applied_rebased IS NULL AND applied_at IS NULL)
+          OR
+          (applied_content_hash ~ '^[a-f0-9]{64}$'
+            AND (applied_previous_content_hash IS NULL
+              OR applied_previous_content_hash ~ '^[a-f0-9]{64}$')
+            AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
+        )
+      );
+
+      INSERT INTO ingestion_proposal_authorities
+        (proposal_id, origin_job_id, owner_client_id, source_id, artifact_id,
+         admission_scope, capture_page_slug, total_pages, page_digests, plan,
+         proposal_digest, manifest, finalized_at, expires_at)
+      SELECT p.job_id, p.job_id, p.owner_client_id, p.source_id, p.artifact_id,
+             p.admission_scope, j.data->>'proposal_capture_page_slug',
+             p.total_pages, p.page_digests, p.plan, p.proposal_digest, p.manifest,
+             p.created_at, now() + interval '90 days'
+        FROM agent_job_proposals p
+        JOIN minion_jobs j ON j.id = p.job_id
+      ON CONFLICT (proposal_id) DO NOTHING;
+
+      INSERT INTO ingestion_proposal_authority_pages
+        (proposal_id, sequence, total_pages, page, page_digest, baseline_title,
+         baseline_markdown, baseline_content_hash,
+         applied_previous_content_hash, applied_content_hash, applied_rebased,
+         applied_at, created_at)
+      SELECT f.job_id, f.sequence, f.total_pages, f.page, f.page_digest,
+             f.baseline_title, f.baseline_markdown, f.baseline_content_hash,
+             f.applied_previous_content_hash, f.applied_content_hash,
+             f.applied_rebased, f.applied_at, f.created_at
+        FROM agent_job_proposal_fragments f
+        JOIN ingestion_proposal_authorities p ON p.proposal_id = f.job_id
+      ON CONFLICT (proposal_id, sequence) DO NOTHING;
+
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT EXISTS (
+          SELECT 1
+            FROM pg_roles pr
+           WHERE pg_has_role(current_user, pr.oid, 'USAGE')
+             AND (pr.rolbypassrls OR pr.rolsuper)
+        ) INTO has_bypass;
+        IF NOT has_bypass THEN
+          RAISE EXCEPTION 'v138 durable_ingestion_proposal_authority: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically on the next initSchema call.', current_user;
+        END IF;
+        ALTER TABLE ingestion_proposal_authorities ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE ingestion_proposal_authority_pages ENABLE ROW LEVEL SECURITY;
+      END $$;
+    `,
+    sqlFor: {
+      pglite: `
+        CREATE TABLE IF NOT EXISTS ingestion_proposal_authorities (
+          proposal_id BIGINT PRIMARY KEY,
+          origin_job_id BIGINT REFERENCES minion_jobs(id) ON DELETE SET NULL,
+          owner_client_id TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          artifact_id TEXT NOT NULL,
+          admission_scope TEXT NOT NULL,
+          capture_page_slug TEXT NOT NULL,
+          total_pages INTEGER NOT NULL CHECK (total_pages >= 1),
+          page_digests JSONB NOT NULL,
+          plan JSONB NOT NULL,
+          proposal_digest TEXT NOT NULL,
+          manifest JSONB NOT NULL,
+          finalized_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          expires_at TIMESTAMPTZ NOT NULL,
+          CONSTRAINT chk_ingestion_proposal_authority_digest
+            CHECK (proposal_digest ~ '^[a-f0-9]{64}$'),
+          CONSTRAINT chk_ingestion_proposal_authority_expiry
+            CHECK (expires_at > finalized_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_owner_digest
+          ON ingestion_proposal_authorities (owner_client_id, proposal_digest);
+        CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_authorities_expiry
+          ON ingestion_proposal_authorities (expires_at);
+
+        CREATE TABLE IF NOT EXISTS ingestion_proposal_authority_pages (
+          proposal_id BIGINT NOT NULL REFERENCES ingestion_proposal_authorities(proposal_id) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          total_pages INTEGER NOT NULL,
+          page JSONB NOT NULL,
+          page_digest TEXT NOT NULL,
+          baseline_title TEXT,
+          baseline_markdown TEXT,
+          baseline_content_hash TEXT,
+          applied_previous_content_hash TEXT,
+          applied_content_hash TEXT,
+          applied_rebased BOOLEAN,
+          applied_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (proposal_id, sequence),
+          CONSTRAINT chk_ingestion_proposal_authority_page_sequence
+            CHECK (sequence >= 1 AND total_pages >= sequence),
+          CONSTRAINT chk_ingestion_proposal_authority_page_digest
+            CHECK (page_digest ~ '^[a-f0-9]{64}$'),
+          CONSTRAINT chk_ingestion_proposal_authority_page_baseline CHECK (
+            (baseline_title IS NULL AND baseline_markdown IS NULL AND baseline_content_hash IS NULL)
+            OR
+            (baseline_title IS NOT NULL AND baseline_markdown IS NOT NULL
+              AND baseline_content_hash ~ '^[a-f0-9]{64}$')
+          ),
+          CONSTRAINT chk_ingestion_proposal_authority_page_receipt CHECK (
+            (applied_previous_content_hash IS NULL AND applied_content_hash IS NULL
+              AND applied_rebased IS NULL AND applied_at IS NULL)
+            OR
+            (applied_content_hash ~ '^[a-f0-9]{64}$'
+              AND (applied_previous_content_hash IS NULL
+                OR applied_previous_content_hash ~ '^[a-f0-9]{64}$')
+              AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
+          )
+        );
+
+        INSERT INTO ingestion_proposal_authorities
+          (proposal_id, origin_job_id, owner_client_id, source_id, artifact_id,
+           admission_scope, capture_page_slug, total_pages, page_digests, plan,
+           proposal_digest, manifest, finalized_at, expires_at)
+        SELECT p.job_id, p.job_id, p.owner_client_id, p.source_id, p.artifact_id,
+               p.admission_scope, j.data->>'proposal_capture_page_slug',
+               p.total_pages, p.page_digests, p.plan, p.proposal_digest, p.manifest,
+               p.created_at, now() + interval '90 days'
+          FROM agent_job_proposals p
+          JOIN minion_jobs j ON j.id = p.job_id
+        ON CONFLICT (proposal_id) DO NOTHING;
+
+        INSERT INTO ingestion_proposal_authority_pages
+          (proposal_id, sequence, total_pages, page, page_digest, baseline_title,
+           baseline_markdown, baseline_content_hash,
+           applied_previous_content_hash, applied_content_hash, applied_rebased,
+           applied_at, created_at)
+        SELECT f.job_id, f.sequence, f.total_pages, f.page, f.page_digest,
+               f.baseline_title, f.baseline_markdown, f.baseline_content_hash,
+               f.applied_previous_content_hash, f.applied_content_hash,
+               f.applied_rebased, f.applied_at, f.created_at
+          FROM agent_job_proposal_fragments f
+          JOIN ingestion_proposal_authorities p ON p.proposal_id = f.job_id
+        ON CONFLICT (proposal_id, sequence) DO NOTHING;
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

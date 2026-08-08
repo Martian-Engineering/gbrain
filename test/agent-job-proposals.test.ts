@@ -783,9 +783,9 @@ describe('durable agent-job proposal staging', () => {
       total_pages: 1, summary: 'Ready.',
     });
     await expect(getOwnedAgentJobProposal(engine, jobId, 'other', manifest.proposalDigest))
-      .rejects.toMatchObject({ code: 'permission_denied' });
+      .rejects.toMatchObject({ code: 'proposal_authority_unavailable' });
     await expect(getOwnedAgentJobProposal(engine, jobId, 'lore-client', 'f'.repeat(64)))
-      .rejects.toMatchObject({ code: 'permission_denied' });
+      .rejects.toMatchObject({ code: 'proposal_authority_unavailable' });
   });
 
   it('rejects cumulative staged pages over the aggregate ceiling without persisting the crossing fragment', async () => {
