@@ -29,6 +29,11 @@ import type { Operation, OperationContext } from '../../operations.ts';
 import { operationParamsToInputSchema } from '../../../mcp/tool-defs.ts';
 import { validateSourceId } from '../../utils.ts';
 import type { ToolCtx, ToolDef } from '../types.ts';
+import {
+  bindProposalToolInput,
+  omitProposalBindingFromSchema,
+  type IngestionProposalToolBinding,
+} from '../ingestion-proposal-tool-binding.ts';
 
 /**
  * v0.15 brain-tool allow-list. Review carefully when extending. Op names
@@ -248,6 +253,8 @@ export interface BuildBrainToolsOpts {
    * Unset → legacy 'default'.
    */
   sourceId?: string;
+  /** Immutable proposal identity injected into stage and finalize calls. */
+  proposalBinding?: IngestionProposalToolBinding;
 }
 
 interface OpContextDeps {
@@ -303,9 +310,10 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   if (opts.sourceId !== undefined) validateSourceId(opts.sourceId);
 
   return picked.map<ToolDef>(op => {
-    const schema = op.name === 'put_page'
+    const baseSchema = op.name === 'put_page'
       ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
       : paramsToInputSchema(op);
+    const schema = omitProposalBindingFromSchema(op.name, baseSchema, opts.proposalBinding);
 
     const toolName = sanitizeToolName(op.name);
     if (!ANTHROPIC_NAME_RE.test(toolName)) {
@@ -332,7 +340,10 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
           sourceId: opts.sourceId,
         });
-        const params = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
+        const boundInput = bindProposalToolInput(op.name, input, opts.proposalBinding);
+        const params = (boundInput && typeof boundInput === 'object')
+          ? boundInput as Record<string, unknown>
+          : {};
         return op.handler(opCtx, params);
       },
     };
@@ -373,5 +384,6 @@ export const __testing = {
   sanitizeToolName,
   paramsToInputSchema,
   namespacedPutPageSchema,
+  bindProposalToolInput,
   ANTHROPIC_NAME_RE,
 };

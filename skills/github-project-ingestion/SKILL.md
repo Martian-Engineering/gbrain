@@ -274,9 +274,10 @@ target's `get_page` returns, the very next assistant turn must call
 in that turn. Do not call `get_page` for another target, or make any other large
 read, between that baseline read and its staging call.
 
-Call `brain_stage_ingestion_proposal_page` with the exact
-`artifact_id`, `source_id`, `admission_scope`, one-based `sequence`, stable
-`total_pages`, the complete ordered `page_inventory`, and page object. Repeat the
+Call `brain_stage_ingestion_proposal_page` with the one-based `sequence`, stable
+`total_pages`, complete ordered `page_inventory`, and page object. The server
+injects the exact artifact, source, and any pre-bound admission-scope job
+binding. Supply only the fields present in the tool schema. Repeat the
 same full `page_inventory` unchanged on every stage call so the newest retained
 call carries the complete plan through working-context compaction. The staged
 page's `slug` and `effect` must match its inventory slot. Stage only one page per
@@ -311,7 +312,7 @@ admission scope. Scope provenance exists only in the top-level proposal
 receipt.
 
 After every page is staged, call `brain_finalize_ingestion_proposal` in a
-separate turn with the exact binding fields, stable page count, summary,
+separate turn with the stable page count, summary,
 timeline entries, links, and unresolved items. The server derives the ordered
 page-digest manifest from the job's durable fragments, so finalization does not
 depend on old stage outputs remaining in model context. The server rejects
