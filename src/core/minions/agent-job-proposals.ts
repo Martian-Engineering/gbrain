@@ -40,6 +40,10 @@ import {
   readIngestionProposalAuthorityPages,
   readOwnedIngestionProposalAuthority,
 } from './ingestion-proposal-authority.ts';
+import {
+  bindProposalToolInput,
+  type IngestionProposalToolBinding,
+} from './ingestion-proposal-tool-binding.ts';
 
 export {
   AgentJobProposalError,
@@ -209,9 +213,22 @@ export async function assertProposalToolTurnPersistableForJob(
   engine: BrainEngine,
   jobId: number,
   blocks: readonly ProposalTurnBlock[],
+  proposalBinding?: IngestionProposalToolBinding,
 ): Promise<void> {
   assertProposalToolTurnPersistable(blocks);
-  const stageCall = proposalToolCalls(blocks)
+  const boundBlocks = blocks.map((block) => {
+    const name = typeof block.name === 'string'
+      ? block.name
+      : typeof block.toolName === 'string'
+        ? block.toolName
+        : '';
+    return {
+      ...block,
+      input: bindProposalToolInput(name, block.input, proposalBinding),
+    };
+  });
+  if (proposalBinding) assertProposalToolTurnPersistable(boundBlocks);
+  const stageCall = proposalToolCalls(boundBlocks)
     .find((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
   if (!stageCall) return;
   // Inventory semantics intentionally remain an execution-time tool result so

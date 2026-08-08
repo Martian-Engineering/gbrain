@@ -38,6 +38,7 @@ import type { BrainEngine } from '../../engine.ts';
 import type { GBrainConfig } from '../../config.ts';
 import { loadConfig } from '../../config.ts';
 import { buildBrainTools, filterAllowedTools } from '../tools/brain-allowlist.ts';
+import { proposalToolBindingFromJobData } from '../ingestion-proposal-tool-binding.ts';
 import {
   acquireLease,
   releaseLease,
@@ -270,6 +271,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // allow-list — flows through buildBrainTools → the put_page schema
     // description AND the OperationContext, so the model's tool schema and
     // the server-side check stay in sync).
+    const proposalBinding = proposalToolBindingFromJobData(data);
     const registry = deps.toolRegistry ?? buildBrainTools({
       subagentId: ctx.id,
       engine,
@@ -278,6 +280,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       allowedSlugPrefixes: data.allowed_slug_prefixes,
       // #1586: cycle-resolved source scope for tool-call OperationContexts.
       sourceId: data.source_id,
+      proposalBinding,
     });
     const toolDefs = data.allowed_tools && data.allowed_tools.length > 0
       ? filterAllowedTools(registry, data.allowed_tools)
@@ -645,7 +648,12 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
       // Enforce proposal page count and byte limits before the assistant turn
       // makes its raw tool inputs durable in subagent_messages.
-      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
+      await assertProposalToolTurnPersistableForJob(
+        engine,
+        ctx.id,
+        blocks,
+        proposalBinding,
+      );
 
       // 3. Persist the assistant message BEFORE tool dispatch so replay
       //    sees a consistent state.
@@ -861,6 +869,7 @@ interface GatewayRunArgs {
  */
 async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResult> {
   const { engine, ctx, data, model, systemPrompt, toolDefs, maxTurns, maxOutputTokens } = args;
+  const proposalBinding = proposalToolBindingFromJobData(data);
 
   // Map ToolDef → ChatToolDef (gateway shape). The gateway's chat() bridges
   // this to provider-specific tool definitions via the Vercel AI SDK.
@@ -1005,7 +1014,12 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       nextMessageIdx,
     },
     onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {
-      await assertProposalToolTurnPersistableForJob(engine, ctx.id, blocks);
+      await assertProposalToolTurnPersistableForJob(
+        engine,
+        ctx.id,
+        blocks,
+        proposalBinding,
+      );
       // Convert ChatBlock[] back to ContentBlock-shaped JSONB for persistence.
       // Storing the gateway's provider-neutral shape is the v2 content_blocks
       // contract; the D5 shim handles legacy reads from v1 rows.

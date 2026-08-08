@@ -240,16 +240,16 @@ target, or make any other large read, between that baseline read and its staging
 call.
 
 Stage only one page per turn by calling `brain_stage_ingestion_proposal_page`
-with the exact `artifact_id`,
-`source_id`, `admission_scope`, one-based `sequence`, stable `total_pages`, the
-complete ordered `page_inventory`, and `page` object. Repeat the same full
+with the one-based `sequence`, stable `total_pages`, complete ordered
+`page_inventory`, and `page` object. The server injects the exact artifact,
+source, and any pre-bound admission-scope job binding. Supply only the fields
+present in the tool schema. Repeat the same full
 `page_inventory` unchanged on every stage call so the newest retained call
 carries the complete plan through working-context compaction. The page's `slug`
 and `effect` must match its inventory slot. Follow the returned
 `nextExpectedSlot`; `null` means every slot is staged. Then call
-`brain_finalize_ingestion_proposal` in its own turn
-with the same exact `artifact_id`, `source_id`, `admission_scope`, and
-`total_pages`, plus compact `summary`, `proposed_timeline_entries`,
+`brain_finalize_ingestion_proposal` in its own turn with `total_pages`, plus
+compact `summary`, `proposed_timeline_entries`,
 `proposed_links`, and bounded `unresolved`. Return `failed` without corpus
 mutation when the canonical plan or its escaped representation exceeds 98,304
 UTF-8 bytes, the compact manifest exceeds 262,144 UTF-8 bytes, or any required

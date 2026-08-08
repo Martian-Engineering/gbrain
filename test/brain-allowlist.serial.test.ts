@@ -158,6 +158,110 @@ describe('buildBrainTools', () => {
     expect(slug.pattern).toBeUndefined();
   });
 
+  test('proposal tools keep immutable job identity out of model-owned input', () => {
+    const proposalBinding = {
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include project delivery notes.',
+    };
+    const tools = buildBrainTools({ subagentId: 42, engine, config, proposalBinding });
+
+    for (const name of [
+      'brain_stage_ingestion_proposal_page',
+      'brain_finalize_ingestion_proposal',
+    ]) {
+      const schema = tools.find(tool => tool.name === name)!.input_schema as {
+        properties: Record<string, unknown>;
+        required: string[];
+      };
+      expect(schema.properties.artifact_id).toBeUndefined();
+      expect(schema.properties.source_id).toBeUndefined();
+      expect(schema.properties.admission_scope).toBeUndefined();
+      expect(schema.required).not.toContain('artifact_id');
+      expect(schema.required).not.toContain('source_id');
+      expect(schema.required).not.toContain('admission_scope');
+    }
+
+    expect(__testing.bindProposalToolInput(
+      'stage_ingestion_proposal_page',
+      { sequence: 12 },
+      proposalBinding,
+    )).toEqual({
+      sequence: 12,
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include project delivery notes.',
+    });
+    expect(__testing.bindProposalToolInput(
+      'stage_ingestion_proposal_page',
+      { sequence: 12, artifact_id: { lost: true } },
+      proposalBinding,
+    )).toEqual({
+      sequence: 12,
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include project delivery notes.',
+    });
+  });
+
+  test('proposal tools stage and finalize with server-bound identity', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name)
+       VALUES ('company', 'Company')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const jobs = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'active', $1::text::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({
+        __owner_client_id: 'lore-client',
+        source_id: 'company',
+        proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Include project delivery notes.',
+        allowed_slug_prefixes: ['sources/*'],
+      })],
+    );
+    const jobId = Number(jobs[0]!.id);
+    const tools = buildBrainTools({
+      subagentId: jobId,
+      engine,
+      config,
+      sourceId: 'company',
+      allowedSlugPrefixes: ['sources/*'],
+      proposalBinding: {
+        artifactId: 'artifact-1',
+        sourceId: 'company',
+        admissionScope: 'Include project delivery notes.',
+      },
+    });
+    const ctx: ToolCtx = { engine, jobId, remote: true };
+    const stage = tools.find(tool => tool.name === 'brain_stage_ingestion_proposal_page')!;
+    const finalize = tools.find(tool => tool.name === 'brain_finalize_ingestion_proposal')!;
+
+    await expect(stage.execute({
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: [{ slug: 'sources/example', effect: 'create' }],
+      page: {
+        slug: 'sources/example',
+        effect: 'create',
+        title: 'Example',
+        bodyMarkdown: '# Example',
+      },
+    }, ctx)).resolves.toMatchObject({ sequence: 1, nextExpectedSlot: null });
+    await expect(finalize.execute({
+      total_pages: 1,
+      summary: 'Ready for review.',
+    }, ctx)).resolves.toMatchObject({
+      status: 'staged_proposal',
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include project delivery notes.',
+    });
+  });
+
   test('execute() on put_page with valid namespace slug succeeds', async () => {
     const tools = buildBrainTools({ subagentId: 42, engine, config });
     const putPage = tools.find(t => t.name === 'brain_put_page');

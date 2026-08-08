@@ -478,6 +478,10 @@ export interface SubagentHandlerData {
    * tool-registry build time.
    */
   source_id?: string;
+  /** Exact ingestion artifact bound by submit_agent for proposal tools. */
+  proposal_artifact_id?: string;
+  /** Exact resolver scope bound by submit_agent for proposal tools. */
+  proposal_admission_scope?: string;
   /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior

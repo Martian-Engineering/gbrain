@@ -113,6 +113,33 @@ async function stage(
 }
 
 describe('proposal turn pre-persistence boundary', () => {
+  it('uses immutable job identity when a compacted stage call omits it', async () => {
+    const jobId = await seedJob();
+    const page = createPage('sources/example');
+    const input = {
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: pageInventory(page),
+      page,
+    };
+
+    await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
+      type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input,
+    }], {
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include project delivery notes.',
+    })).resolves.toBeUndefined();
+
+    const rows = await engine.executeRaw<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM agent_job_proposal_fragments
+        WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(rows[0]?.count).toBe('0');
+  });
+
   it('rejects oversized stage input and multiple stages before persistence callbacks run', () => {
     const oversized = {
       type: 'tool-call',
