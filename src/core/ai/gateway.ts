@@ -56,7 +56,11 @@ import { AIConfigError, AITransientError, normalizeAIError } from './errors.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
 import { loadConfig } from '../config.ts';
 import { buildGatewayConfig } from './build-gateway-config.ts';
-import { compactToolLoopMessages, resolveToolLoopMessageBudget } from './tool-loop-context.ts';
+import {
+  compactToolLoopMessages,
+  openAiToolLoopRequestFits,
+  resolveToolLoopMessageBudgets,
+} from './tool-loop-context.ts';
 import { assertProposalToolTurnPersistable } from '../minions/agent-job-proposals.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
@@ -3359,7 +3363,7 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
   const maxTokens = opts.maxTokens ?? defaultMaxOutputTokens(opts.model ?? getChatModel());
   const handlers = opts.toolHandlers;
   const model = opts.model ?? getChatModel();
-  const messageBudget = resolveToolLoopMessageBudget({
+  const messageBudgets = resolveToolLoopMessageBudgets({
     model,
     maxOutputTokens: maxTokens,
     system: opts.system,
@@ -3394,12 +3398,21 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
     opts.onHeartbeat?.('turn_start', { turn_idx: turnIdx });
 
     const balancedMessages = repairToolPairing(messages);
-    const providerMessages = compactToolLoopMessages(balancedMessages, messageBudget, {
+    const providerMessages = compactToolLoopMessages(balancedMessages, messageBudgets.byteSafeBytes, {
       mutatingToolNames: new Set(
         opts.tools
           .filter(tool => opts.toolHandlers.get(tool.name)?.mutating !== false)
           .map(tool => tool.name),
       ),
+      preferredProjectionBytes: messageBudgets.preferredProjectionBytes,
+      preferredProjectionFits: messageBudgets.openAiTokenLimits
+        ? candidate => openAiToolLoopRequestFits({
+          budgets: messageBudgets,
+          system: opts.system,
+          tools: opts.tools,
+          modelMessages: toModelMessages(candidate),
+        })
+        : undefined,
     });
     if (providerMessages !== balancedMessages) {
       opts.onHeartbeat?.('context_compacted', {
