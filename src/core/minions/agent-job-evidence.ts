@@ -8,6 +8,7 @@ const TRACKED_TOOLS = [
   'brain_add_timeline_entry',
   'brain_add_link',
   'brain_remove_link',
+  'brain_apply_ingestion_proposal_page',
 ] as const;
 
 type ExecutionStatus = 'pending' | 'complete' | 'failed';
@@ -113,6 +114,19 @@ function completedMutationLacksProof(operation: Record<string, unknown>): boolea
     return typeof operation.applied_content_hash !== 'string' ||
       operation.outcome === 'unknown';
   }
+  if (operation.operation === 'apply_ingestion_proposal_page') {
+    return operation.outcome === 'unknown' ||
+      typeof operation.proposal_job_id !== 'number' ||
+      typeof operation.proposal_sequence !== 'number' ||
+      typeof operation.slug !== 'string' ||
+      typeof operation.proposal_digest !== 'string' ||
+      typeof operation.page_digest !== 'string' ||
+      typeof operation.applied_content_hash !== 'string' ||
+      (operation.effect !== 'create' && operation.effect !== 'update') ||
+      typeof operation.rebased !== 'boolean' ||
+      (operation.effect === 'create' && operation.previous_content_hash !== null) ||
+      (operation.effect === 'update' && typeof operation.previous_content_hash !== 'string');
+  }
   if (operation.operation === 'add_timeline_entry') {
     return typeof operation.timeline_payload_sha256 !== 'string' ||
       operation.outcome === 'unknown';
@@ -193,7 +207,13 @@ function recoveryActions(input: {
 }
 
 function isMutationOperation(operation: Record<string, unknown>): boolean {
-  return ['put_page', 'add_timeline_entry', 'add_link', 'remove_link']
+  return [
+    'put_page',
+    'apply_ingestion_proposal_page',
+    'add_timeline_entry',
+    'add_link',
+    'remove_link',
+  ]
     .includes(String(operation.operation));
 }
 
@@ -237,6 +257,41 @@ function evidenceForRow(
       observed_content_hash: hashValue(output.content_hash),
     };
   }
+  if (row.tool_name === 'brain_apply_ingestion_proposal_page') {
+    const proposalJobId = integerValue(input.proposal_job_id);
+    const proposalSequence = integerValue(input.sequence);
+    const proposalDigest = hashValue(input.proposal_digest);
+    const pageDigest = hashValue(input.page_digest);
+    const requestedSource = stringValue(input.source_id);
+    const outputMatchesRequest = row.status === 'complete' &&
+      output.proposal_job_id === proposalJobId &&
+      output.sequence === proposalSequence &&
+      output.proposal_digest === proposalDigest &&
+      output.page_digest === pageDigest &&
+      output.source_id === requestedSource &&
+      requestedSource === sourceId;
+    const effect = output.effect === 'create' || output.effect === 'update'
+      ? output.effect
+      : null;
+    const status = output.status === 'applied' || output.status === 'already_applied'
+      ? output.status
+      : null;
+    return {
+      ...base,
+      proposal_job_id: proposalJobId,
+      proposal_sequence: proposalSequence,
+      proposal_digest: proposalDigest,
+      page_digest: pageDigest,
+      effect,
+      slug: outputMatchesRequest ? stringValue(output.slug) : null,
+      previous_content_hash: outputMatchesRequest
+        ? nullableHash(output.previous_content_hash)
+        : null,
+      applied_content_hash: outputMatchesRequest ? hashValue(output.content_hash) : null,
+      rebased: outputMatchesRequest ? booleanValue(output.rebased) : null,
+      outcome: outputMatchesRequest && effect && status ? status : 'unknown',
+    };
+  }
   if (row.tool_name === 'brain_add_timeline_entry') {
     return {
       ...base,
@@ -278,6 +333,18 @@ function hashValue(value: unknown): string | null {
   return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
     ? value
     : null;
+}
+
+function nullableHash(value: unknown): string | null {
+  return value === null ? null : hashValue(value);
+}
+
+function integerValue(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
 }
 
 function expectedHash(value: unknown): string | null | 'unavailable' {

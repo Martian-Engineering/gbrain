@@ -2,6 +2,12 @@ import type { BrainEngine } from '../engine.ts';
 import { assertValidSourceId } from '../source-id.ts';
 import { matchesSlugAllowList } from '../slug-allow-list.ts';
 import {
+  parseProposalLinks,
+  parseProposalTimelineEntries,
+  parseProposalUnresolved,
+  validateProposalRelations,
+} from './agent-job-proposal-relations.ts';
+import {
   AgentJobProposalError,
   PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
   PROPOSAL_MAX_PAGES,
@@ -55,7 +61,6 @@ export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
 
 export const FINALIZE_PROPOSAL_TOOL_NAME = 'brain_finalize_ingestion_proposal';
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 
 export interface ScopedProposalTimelineEntry {
@@ -124,6 +129,20 @@ interface StoredProposalFragment {
   admission_scope: string;
   page: unknown;
   page_digest: string;
+  baseline_title: string | null;
+  baseline_markdown: string | null;
+  baseline_content_hash: string | null;
+}
+
+interface PrivateUpdateBaseline {
+  title: string;
+  markdown: string;
+  contentHash: string;
+}
+
+interface FrozenProposalCandidate extends ParsedStageProposalPageCore {
+  pageDigest: string;
+  baseline: PrivateUpdateBaseline | null;
 }
 
 interface ProposalTurnBlock {
@@ -194,7 +213,8 @@ export async function assertProposalToolTurnPersistableForJob(
     assertBindingMatches(binding, candidate);
     assertSlugAllowed(binding, candidate.page.slug, 'Proposed page');
     const fragments = await readStoredFragments(tx, jobId);
-    assertCumulativeStageFits(binding, candidate, fragments);
+    const replay = assertCumulativeStageFits(binding, candidate, fragments);
+    if (!replay) await freezeProposalCandidate(tx, binding, candidate);
   });
 }
 
@@ -250,27 +270,33 @@ export async function stageAgentJobProposalPage(
       return {
         sequence: candidate.sequence,
         slug: candidate.page.slug,
-        digest: candidate.pageDigest,
+        digest: replay.page_digest,
         nextExpectedSlot: nextExpectedInventorySlot(candidate.pageInventory, fragments),
       };
     }
 
+    const frozenCandidate = await freezeProposalCandidate(tx, binding, candidate);
+
     await tx.executeRaw(
       `INSERT INTO agent_job_proposal_fragments
          (job_id, owner_client_id, source_id, artifact_id, admission_scope,
-          sequence, total_pages, page, page_digest)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9)
+          sequence, total_pages, page, page_digest, baseline_title,
+          baseline_markdown, baseline_content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9, $10, $11, $12)
        ON CONFLICT (job_id, sequence) DO NOTHING`,
       [
         jobId, frozenBinding.ownerClientId, frozenBinding.sourceId, frozenBinding.artifactId,
         frozenBinding.admissionScope, candidate.sequence, candidate.totalPages,
-        canonicalProposalJson(candidate.page), candidate.pageDigest,
+        canonicalProposalJson(candidate.page), frozenCandidate.pageDigest,
+        frozenCandidate.baseline?.title ?? null,
+        frozenCandidate.baseline?.markdown ?? null,
+        frozenCandidate.baseline?.contentHash ?? null,
       ],
     );
     return {
       sequence: candidate.sequence,
       slug: candidate.page.slug,
-      digest: candidate.pageDigest,
+      digest: frozenCandidate.pageDigest,
       nextExpectedSlot: nextExpectedInventorySlot(candidate.pageInventory, [
         ...fragments,
         { sequence: candidate.sequence },
@@ -299,9 +325,9 @@ export async function finalizeAgentJobProposal(
     PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
   );
   const summary = readBoundedString(input.summary, 'summary', 1_000);
-  const timeline = parseTimelineEntries(input.proposed_timeline_entries ?? []);
-  const links = parseLinks(input.proposed_links ?? []);
-  const unresolved = parseUnresolved(input.unresolved ?? []);
+  const timeline = parseProposalTimelineEntries(input.proposed_timeline_entries ?? []);
+  const links = parseProposalLinks(input.proposed_links ?? []);
+  const unresolved = parseProposalUnresolved(input.unresolved ?? []);
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
@@ -335,9 +361,7 @@ export async function finalizeAgentJobProposal(
         throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
       }
       const page = parseProposalPage(fragment.page);
-      if (
-        digestProposalValue(page) !== fragment.page_digest
-      ) {
+      if (digestFrozenProposalPage(page, baselineFromFragment(fragment)) !== fragment.page_digest) {
         throw new AgentJobProposalError('digest_mismatch', `Digest mismatch at sequence ${expectedSequence}.`);
       }
       if (seenSlugs.has(page.slug)) {
@@ -353,7 +377,13 @@ export async function finalizeAgentJobProposal(
       pages.push(page);
       pageDigests.push({ sequence: expectedSequence, slug: page.slug, digest: fragment.page_digest });
     }
-    validatePlanRelations(binding, seenSlugs, timeline, links);
+    validateProposalRelations(
+      binding.capturePageSlug,
+      binding.allowedSlugPrefixes,
+      seenSlugs,
+      timeline,
+      links,
+    );
 
     const plan: ScopedAdmissionProposalPlan = {
       artifactId: binding.artifactId,
@@ -466,13 +496,19 @@ export async function getOwnedAgentJobProposal(
     throw new AgentJobProposalError('digest_mismatch', 'Stored proposal content does not match its digest.');
   }
   const pageDigests = rows[0].page_digests;
+  const fragments = await readStoredFragments(engine, jobId);
   if (
     !Array.isArray(pageDigests)
     || pageDigests.length !== plan.proposedPages.length
+    || fragments.length !== plan.proposedPages.length
     || pageDigests.some((entry, index) => (
       entry.sequence !== index + 1
       || entry.slug !== plan.proposedPages[index]?.slug
-      || entry.digest !== digestProposalValue(plan.proposedPages[index])
+      || entry.digest !== fragments[index]?.page_digest
+      || entry.digest !== digestFrozenProposalPage(
+        parseProposalPage(fragments[index]?.page),
+        baselineFromFragment(fragments[index]!),
+      )
     ))
   ) {
     throw new AgentJobProposalError('digest_mismatch', 'Stored proposal page manifest does not match the frozen plan.');
@@ -706,7 +742,8 @@ async function assertFirstInventoryEffectsMatchCorpus(
 async function readStoredFragments(engine: BrainEngine, jobId: number): Promise<StoredProposalFragment[]> {
   return engine.executeRaw<StoredProposalFragment>(
     `SELECT sequence, total_pages, owner_client_id, source_id, artifact_id,
-            admission_scope, page, page_digest
+            admission_scope, page, page_digest, baseline_title,
+            baseline_markdown, baseline_content_hash
        FROM agent_job_proposal_fragments
       WHERE job_id = $1
       ORDER BY sequence`,
@@ -722,9 +759,9 @@ function assertCumulativeStageFits(
   binding: JobBinding,
   candidate: ParsedStageProposalPageCore,
   fragments: readonly StoredProposalFragment[],
-): boolean {
+): StoredProposalFragment | null {
   let stagedBytes = 0;
-  let replay = false;
+  let replay: StoredProposalFragment | null = null;
   for (const fragment of fragments) {
     if (
       fragment.owner_client_id !== binding.ownerClientId
@@ -736,22 +773,21 @@ function assertCumulativeStageFits(
       throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
     }
     const page = parseProposalPage(fragment.page);
-    const pageDigest = digestProposalValue(page);
+    const pageDigest = digestFrozenProposalPage(page, baselineFromFragment(fragment));
     if (pageDigest !== fragment.page_digest) {
       throw new AgentJobProposalError('digest_mismatch', 'A staged fragment does not match its stored digest.');
     }
     stagedBytes += proposalToolInputBytes(page);
     if (Number(fragment.sequence) !== candidate.sequence) continue;
     if (
-      pageDigest !== candidate.pageDigest
-      || canonicalProposalJson(page) !== canonicalProposalJson(candidate.page)
+      canonicalProposalJson(page) !== canonicalProposalJson(candidate.page)
     ) {
       throw new AgentJobProposalError(
         'conflicting_fragment',
         `Sequence ${candidate.sequence} already contains a different proposal fragment.`,
       );
     }
-    replay = true;
+    replay = fragment;
   }
   if (!replay) stagedBytes += proposalToolInputBytes(candidate.page);
   if (stagedBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
@@ -763,6 +799,73 @@ function assertCumulativeStageFits(
   return replay;
 }
 
+/** Load and freeze the exact private baseline for a compact update intent. */
+async function freezeProposalCandidate(
+  engine: BrainEngine,
+  binding: JobBinding,
+  candidate: ParsedStageProposalPageCore,
+): Promise<FrozenProposalCandidate> {
+  if (candidate.page.effect === 'create') {
+    return { ...candidate, pageDigest: digestFrozenProposalPage(candidate.page, null), baseline: null };
+  }
+  const page = await engine.getPage(candidate.page.slug, {
+    sourceId: binding.sourceId,
+    includeDeleted: true,
+  });
+  if (!page || page.deleted_at || !page.content_hash) {
+    throw new AgentJobProposalError(
+      'baseline_unavailable',
+      `Update baseline is unavailable for ${candidate.page.slug}; rebuild the inventory against current pages.`,
+    );
+  }
+  const baseline: PrivateUpdateBaseline = {
+    title: page.title,
+    markdown: page.compiled_truth,
+    contentHash: page.content_hash,
+  };
+  return {
+    ...candidate,
+    baseline,
+    pageDigest: digestFrozenProposalPage(candidate.page, baseline),
+  };
+}
+
+/** Reconstruct a private baseline without accepting partially populated rows. */
+function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
+  const page = parseProposalPage(fragment.page);
+  if (page.effect === 'create') return null;
+  if (
+    fragment.baseline_title === null
+    || fragment.baseline_markdown === null
+    || fragment.baseline_content_hash === null
+    || !SHA256_RE.test(fragment.baseline_content_hash)
+  ) {
+    throw new AgentJobProposalError('baseline_unavailable', 'A staged update is missing its private baseline.');
+  }
+  return {
+    title: fragment.baseline_title,
+    markdown: fragment.baseline_markdown,
+    contentHash: fragment.baseline_content_hash,
+  };
+}
+
+/** Bind a public page intent to its server-private baseline. */
+function digestFrozenProposalPage(
+  page: ScopedProposalPage,
+  baseline: PrivateUpdateBaseline | null,
+): string {
+  if (page.effect === 'create') return digestProposalValue(page);
+  if (!baseline) {
+    throw new AgentJobProposalError('baseline_unavailable', 'A compact update requires a private baseline.');
+  }
+  return digestProposalValue({
+    page,
+    baselineTitle: baseline.title,
+    baselineMarkdown: baseline.markdown,
+    baselineContentHash: baseline.contentHash,
+  });
+}
+
 /** Reject a proposed mutation target outside the job's durable slug fence. */
 function assertSlugAllowed(binding: JobBinding, slug: string, label: string): void {
   if (!matchesSlugAllowList(slug, binding.allowedSlugPrefixes)) {
@@ -770,101 +873,6 @@ function assertSlugAllowed(binding: JobBinding, slug: string, label: string): vo
       'slug_not_allowed',
       `${label} ${slug} is outside the agent job slug fence.`,
     );
-  }
-}
-
-function parseTimelineEntries(raw: unknown): ScopedProposalTimelineEntry[] {
-  if (!Array.isArray(raw) || raw.length > 40) {
-    throw new AgentJobProposalError('invalid_timeline', 'proposed_timeline_entries must be an array of at most 40 entries.');
-  }
-  const identities = new Set<string>();
-  return raw.map((entry, index) => {
-    const record = readRecord(entry, `proposed_timeline_entries[${index}]`);
-    const keys = Object.keys(record).sort();
-    const validKeys = keys.every((key) => ['date', 'pageSlug', 'ref', 'refLabel', 'text'].includes(key));
-    if (!validKeys || !['date', 'pageSlug', 'ref', 'text'].every((key) => key in record)) {
-      throw new AgentJobProposalError('invalid_timeline', `Invalid timeline entry at index ${index}.`);
-    }
-    const date = readString(record.date, 'timeline.date');
-    const parsedDate = new Date(`${date}T00:00:00Z`);
-    if (
-      !DATE_RE.test(date)
-      || Number.isNaN(parsedDate.getTime())
-      || parsedDate.toISOString().slice(0, 10) !== date
-    ) {
-      throw new AgentJobProposalError('invalid_timeline', `Invalid timeline date ${date}.`);
-    }
-    const result: ScopedProposalTimelineEntry = {
-      pageSlug: readCanonicalSlug(record.pageSlug, 'timeline.pageSlug'),
-      date,
-      text: readBoundedString(record.text, 'timeline.text', 1_000),
-      ref: readCanonicalSlug(record.ref, 'timeline.ref'),
-    };
-    if ('refLabel' in record) result.refLabel = readBoundedString(record.refLabel, 'timeline.refLabel', 500);
-    const identity = canonicalProposalJson(result);
-    if (identities.has(identity)) {
-      throw new AgentJobProposalError('duplicate_timeline', 'Proposal contains duplicate timeline mutations.');
-    }
-    identities.add(identity);
-    return result;
-  });
-}
-
-function parseLinks(raw: unknown): ScopedProposalLink[] {
-  if (!Array.isArray(raw) || raw.length > 40) {
-    throw new AgentJobProposalError('invalid_links', 'proposed_links must be an array of at most 40 entries.');
-  }
-  const identities = new Set<string>();
-  return raw.map((entry, index) => {
-    const record = readRecord(entry, `proposed_links[${index}]`);
-    assertExactKeys(record, ['from', 'to', 'type'], `proposed_links[${index}]`);
-    const result = {
-      from: readCanonicalSlug(record.from, 'link.from'),
-      to: readCanonicalSlug(record.to, 'link.to'),
-      type: readBoundedString(record.type, 'link.type', 128),
-    };
-    const identity = canonicalProposalJson(result);
-    if (identities.has(identity)) {
-      throw new AgentJobProposalError('duplicate_links', 'Proposal contains duplicate link mutations.');
-    }
-    identities.add(identity);
-    return result;
-  });
-}
-
-function parseUnresolved(raw: unknown): string[] {
-  if (!Array.isArray(raw) || raw.length > 40) {
-    throw new AgentJobProposalError('invalid_unresolved', 'unresolved must be an array of at most 40 strings.');
-  }
-  return raw.map((entry, index) => readBoundedString(entry, `unresolved[${index}]`, 500));
-}
-
-function validatePlanRelations(
-  binding: JobBinding,
-  pageSlugs: ReadonlySet<string>,
-  timeline: readonly ScopedProposalTimelineEntry[],
-  links: readonly ScopedProposalLink[],
-): void {
-  if (!pageSlugs.has(binding.capturePageSlug)) {
-    throw new AgentJobProposalError(
-      'missing_capture_page',
-      'The exact job-bound capture page must be included in proposed pages.',
-    );
-  }
-  for (const entry of timeline) {
-    assertSlugAllowed(binding, entry.pageSlug, 'Timeline target');
-    if (entry.ref !== binding.capturePageSlug) {
-      throw new AgentJobProposalError(
-        'invalid_timeline_capture',
-        'Every timeline ref must equal the exact job-bound capture page.',
-      );
-    }
-  }
-  for (const link of links) {
-    assertSlugAllowed(binding, link.from, 'Link source');
-    if (!pageSlugs.has(link.from)) {
-      throw new AgentJobProposalError('invalid_links', 'Every proposed link from slug must name a proposed page.');
-    }
   }
 }
 

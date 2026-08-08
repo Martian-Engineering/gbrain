@@ -24,6 +24,7 @@ const expectedTools = [
   'get_backlinks',
   'stage_ingestion_proposal_page',
   'finalize_ingestion_proposal',
+  'apply_ingestion_proposal_page',
   'put_page',
   'add_link',
   'add_timeline_entry',
@@ -101,7 +102,7 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('priorAttempt: # optional; omitted when there is no prior write evidence');
     for (const field of [
       'failureCode:', 'terminalFailureClass:', 'receiptStatus:', 'createdPages:',
-      'updatedPages:', 'verifiedPages:', 'pageResults:', 'slugAdjustments:',
+      'updatedPages:', 'verifiedPages:', 'pageResults:',
       'timelineResults:', 'linkResults:',
     ]) expect(skill).toContain(field);
     expect(skill).toMatch(/never contains a top-level summary, unresolved list, raw error, or a nested\s+result `error`/);
@@ -135,48 +136,19 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).not.toMatch(/newer thread version updates the same source page/i);
   });
 
-  test('supports staged scoped proposals and frozen audited apply', () => {
+  test('supports compact staging and body-free server-bound apply', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
-    expect(skill).toContain('admissionScope: <required in propose and apply modes>');
-    expect(skill).toMatch(/In `propose` mode, do not call any corpus-mutating tool/);
+    expect(skill).toContain('{slug,effect}');
+    expect(skill).toContain('"appendMarkdown": "exact reviewed Markdown to append"');
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
-    expect(skill).toMatch(/exact `artifact_id`,\s+`source_id`, `admission_scope`, one-based `sequence`, stable `total_pages`, the\s+complete ordered `page_inventory`, and `page` object/);
-    expect(skill).toMatch(/same exact `artifact_id`, `source_id`, `admission_scope`, and\s+`total_pages`/);
-    expect(skill).toContain('`proposed_timeline_entries`');
-    expect(skill).toContain('`proposed_links`');
-    expect(skill).toContain('Stage only one page per turn');
-    expect(skill).toMatch(/exact\s+`\{slug,effect\}` entries/);
-    expect(skill).toContain('Each canonical slug appears exactly once');
-    expect(skill).toMatch(/effect must match the current non-deleted page state in the bound source/);
-    expect(skill).toMatch(/exists but is marked `create`.*use `update`.*exact baseline/s);
-    expect(skill).toMatch(/does not exist but is marked `update`.*use `create`/s);
-    expect(skill).toMatch(/soft-deleted.*restore or repair.*never mark it `create`/s);
-    expect(skill).toMatch(/Repeat the same full\s+`page_inventory` unchanged on every stage call/);
-    expect(skill).toContain('`nextExpectedSlot`');
-    expect(skill).toContain('at most 32 pages');
-    expect(skill).toContain('98,304 UTF-8 bytes');
-    expect(skill).toContain('131,072 UTF-8 bytes');
-    expect(skill).toContain('262,144 UTF-8 bytes');
-    expect(skill).toContain('100 total agent turns');
-    expect(skill).toContain('"status": "staged_proposal"');
-    expect(skill).toMatch(/In `apply` mode, execute only the prompt-supplied frozen plan/);
-    expect(skill).toMatch(/Before any read or mutation, validate the entire\s+frozen plan/);
-    expect(skill).toContain('one to 32 uniquely slugged canonical pages');
-    expect(skill).toContain('`capturePageSlug` present exactly once');
-    expect(skill).toContain('at most 40');
-    expect(skill).toMatch(/Reject duplicate mutations[\s\S]*98,304 UTF-8 bytes/);
-    expect(skill).toMatch(/A create\s+must still be absent apart from the non-capture mechanical collision adjustment/);
-    expect(skill).toContain('pageResults');
-    expect(skill).toContain('timelineResults');
-    expect(skill).toContain('linkResults');
-    expect(skill).toContain('canonicalExternalId');
-    expect(skill).toContain('captureExternalId');
-    expect(skill).toContain('substantiveSummaryVerified');
-    expect(skill).toContain('readBackVerifiedPages');
-    expect(skill).toContain('`capturePageSlug` is never adjusted');
+    expect(skill).toContain('approvedProposal: # required in apply mode');
+    expect(skill).toContain('brain_apply_ingestion_proposal_page');
+    expect(skill).toContain('"proposal_job_id": 123');
+    expect(skill).toMatch(/Do not accept page bodies, append text, private\s+baselines, expected hashes, or slug adjustments in the apply prompt/);
+    expect(skill).toMatch(/Stop after the first failed call and leave later sequences\s+pending/);
+    expect(skill).toContain('"proposalSequence": 1');
   });
-
   test('stages each update immediately after its sole exact baseline read', () => {
     expect(skill).toMatch(
       /Never request\s+more than one\s+`get_page` in the same assistant\s+turn or tool batch/,

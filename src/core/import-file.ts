@@ -314,6 +314,8 @@ export async function importFromContent(
      * transaction. Public callers leave this unset.
      */
     withinTransaction?: boolean;
+    /** Internal reviewed-body seam: do not derive graph edges from page text. */
+    skipLinkExtraction?: boolean;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -909,7 +911,9 @@ export async function importFromContent(
     // this in v0.18.x), so we wrap each pair in try/catch — guides imported
     // before their code repo syncs are common, and the missing edges land
     // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
-    const codeRefs = extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
+    const codeRefs = opts.skipLinkExtraction
+      ? []
+      : extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
     // For doc↔impl edges, both endpoints are within the same source as the
     // markdown page being imported. Cross-source edges (markdown in one
     // source, code in another) currently fail with "page not found" — a
