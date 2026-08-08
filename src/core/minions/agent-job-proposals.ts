@@ -47,6 +47,17 @@ export interface ProposalPageDigest {
   digest: string;
 }
 
+/** One immutable page slot in a staged ingestion proposal. */
+export interface ProposalPageInventoryEntry {
+  slug: string;
+  effect: 'create' | 'update';
+}
+
+/** Successful staging receipt, including the next incomplete inventory slot. */
+export interface StageProposalPageResult extends ProposalPageDigest {
+  nextExpectedSlot: ({ sequence: number } & ProposalPageInventoryEntry) | null;
+}
+
 export interface ScopedProposalPage {
   slug: string;
   effect: 'create' | 'update';
@@ -87,6 +98,7 @@ export interface StageProposalPageInput {
   admission_scope: string;
   sequence: number;
   total_pages: number;
+  page_inventory: unknown;
   page: unknown;
 }
 
@@ -121,9 +133,10 @@ interface JobBinding {
   admissionScope: string | null;
   capturePageSlug: string;
   allowedSlugPrefixes: string[];
+  pageInventory: unknown;
 }
 
-interface ParsedStageProposalPageInput {
+interface ParsedStageProposalPageCore {
   artifactId: string;
   sourceId: string;
   admissionScope: string;
@@ -131,6 +144,10 @@ interface ParsedStageProposalPageInput {
   totalPages: number;
   page: ScopedProposalPage;
   pageDigest: string;
+}
+
+interface ParsedStageProposalPageInput extends ParsedStageProposalPageCore {
+  pageInventory: ProposalPageInventoryEntry[];
 }
 
 interface StoredProposalFragment {
@@ -224,7 +241,10 @@ export async function assertProposalToolTurnPersistableForJob(
   const stageCall = proposalToolCalls(blocks)
     .find((call) => call.name === STAGE_PROPOSAL_TOOL_NAME);
   if (!stageCall) return;
-  const candidate = parseStageProposalPageInput(stageCall.input);
+  // Inventory semantics intentionally remain an execution-time tool result so
+  // the agent can correct a bad plan in the same job. This pre-persistence
+  // boundary only enforces transcript size and cumulative staged page bytes.
+  const candidate = parseStageProposalPageCore(stageCall.input);
 
   await engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
@@ -254,15 +274,17 @@ export async function stageAgentJobProposalPage(
   engine: BrainEngine,
   jobId: number,
   input: StageProposalPageInput,
-): Promise<ProposalPageDigest> {
+): Promise<StageProposalPageResult> {
   assertSafeJobId(jobId);
   const candidate = parseStageProposalPageInput(input);
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
     assertBindingMatches(binding, candidate);
-    const frozenBinding = await freezeAdmissionScope(tx, jobId, binding, candidate.admissionScope);
-    assertSlugAllowed(frozenBinding, candidate.page.slug, 'Proposed page');
+    assertPageInventoryForBinding(binding, candidate.pageInventory);
+    const frozenInventory = parseFrozenPageInventory(binding, candidate.totalPages);
+    if (frozenInventory) assertExactPageInventory(frozenInventory, candidate.pageInventory);
+    assertPageMatchesInventorySlot(candidate);
     const finalized = await tx.executeRaw<{ proposal_digest: string }>(
       `SELECT proposal_digest FROM agent_job_proposals WHERE job_id = $1`,
       [jobId],
@@ -272,12 +294,20 @@ export async function stageAgentJobProposalPage(
     }
 
     const fragments = await readStoredFragments(tx, jobId);
-    const replay = assertCumulativeStageFits(frozenBinding, candidate, fragments);
+    const replay = assertCumulativeStageFits(binding, candidate, fragments);
+    const frozenBinding = await freezeProposalBinding(
+      tx,
+      jobId,
+      binding,
+      candidate.admissionScope,
+      candidate.pageInventory,
+    );
     if (replay) {
       return {
         sequence: candidate.sequence,
         slug: candidate.page.slug,
         digest: candidate.pageDigest,
+        nextExpectedSlot: nextExpectedInventorySlot(candidate.pageInventory, fragments),
       };
     }
 
@@ -297,6 +327,10 @@ export async function stageAgentJobProposalPage(
       sequence: candidate.sequence,
       slug: candidate.page.slug,
       digest: candidate.pageDigest,
+      nextExpectedSlot: nextExpectedInventorySlot(candidate.pageInventory, [
+        ...fragments,
+        { sequence: candidate.sequence },
+      ]),
     };
   });
 }
@@ -329,6 +363,8 @@ export async function finalizeAgentJobProposal(
     const binding = await readJobBinding(tx, jobId, true);
     assertBindingMatches(binding, { artifactId, sourceId, admissionScope });
     const boundScope = requireBoundAdmissionScope(binding);
+    const inventory = requireFrozenPageInventory(binding, totalPages);
+    assertPageInventoryForBinding(binding, inventory);
     const fragments = await readStoredFragments(tx, jobId);
     if (fragments.length !== totalPages) {
       throw new AgentJobProposalError(
@@ -363,6 +399,11 @@ export async function finalizeAgentJobProposal(
       if (seenSlugs.has(page.slug)) {
         throw new AgentJobProposalError('duplicate_page', `Proposal contains duplicate page slug ${page.slug}.`);
       }
+      assertPageMatchesInventorySlot({
+        sequence: expectedSequence,
+        page,
+        pageInventory: inventory,
+      });
       assertSlugAllowed(binding, page.slug, 'Proposed page');
       seenSlugs.add(page.slug);
       pages.push(page);
@@ -509,6 +550,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
     admission_scope: string | null;
     capture_page_slug: string | null;
     allowed_slug_prefixes: unknown;
+    page_inventory: unknown;
   }>(
     `SELECT name,
             data->>'__owner_client_id' AS owner_client_id,
@@ -516,7 +558,8 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
             data->>'proposal_artifact_id' AS artifact_id,
             data->>'proposal_admission_scope' AS admission_scope,
             data->>'proposal_capture_page_slug' AS capture_page_slug,
-            data->'allowed_slug_prefixes' AS allowed_slug_prefixes
+            data->'allowed_slug_prefixes' AS allowed_slug_prefixes,
+            data->'proposal_page_inventory' AS page_inventory
        FROM minion_jobs
       WHERE id = $1${lock ? ' FOR UPDATE' : ''}`,
     [jobId],
@@ -551,6 +594,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
     admissionScope: row.admission_scope,
     capturePageSlug,
     allowedSlugPrefixes,
+    pageInventory: row.page_inventory,
   };
 }
 
@@ -570,22 +614,31 @@ function assertBindingMatches(
   }
 }
 
-/** Freeze a first-stage admission scope without changing any other job binding. */
-async function freezeAdmissionScope(
+/** Freeze the first valid stage's admission scope and complete page inventory together. */
+async function freezeProposalBinding(
   engine: BrainEngine,
   jobId: number,
   binding: JobBinding,
   requestedScope: string,
-): Promise<JobBinding & { admissionScope: string }> {
-  if (binding.admissionScope === null) {
+  requestedInventory: ProposalPageInventoryEntry[],
+): Promise<JobBinding & { admissionScope: string; pageInventory: ProposalPageInventoryEntry[] }> {
+  if (
+    binding.admissionScope === null
+    || binding.pageInventory === null
+    || binding.pageInventory === undefined
+  ) {
     await engine.executeRaw(
       `UPDATE minion_jobs
-          SET data = jsonb_set(data, '{proposal_admission_scope}', to_jsonb($2::text), true),
+          SET data = jsonb_set(
+                jsonb_set(data, '{proposal_admission_scope}', to_jsonb($2::text), true),
+                '{proposal_page_inventory}', $3::text::jsonb, true
+              ),
               updated_at = now()
-        WHERE id = $1 AND data->>'proposal_admission_scope' IS NULL`,
-      [jobId, requestedScope],
+        WHERE id = $1`,
+      [jobId, requestedScope, canonicalProposalJson(requestedInventory)],
     );
     binding.admissionScope = requestedScope;
+    binding.pageInventory = requestedInventory;
   }
   if (binding.admissionScope !== requestedScope) {
     throw new AgentJobProposalError(
@@ -593,7 +646,15 @@ async function freezeAdmissionScope(
       'Proposal admission scope does not match the scope frozen by the first staged page.',
     );
   }
-  return binding as JobBinding & { admissionScope: string };
+  const frozenInventory = parseFrozenPageInventory(binding, requestedInventory.length);
+  if (!frozenInventory) {
+    throw new AgentJobProposalError('job_not_bound', 'Agent job page inventory was not frozen.');
+  }
+  assertExactPageInventory(frozenInventory, requestedInventory);
+  return binding as JobBinding & {
+    admissionScope: string;
+    pageInventory: ProposalPageInventoryEntry[];
+  };
 }
 
 /** Require finalization to use a scope already frozen by a staged page. */
@@ -607,8 +668,8 @@ function requireBoundAdmissionScope(binding: JobBinding): string {
   return binding.admissionScope;
 }
 
-/** Parse and normalize one page-staging input before any durable write. */
-function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput {
+/** Parse one page-staging input without interpreting its inventory semantics. */
+function parseStageProposalPageCore(raw: unknown): ParsedStageProposalPageCore {
   if (proposalToolInputBytes(raw) > PROPOSAL_STAGE_INPUT_MAX_BYTES) {
     throw new AgentJobProposalError('stage_input_too_large', 'Proposal page input exceeds the staging byte limit.');
   }
@@ -638,6 +699,150 @@ function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput
   };
 }
 
+/** Parse and normalize a complete page-staging input at tool execution time. */
+function parseStageProposalPageInput(raw: unknown): ParsedStageProposalPageInput {
+  const core = parseStageProposalPageCore(raw);
+  const input = readRecord(raw, 'stage proposal input');
+  return {
+    ...core,
+    pageInventory: parsePageInventory(input.page_inventory, core.totalPages),
+  };
+}
+
+/** Parse the exact ordered page plan repeated with every staging call. */
+function parsePageInventory(raw: unknown, totalPages: number): ProposalPageInventoryEntry[] {
+  if (!Array.isArray(raw) || raw.length !== totalPages) {
+    throw new AgentJobProposalError(
+      'invalid_page_inventory',
+      `page_inventory must contain exactly ${totalPages} ordered entries to match total_pages.`,
+    );
+  }
+
+  const positionsBySlug = new Map<string, number[]>();
+  const inventory = raw.map((entry, index): ProposalPageInventoryEntry => {
+    const record = readRecord(entry, `page_inventory[${index}]`);
+    assertExactKeys(record, ['slug', 'effect'], `page_inventory[${index}]`);
+    const slug = readCanonicalSlug(record.slug, `page_inventory[${index}].slug`);
+    const effect = record.effect;
+    if (effect !== 'create' && effect !== 'update') {
+      throw new AgentJobProposalError(
+        'invalid_page_inventory',
+        `page_inventory[${index}].effect must be create or update.`,
+      );
+    }
+    const positions = positionsBySlug.get(slug) ?? [];
+    positions.push(index + 1);
+    positionsBySlug.set(slug, positions);
+    return { slug, effect };
+  });
+
+  const duplicates = [...positionsBySlug]
+    .filter(([, positions]) => positions.length > 1)
+    .map(([slug, positions]) => `${slug} at positions ${joinPositions(positions)}`);
+  if (duplicates.length > 0) {
+    throw new AgentJobProposalError(
+      'duplicate_page_inventory',
+      `page_inventory repeats ${duplicates.join('; ')}. Consolidate all material for each slug into one complete page entry, remove duplicates, renumber the inventory, and retry.`,
+    );
+  }
+  return inventory;
+}
+
+/** Format one-based duplicate positions as a compact human correction hint. */
+function joinPositions(positions: readonly number[]): string {
+  if (positions.length === 1) return String(positions[0]);
+  if (positions.length === 2) return `${positions[0]} and ${positions[1]}`;
+  return `${positions.slice(0, -1).join(', ')}, and ${positions.at(-1)}`;
+}
+
+/** Enforce capture provenance and the durable job slug fence for an inventory. */
+function assertPageInventoryForBinding(
+  binding: JobBinding,
+  inventory: readonly ProposalPageInventoryEntry[],
+): void {
+  const captureCount = inventory.filter(entry => entry.slug === binding.capturePageSlug).length;
+  if (captureCount !== 1) {
+    throw new AgentJobProposalError(
+      'missing_capture_inventory',
+      `page_inventory must include the exact capture slug ${binding.capturePageSlug} exactly once.`,
+    );
+  }
+  for (const entry of inventory) assertSlugAllowed(binding, entry.slug, 'Inventory page');
+}
+
+/** Require the staged page to implement its exact one-based inventory slot. */
+function assertPageMatchesInventorySlot(input: {
+  sequence: number;
+  page: Pick<ScopedProposalPage, 'slug' | 'effect'>;
+  pageInventory: readonly ProposalPageInventoryEntry[];
+}): void {
+  const expected = input.pageInventory[input.sequence - 1];
+  if (!expected || input.page.slug !== expected.slug || input.page.effect !== expected.effect) {
+    const wanted = expected ? `${expected.effect} ${expected.slug}` : 'a valid inventory entry';
+    throw new AgentJobProposalError(
+      'inventory_slot_mismatch',
+      `Sequence ${input.sequence} must stage ${wanted}; received ${input.page.effect} ${input.page.slug}. Correct this page call and retry the same inventory slot.`,
+    );
+  }
+}
+
+/** Read a previously frozen inventory without accepting malformed durable state. */
+function parseFrozenPageInventory(
+  binding: JobBinding,
+  totalPages: number,
+): ProposalPageInventoryEntry[] | null {
+  if (binding.pageInventory === null || binding.pageInventory === undefined) return null;
+  try {
+    return parsePageInventory(binding.pageInventory, totalPages);
+  } catch (error) {
+    if (error instanceof AgentJobProposalError) {
+      throw new AgentJobProposalError(
+        'invalid_frozen_inventory',
+        `The frozen agent job page inventory is invalid: ${error.message}`,
+      );
+    }
+    throw error;
+  }
+}
+
+/** Require finalization to use a complete previously frozen inventory. */
+function requireFrozenPageInventory(
+  binding: JobBinding,
+  totalPages: number,
+): ProposalPageInventoryEntry[] {
+  const inventory = parseFrozenPageInventory(binding, totalPages);
+  if (!inventory) {
+    throw new AgentJobProposalError(
+      'job_not_bound',
+      'Agent job page inventory has not been frozen by a staged page.',
+    );
+  }
+  return inventory;
+}
+
+/** Compare an incoming repeated inventory with the exact frozen plan. */
+function assertExactPageInventory(
+  frozen: readonly ProposalPageInventoryEntry[],
+  requested: readonly ProposalPageInventoryEntry[],
+): void {
+  if (canonicalProposalJson(frozen) !== canonicalProposalJson(requested)) {
+    throw new AgentJobProposalError(
+      'inventory_mismatch',
+      'page_inventory does not exactly match the inventory frozen by the first successful stage. Repeat the unchanged frozen inventory and retry.',
+    );
+  }
+}
+
+/** Identify the earliest inventory slot not present in the durable fragment ledger. */
+function nextExpectedInventorySlot(
+  inventory: readonly ProposalPageInventoryEntry[],
+  fragments: readonly Pick<StoredProposalFragment, 'sequence'>[],
+): ({ sequence: number } & ProposalPageInventoryEntry) | null {
+  const staged = new Set(fragments.map(fragment => Number(fragment.sequence)));
+  const index = inventory.findIndex((_, candidateIndex) => !staged.has(candidateIndex + 1));
+  return index < 0 ? null : { sequence: index + 1, ...inventory[index]! };
+}
+
 /** Read every staged fragment in deterministic sequence order. */
 async function readStoredFragments(engine: BrainEngine, jobId: number): Promise<StoredProposalFragment[]> {
   return engine.executeRaw<StoredProposalFragment>(
@@ -656,7 +861,7 @@ async function readStoredFragments(engine: BrainEngine, jobId: number): Promise<
  */
 function assertCumulativeStageFits(
   binding: JobBinding,
-  candidate: ParsedStageProposalPageInput,
+  candidate: ParsedStageProposalPageCore,
   fragments: readonly StoredProposalFragment[],
 ): boolean {
   let stagedBytes = 0;
