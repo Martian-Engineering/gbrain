@@ -86,6 +86,27 @@ function isOpenAiModel(model: string): boolean {
 export interface ToolLoopContextOptions {
   /** Tools whose effects must retain a distinct identity whenever context compacts. */
   mutatingToolNames?: ReadonlySet<string>;
+  /**
+   * Larger candidate ceiling for providers with an exact request-token check.
+   * This is never an acceptance boundary by itself.
+   */
+  preferredProjectionBytes?: number;
+  /** Provider-owned proof that the complete preferred request fits safely. */
+  preferredProjectionFits?: (candidate: ChatMessage[]) => boolean;
+}
+
+/** Provider-specific limits used to construct and verify tool-loop projections. */
+export interface ToolLoopMessageBudgets {
+  /** Worst-case UTF-8 limit that is safe even at one token per byte. */
+  byteSafeBytes: number;
+  /** Candidate ceiling whose result still requires exact provider validation. */
+  preferredProjectionBytes: number;
+  /** OpenAI total-token limits used to verify a transformed provider request. */
+  openAiTokenLimits: {
+    targetTotalTokens: number;
+    hardTotalTokens: number;
+    maxOutputTokens: number;
+  } | null;
 }
 
 /** Raised when no valid, evidence-preserving provider projection can fit. */
@@ -104,6 +125,17 @@ export function resolveToolLoopMessageBudget(args: {
   tools: ChatToolDef[];
   contextWindowTokens?: number;
 }): number {
+  return resolveToolLoopMessageBudgets(args).byteSafeBytes;
+}
+
+/** Resolve preferred and worst-case-safe provider message budgets. */
+export function resolveToolLoopMessageBudgets(args: {
+  model: string;
+  maxOutputTokens: number;
+  system?: string;
+  tools: ChatToolDef[];
+  contextWindowTokens?: number;
+}): ToolLoopMessageBudgets {
   let contextTokens = args.contextWindowTokens;
   if (contextTokens === undefined) {
     try {
@@ -139,7 +171,43 @@ export function resolveToolLoopMessageBudget(args: {
       0,
       hardInputTokens - openAiStaticTokens - OPENAI_PROTOCOL_TOKEN_RESERVE,
     ) * CONSERVATIVE_BYTES_PER_TOKEN;
-  return Math.max(0, Math.min(targetBudget, byteSafeBudget));
+  return {
+    byteSafeBytes: Math.max(0, Math.min(targetBudget, byteSafeBudget)),
+    preferredProjectionBytes: openAiStaticTokens === null
+      ? Math.max(0, Math.min(targetBudget, byteSafeBudget))
+      : Math.max(0, targetBudget),
+    openAiTokenLimits: openAiStaticTokens === null
+      ? null
+      : {
+        targetTotalTokens: targetTokens,
+        hardTotalTokens: contextTokens,
+        maxOutputTokens: args.maxOutputTokens,
+      },
+  };
+}
+
+/** Verify the complete transformed OpenAI request against both token limits. */
+export function openAiToolLoopRequestFits(args: {
+  budgets: ToolLoopMessageBudgets,
+  system?: string;
+  tools: ChatToolDef[];
+  modelMessages: unknown[];
+}): boolean {
+  const limits = args.budgets.openAiTokenLimits;
+  if (!limits) return false;
+  // Count the provider-facing message shape, not gbrain's durable ChatMessage
+  // shape. The enclosing object includes the request's JSON keys and
+  // separators; the fixed reserve covers SDK/provider framing not represented
+  // here.
+  const requestTokens = countOpenAiTokens(safeJson({
+    system: args.system ?? '',
+    tools: args.tools,
+    messages: args.modelMessages,
+  }))
+    + OPENAI_PROTOCOL_TOKEN_RESERVE
+    + limits.maxOutputTokens;
+  return requestTokens <= limits.targetTotalTokens
+    && requestTokens <= limits.hardTotalTokens;
 }
 
 /**
@@ -150,6 +218,83 @@ export function compactToolLoopMessages(
   messages: ChatMessage[],
   maxBytes: number,
   options: ToolLoopContextOptions = {},
+): ChatMessage[] {
+  const fallback = compactToolLoopMessagesToByteBudget(messages, maxBytes, options);
+  if (fallback === messages) return fallback;
+  const preferredBytes = options.preferredProjectionBytes;
+  if (
+    preferredBytes === undefined
+    || preferredBytes <= maxBytes
+    || !options.preferredProjectionFits
+  ) return fallback;
+
+  try {
+    return buildPreferredNewestSingletonProjection(
+      messages,
+      preferredBytes,
+      options,
+      options.preferredProjectionFits,
+    ) ?? fallback;
+  } catch {
+    // Exact provider tokenization is optional. Any failure retains the
+    // independently valid worst-case byte projection.
+    return fallback;
+  }
+}
+
+/**
+ * Build a minimal preferred projection around the newest singleton read.
+ * Older rounds become durable ledger evidence instead of consuming headroom.
+ */
+function buildPreferredNewestSingletonProjection(
+  messages: ChatMessage[],
+  preferredBytes: number,
+  options: ToolLoopContextOptions,
+  fits: (candidate: ChatMessage[]) => boolean,
+): ChatMessage[] | null {
+  const { rounds, otherCount } = collectToolRounds(messages);
+  const originalRound = rounds.at(-1);
+  if (!originalRound || originalRound.evidence.length !== 1) return null;
+
+  const evidence = originalRound.evidence[0]!;
+  if (
+    evidence.failed
+    || isMutationSensitive(evidence.toolName, options.mutatingToolNames)
+  ) return null;
+
+  const originalResult = toolResultBlocks(originalRound.result).find(block => (
+    block.toolCallId === evidence.toolCallId
+  ));
+  if (!originalResult || originalResult.toolName !== evidence.toolName) return null;
+
+  const task = buildTaskAnchor(messages);
+  const summary = buildLedgerSummary(rounds.slice(0, -1), otherCount, options);
+  for (const perPayload of PAYLOAD_LIMITS) {
+    const compacted = compactRound(originalRound, perPayload, options);
+    const exactResult: ChatMessage = {
+      ...compacted.result,
+      content: mapBlocks(compacted.result, block => (
+        block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
+          ? { ...block, output: originalResult.output }
+          : block
+      )),
+    };
+    const preferred = [
+      task,
+      ...(summary ? [summary] : []),
+      compacted.assistant,
+      exactResult,
+    ];
+    if (jsonBytes(preferred) <= preferredBytes && fits(preferred)) return preferred;
+  }
+  return null;
+}
+
+/** Build one evidence-preserving projection under a UTF-8 byte ceiling. */
+function compactToolLoopMessagesToByteBudget(
+  messages: ChatMessage[],
+  maxBytes: number,
+  options: ToolLoopContextOptions,
 ): ChatMessage[] {
   if (jsonBytes(messages) <= maxBytes) return messages;
 
