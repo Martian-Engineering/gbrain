@@ -126,6 +126,17 @@ export interface FinalizedProposalManifest {
   unresolved: string[];
 }
 
+interface StoredCompletedProposal {
+  owner_client_id: string;
+  source_id: string;
+  artifact_id: string;
+  admission_scope: string;
+  total_pages: number;
+  page_digests: unknown;
+  proposal_digest: string;
+  manifest: unknown;
+}
+
 interface JobBinding {
   ownerClientId: string;
   sourceId: string;
@@ -482,7 +493,7 @@ export async function finalizeAgentJobProposal(
       timeline,
       links,
     );
-    const manifest: FinalizedProposalManifest = {
+    const manifest = parseFinalizedProposalManifest({
       status: 'staged_proposal',
       artifactId: binding.artifactId,
       sourceId: binding.sourceId,
@@ -496,7 +507,7 @@ export async function finalizeAgentJobProposal(
       proposedTimelineEntries: timeline,
       proposedLinks: links,
       unresolved,
-    };
+    }, totalPages);
     const manifestJson = canonicalProposalJson(manifest);
     const manifestBytes = Buffer.byteLength(manifestJson, 'utf8');
     if (manifestBytes > PROPOSAL_MANIFEST_MAX_BYTES) {
@@ -652,6 +663,161 @@ export async function getOwnedAgentJobProposal(
     inventory_digest: applicationInventory.inventoryDigest,
     plan,
   };
+}
+
+/**
+ * Return the compact durable receipt for a completed proposal job.
+ *
+ * A missing proposal row preserves ordinary job-result behavior, while any
+ * stored ownership or identity conflict fails closed. The full plan is never
+ * selected or returned.
+ */
+export async function readCompletedOwnedAgentJobProposalManifest(
+  engine: BrainEngine,
+  jobId: number,
+  ownerClientId: string,
+  jobBinding: { sourceId: unknown; artifactId: unknown; admissionScope: unknown },
+): Promise<FinalizedProposalManifest | null> {
+  assertSafeJobId(jobId);
+  if (!ownerClientId) {
+    throw new AgentJobProposalError('permission_denied', 'An OAuth client owner is required.');
+  }
+  const rows = await engine.executeRaw<StoredCompletedProposal>(
+    `SELECT owner_client_id, source_id, artifact_id, admission_scope,
+            total_pages, page_digests, proposal_digest, manifest
+       FROM agent_job_proposals
+      WHERE job_id = $1`,
+    [jobId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.owner_client_id !== ownerClientId) {
+    throw new AgentJobProposalError(
+      'permission_denied',
+      'Finalized proposal ownership does not match the requesting OAuth client.',
+    );
+  }
+  if (
+    jobBinding.sourceId !== row.source_id
+    || jobBinding.artifactId !== row.artifact_id
+    || jobBinding.admissionScope !== row.admission_scope
+  ) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal identity does not match its agent job binding.',
+    );
+  }
+
+  const manifest = compactManifestFromRow(row);
+  if (manifest === null) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest does not match its stored identity and digest.',
+    );
+  }
+  return manifest;
+}
+
+/** Accept only the exact compact manifest shape and row-bound identity. */
+function compactManifestFromRow(row: StoredCompletedProposal): FinalizedProposalManifest | null {
+  try {
+    const manifest = parseFinalizedProposalManifest(row.manifest, Number(row.total_pages));
+    if (
+      manifest.artifactId !== row.artifact_id
+      || manifest.sourceId !== row.source_id
+      || manifest.admissionScope !== row.admission_scope
+      || manifest.proposalDigest !== row.proposal_digest
+      || canonicalProposalJson(manifest.pageDigests) !== canonicalProposalJson(row.page_digests)
+    ) return null;
+    return manifest;
+  } catch (error) {
+    if (error instanceof AgentJobProposalError) return null;
+    throw error;
+  }
+}
+
+/** Strictly parse and rederive a complete compact finalized-proposal manifest. */
+export function parseFinalizedProposalManifest(
+  raw: unknown,
+  totalPages: number,
+): FinalizedProposalManifest {
+  const record = readRecord(raw, 'finalized proposal manifest');
+  assertExactKeys(record, [
+    'status', 'artifactId', 'sourceId', 'admissionScope', 'summary',
+    'pageDigests', 'timelineDigests', 'linkDigests', 'inventoryDigest',
+    'proposalDigest', 'proposedTimelineEntries', 'proposedLinks', 'unresolved',
+  ], 'finalized proposal manifest');
+  if (record.status !== 'staged_proposal') {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized proposal status is invalid.');
+  }
+  const pageDigests = parseFinalizedPageDigests(record.pageDigests, totalPages);
+  const proposedTimelineEntries = parseProposalTimelineEntries(record.proposedTimelineEntries);
+  const proposedLinks = parseProposalLinks(record.proposedLinks);
+  const inventory = buildProposalApplicationDigestInventory(
+    pageDigests,
+    proposedTimelineEntries,
+    proposedLinks,
+  );
+  const proposalDigest = readString(record.proposalDigest, 'manifest.proposalDigest');
+  if (!SHA256_RE.test(proposalDigest)) {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized proposal digest is invalid.');
+  }
+  const manifest: FinalizedProposalManifest = {
+    status: 'staged_proposal',
+    artifactId: readBoundedString(record.artifactId, 'manifest.artifactId', 255),
+    sourceId: readBoundedString(record.sourceId, 'manifest.sourceId', 255),
+    admissionScope: readBoundedString(
+      record.admissionScope,
+      'manifest.admissionScope',
+      PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+    ),
+    summary: readBoundedString(record.summary, 'manifest.summary', 1_000),
+    pageDigests,
+    timelineDigests: inventory.timelineDigests,
+    linkDigests: inventory.linkDigests,
+    inventoryDigest: inventory.inventoryDigest,
+    proposalDigest,
+    proposedTimelineEntries,
+    proposedLinks,
+    unresolved: parseProposalUnresolved(record.unresolved),
+  };
+  try {
+    assertValidSourceId(manifest.sourceId);
+  } catch {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest contains an invalid source identity.',
+    );
+  }
+  if (canonicalProposalJson(raw) !== canonicalProposalJson(manifest)) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest does not match its canonical digest inventory.',
+    );
+  }
+  return manifest;
+}
+
+/** Strictly parse the ordered page digest inventory in a compact manifest. */
+function parseFinalizedPageDigests(raw: unknown, totalPages: number): ProposalPageDigest[] {
+  const expectedPages = readProposalPageCount(totalPages);
+  if (!Array.isArray(raw) || raw.length !== expectedPages) {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized page digest inventory is incomplete.');
+  }
+  return raw.map((entry, index) => {
+    const record = readRecord(entry, `pageDigests[${index}]`);
+    assertExactKeys(record, ['sequence', 'slug', 'digest'], `pageDigests[${index}]`);
+    const sequence = readPositiveInteger(record.sequence, `pageDigests[${index}].sequence`);
+    const slug = readCanonicalSlug(record.slug, `pageDigests[${index}].slug`);
+    const digest = readString(record.digest, `pageDigests[${index}].digest`);
+    if (sequence !== index + 1 || !SHA256_RE.test(digest)) {
+      throw new AgentJobProposalError(
+        'proposal_identity_mismatch',
+        'Finalized page digest inventory is invalid.',
+      );
+    }
+    return { sequence, slug, digest };
+  });
 }
 
 async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean): Promise<JobBinding> {

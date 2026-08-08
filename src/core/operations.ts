@@ -6043,6 +6043,26 @@ const get_agent_job: Operation = {
         receipt = null;
       }
     }
+    if (job.status === 'completed') {
+      const proposal = await import('./minions/agent-job-proposals.ts');
+      try {
+        receipt = await proposal.readCompletedOwnedAgentJobProposalManifest(
+          ctx.engine,
+          job.id,
+          clientId,
+          {
+            sourceId: job.data.source_id,
+            artifactId: job.data.proposal_artifact_id,
+            admissionScope: job.data.proposal_admission_scope,
+          },
+        ) ?? receipt;
+      } catch (error) {
+        if (error instanceof proposal.AgentJobProposalError) {
+          throw new OperationError(error.code, error.message);
+        }
+        throw error;
+      }
+    }
     const { readAgentJobExecutionEvidence } = await import(
       './minions/agent-job-evidence.ts'
     );
