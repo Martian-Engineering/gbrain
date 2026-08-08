@@ -6,6 +6,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { operationsByName } from '../src/core/operations.ts';
+import { digestProposalValue } from '../src/core/ingestion-proposal-contract.ts';
+import { buildProposalApplicationDigestInventory } from '../src/core/minions/agent-job-proposal-relations.ts';
 
 /**
  * v0.38 Slice 3 — `submit_agent` MCP op tests.
@@ -886,6 +888,131 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
 });
 
 describe('get_agent_job owner-scoped receipt', () => {
+  /** Build one internally coherent durable proposal row for projection tests. */
+  function proposalFixture() {
+    const pageDigests = [{
+      sequence: 1,
+      slug: 'sources/example',
+      digest: 'a'.repeat(64),
+    }];
+    const plan = {
+      artifactId: 'artifact-1',
+      sourceId: 'default',
+      admissionScope: 'default ingestion scope',
+      summary: 'One complete proposed page.',
+      proposedPages: [{
+        slug: 'sources/example',
+        effect: 'create',
+        title: 'Example',
+        bodyMarkdown: '# Example\n\nPrivate proposed body.',
+      }],
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    };
+    const proposalDigest = digestProposalValue(plan);
+    const inventory = buildProposalApplicationDigestInventory(pageDigests, [], []);
+    const manifest = {
+      status: 'staged_proposal',
+      artifactId: plan.artifactId,
+      sourceId: plan.sourceId,
+      admissionScope: plan.admissionScope,
+      summary: plan.summary,
+      pageDigests,
+      timelineDigests: inventory.timelineDigests,
+      linkDigests: inventory.linkDigests,
+      inventoryDigest: inventory.inventoryDigest,
+      proposalDigest,
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    };
+    return { pageDigests, plan, proposalDigest, manifest };
+  }
+
+  /** Persist the private plan and compact manifest owned by one agent job. */
+  async function seedDurableProposal(
+    jobId: number,
+    fixture: ReturnType<typeof proposalFixture>,
+    overrides: { ownerClientId?: string; manifest?: unknown } = {},
+  ): Promise<void> {
+    await engine.executeRaw(
+      `INSERT INTO agent_job_proposals
+         (job_id, owner_client_id, source_id, artifact_id, admission_scope,
+          total_pages, page_digests, plan, proposal_digest, manifest)
+       VALUES ($1, $2, 'default', 'artifact-1', 'default ingestion scope',
+               1, $3::text::jsonb, $4::text::jsonb, $5, $6::text::jsonb)`,
+      [
+        jobId,
+        overrides.ownerClientId ?? 'lore',
+        JSON.stringify(fixture.pageDigests),
+        JSON.stringify(fixture.plan),
+        fixture.proposalDigest,
+        JSON.stringify(overrides.manifest ?? fixture.manifest),
+      ],
+    );
+  }
+
+  /** Seed a proposal-bound job and its durable compact proposal row. */
+  async function seedProposalJob(
+    fixture: ReturnType<typeof proposalFixture>,
+    options: {
+      status?: string;
+      rawResult?: string;
+      proposalOwner?: string;
+      manifest?: unknown;
+    } = {},
+  ): Promise<number> {
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, result, queue, priority, created_at)
+       VALUES ('subagent', $1, $2::text::jsonb, $3::text::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [
+        options.status ?? 'completed',
+        JSON.stringify({
+          __owner_client_id: 'lore',
+          source_id: 'default',
+          proposal_artifact_id: 'artifact-1',
+          proposal_admission_scope: 'default ingestion scope',
+        }),
+        JSON.stringify(options.rawResult === undefined ? null : { result: options.rawResult }),
+      ],
+    );
+    await seedDurableProposal(row.id, fixture, {
+      ownerClientId: options.proposalOwner,
+      manifest: options.manifest,
+    });
+    return row.id;
+  }
+
+  it('returns the complete durable manifest over a partial model receipt', async () => {
+    const fixture = proposalFixture();
+    const partialReceipt = {
+      status: 'staged_proposal',
+      artifactId: fixture.manifest.artifactId,
+      sourceId: fixture.manifest.sourceId,
+      admissionScope: fixture.manifest.admissionScope,
+      summary: fixture.manifest.summary,
+      pageDigests: fixture.manifest.pageDigests,
+      proposalDigest: fixture.manifest.proposalDigest,
+      proposedTimelineEntries: [],
+      proposedLinks: [],
+      unresolved: [],
+    };
+    const rawResult = JSON.stringify(partialReceipt);
+    const jobId = await seedProposalJob(fixture, { rawResult });
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: jobId },
+    ) as any;
+
+    expect(owned.receipt).toEqual(fixture.manifest);
+    expect(owned.result_text).toBe(rawResult);
+    expect(owned.receipt.proposedPages).toBeUndefined();
+    expect(JSON.stringify(owned.receipt)).not.toContain('Private proposed body');
+  });
+
   it('returns structured JSON only to the submitting client', async () => {
     await seedClient('lore', { bound_tools: ['search'] });
     await seedClient('other', { bound_tools: ['search'] });
@@ -900,9 +1027,46 @@ describe('get_agent_job owner-scoped receipt', () => {
     );
     const owned = await get_agent_job.handler(makeCtx({ clientId: 'lore' }), { id: row.id });
     expect((owned as any).receipt).toEqual({ status: 'ready', effects: [] });
+    expect((owned as any).result_text).toBe(JSON.stringify({ status: 'ready', effects: [] }));
     await expect(
       get_agent_job.handler(makeCtx({ clientId: 'other' }), { id: row.id }),
     ).rejects.toThrow(/not owned/i);
+  });
+
+  it('does not surface a durable manifest before the job completes', async () => {
+    const fixture = proposalFixture();
+    const rawResult = JSON.stringify({ status: 'working' });
+    const jobId = await seedProposalJob(fixture, { status: 'active', rawResult });
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: jobId },
+    ) as any;
+
+    expect(owned.receipt).toEqual({ status: 'working' });
+    expect(owned.receipt).not.toEqual(fixture.manifest);
+  });
+
+  it('fails closed when a durable proposal row belongs to another owner', async () => {
+    const fixture = proposalFixture();
+    const jobId = await seedProposalJob(fixture, { proposalOwner: 'other' });
+
+    await expect(get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: jobId },
+    )).rejects.toMatchObject({ code: 'permission_denied' });
+  });
+
+  it('fails closed when the durable manifest identity is corrupt', async () => {
+    const fixture = proposalFixture();
+    const jobId = await seedProposalJob(fixture, {
+      manifest: { ...fixture.manifest, artifactId: 'different-artifact' },
+    });
+
+    await expect(get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: jobId },
+    )).rejects.toMatchObject({ code: 'proposal_identity_mismatch' });
   });
 
   it('attributes unbound jobs to the runtime default source', async () => {

@@ -126,6 +126,17 @@ export interface FinalizedProposalManifest {
   unresolved: string[];
 }
 
+interface StoredCompletedProposal {
+  owner_client_id: string;
+  source_id: string;
+  artifact_id: string;
+  admission_scope: string;
+  total_pages: number;
+  page_digests: unknown;
+  proposal_digest: string;
+  manifest: unknown;
+}
+
 interface JobBinding {
   ownerClientId: string;
   sourceId: string;
@@ -652,6 +663,92 @@ export async function getOwnedAgentJobProposal(
     inventory_digest: applicationInventory.inventoryDigest,
     plan,
   };
+}
+
+/**
+ * Return the compact durable receipt for a completed proposal job.
+ *
+ * A missing proposal row preserves ordinary job-result behavior, while any
+ * stored ownership or identity conflict fails closed. The full plan is never
+ * selected or returned.
+ */
+export async function readCompletedOwnedAgentJobProposalManifest(
+  engine: BrainEngine,
+  jobId: number,
+  ownerClientId: string,
+  jobBinding: { sourceId: unknown; artifactId: unknown; admissionScope: unknown },
+): Promise<FinalizedProposalManifest | null> {
+  assertSafeJobId(jobId);
+  if (!ownerClientId) {
+    throw new AgentJobProposalError('permission_denied', 'An OAuth client owner is required.');
+  }
+  const rows = await engine.executeRaw<StoredCompletedProposal>(
+    `SELECT owner_client_id, source_id, artifact_id, admission_scope,
+            total_pages, page_digests, proposal_digest, manifest
+       FROM agent_job_proposals
+      WHERE job_id = $1`,
+    [jobId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.owner_client_id !== ownerClientId) {
+    throw new AgentJobProposalError(
+      'permission_denied',
+      'Finalized proposal ownership does not match the requesting OAuth client.',
+    );
+  }
+  if (
+    jobBinding.sourceId !== row.source_id
+    || jobBinding.artifactId !== row.artifact_id
+    || jobBinding.admissionScope !== row.admission_scope
+  ) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal identity does not match its agent job binding.',
+    );
+  }
+
+  const manifest = compactManifestFromRow(row);
+  if (manifest === null) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest does not match its stored identity and digest.',
+    );
+  }
+  return manifest;
+}
+
+/** Accept only the exact compact manifest shape and row-bound identity. */
+function compactManifestFromRow(row: StoredCompletedProposal): FinalizedProposalManifest | null {
+  if (!row.manifest || typeof row.manifest !== 'object' || Array.isArray(row.manifest)) return null;
+  const manifest = row.manifest as Record<string, unknown>;
+  const expectedKeys = [
+    'status', 'artifactId', 'sourceId', 'admissionScope', 'summary',
+    'pageDigests', 'timelineDigests', 'linkDigests', 'inventoryDigest',
+    'proposalDigest', 'proposedTimelineEntries', 'proposedLinks', 'unresolved',
+  ].sort();
+  const actualKeys = Object.keys(manifest).sort();
+  if (
+    actualKeys.length !== expectedKeys.length
+    || actualKeys.some((key, index) => key !== expectedKeys[index])
+    || manifest.status !== 'staged_proposal'
+    || manifest.artifactId !== row.artifact_id
+    || manifest.sourceId !== row.source_id
+    || manifest.admissionScope !== row.admission_scope
+    || typeof manifest.summary !== 'string'
+    || manifest.proposalDigest !== row.proposal_digest
+    || !SHA256_RE.test(row.proposal_digest)
+    || !SHA256_RE.test(String(manifest.inventoryDigest))
+    || !Array.isArray(manifest.pageDigests)
+    || manifest.pageDigests.length !== Number(row.total_pages)
+    || canonicalProposalJson(manifest.pageDigests) !== canonicalProposalJson(row.page_digests)
+    || !Array.isArray(manifest.timelineDigests)
+    || !Array.isArray(manifest.linkDigests)
+    || !Array.isArray(manifest.proposedTimelineEntries)
+    || !Array.isArray(manifest.proposedLinks)
+    || !Array.isArray(manifest.unresolved)
+  ) return null;
+  return manifest as unknown as FinalizedProposalManifest;
 }
 
 async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean): Promise<JobBinding> {
