@@ -71,7 +71,11 @@ describe('OpenAI tool-loop context budgeting', () => {
     };
     expect(Buffer.byteLength(JSON.stringify(exactOutput), 'utf8')).toBe(61_933);
     const oldSearchBody = `OLD_SEARCH_RAW_${'s'.repeat(44_000)}`;
-    const oldStageBody = `OLD_STAGE_RAW_${'m'.repeat(8_000)}`;
+    const oldStageBody = `OLD_STAGE_RAW_${'m'.repeat(22_000)}`;
+    const stageInventory = [
+      { slug: 'sources/example', effect: 'create' },
+      { slug: 'companies/signalcore', effect: 'update' },
+    ];
     const durableMessages: ChatMessage[] = [
       { role: 'user', content: 'p'.repeat(116_659) },
       {
@@ -115,9 +119,20 @@ describe('OpenAI tool-loop context budgeting', () => {
           toolCallId: 'stage-page-fragment',
           toolName: 'brain_stage_ingestion_proposal_page',
           input: {
-            slug: 'companies/signalcore',
+            artifact_id: 'artifact-1',
             source_id: 'martian',
-            content: oldStageBody,
+            admission_scope: 'Include delivery notes.',
+            sequence: 2,
+            total_pages: 2,
+            page_inventory: stageInventory,
+            page: {
+              slug: 'companies/signalcore',
+              effect: 'update',
+              title: 'Company',
+              bodyMarkdown: oldStageBody,
+              baseMarkdown: '# Existing company',
+              expectedContentHash: 'a'.repeat(64),
+            },
           },
         }],
       },
@@ -150,7 +165,7 @@ describe('OpenAI tool-loop context budgeting', () => {
       },
     ];
     const durableSnapshot = structuredClone(durableMessages);
-    const mutatingToolNames = new Set(['brain_stage_ingestion_proposal_page']);
+    const mutatingToolNames = new Set<string>();
     const budgets = resolveToolLoopMessageBudgets({
       model: 'openai:gpt-5.6-terra',
       maxOutputTokens: 32_768,
@@ -200,7 +215,7 @@ describe('OpenAI tool-loop context budgeting', () => {
         }],
         ['brain_stage_ingestion_proposal_page', {
           idempotent: false,
-          mutating: true,
+          mutating: false,
           async execute() { return null; },
         }],
         ['brain_get_page', {
@@ -221,8 +236,11 @@ describe('OpenAI tool-loop context budgeting', () => {
 
     expect(resultOutput(providerMessages, 'canonical-baseline')).toEqual(exactOutput);
     expect(providerMessages).toHaveLength(4);
-    expect(JSON.stringify(providerMessages)).toContain('Distinct mutation evidence');
-    expect(JSON.stringify(providerMessages)).toContain('call_id=stage-page-fragment');
+    const providerText = providerMessages
+      .map(message => typeof message.content === 'string' ? message.content : '')
+      .join('\n');
+    expect(providerText).toContain(`page_inventory=${JSON.stringify(stageInventory)}`);
+    expect(providerText).toContain('stage-page-fragment');
     expect(JSON.stringify(providerMessages)).not.toContain('OLD_SEARCH_RAW_');
     expect(JSON.stringify(providerMessages)).not.toContain('OLD_STAGE_RAW_');
     expect(Buffer.byteLength(JSON.stringify(providerMessages), 'utf8'))

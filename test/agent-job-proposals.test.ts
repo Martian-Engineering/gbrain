@@ -218,6 +218,7 @@ describe('durable agent-job proposal staging', () => {
       createPage('projects/example-4'),
     ];
     const inventory = pageInventory(...pages);
+    const largeBodyMarker = `LARGE_STAGED_PAGE_${'x'.repeat(22_000)}`;
     const staged = [
       await stage(jobId, 1, 4, pages[0]!, undefined, inventory),
       await stage(jobId, 2, 4, pages[1]!, undefined, inventory),
@@ -226,13 +227,22 @@ describe('durable agent-job proposal staging', () => {
     ];
     const messages: ChatMessage[] = [{ role: 'user', content: 'Build the exact ingestion proposal.' }];
     for (const page of staged) {
+      const proposedPage = pages[page.sequence - 1]!;
       messages.push({
         role: 'assistant',
         content: [{
           type: 'tool-call',
           toolCallId: `stage-${page.sequence}`,
           toolName: 'brain_stage_ingestion_proposal_page',
-          input: { sequence: page.sequence, page_inventory: inventory, body: 'x'.repeat(1_500) },
+          input: {
+            artifact_id: 'artifact-1',
+            source_id: 'company',
+            admission_scope: 'Include project delivery notes.',
+            sequence: page.sequence,
+            total_pages: inventory.length,
+            page_inventory: inventory,
+            page: { ...proposedPage, bodyMarkdown: largeBodyMarker },
+          },
         }],
       });
       messages.push({
@@ -246,12 +256,19 @@ describe('durable agent-job proposal staging', () => {
       });
     }
     const compacted = compactToolLoopMessages(messages, 5_000, {
-      mutatingToolNames: new Set(['brain_stage_ingestion_proposal_page']),
+      mutatingToolNames: new Set(),
     });
     const compactedJson = JSON.stringify(compacted);
     expect(compactedJson).toContain(staged[3]!.digest);
     expect(compactedJson).toContain('sources/example');
     expect(compactedJson).toContain('working_context_projection');
+    expect(compactedJson).not.toContain('LARGE_STAGED_PAGE_');
+    const latestCall = compacted
+      .flatMap(message => typeof message.content === 'string' ? [] : message.content)
+      .findLast(block => block.type === 'tool-call');
+    expect(latestCall?.type).toBe('tool-call');
+    if (latestCall?.type !== 'tool-call') throw new Error('Missing retained stage call');
+    expect((latestCall.input as Record<string, unknown>).page_inventory).toEqual(inventory);
 
     const manifest = await finalizeAgentJobProposal(engine, jobId, {
       artifact_id: 'artifact-1',
@@ -371,12 +388,11 @@ describe('durable agent-job proposal staging', () => {
     expect(mismatch).toMatchObject({
       code: 'inventory_effect_mismatch',
       message: expect.stringMatching(
-        /sources\/example.*exists.*marked create.*use update.*exact baseline.*projects\/missing.*does not exist.*marked update.*use create/is,
+        /sources\/example.*exists.*marked create.*use update.*exact baseline.*projects\/missing.*does not exist.*marked update.*use create.*projects\/deleted.*soft-deleted.*restore.*repair/is,
       ),
     });
     const mismatchText = String(mismatch);
     expect(mismatchText).not.toContain('projects/other-source');
-    expect(mismatchText).not.toContain('projects/deleted');
 
     const [untouched] = await engine.executeRaw<{
       scope: string | null;
@@ -399,6 +415,35 @@ describe('durable agent-job proposal staging', () => {
       'Correctable scope.',
       [{ slug: 'sources/example', effect: 'update' }],
     )).resolves.toMatchObject({ nextExpectedSlot: null });
+  });
+
+  it('rejects a soft-deleted capture before freezing proposal state', async () => {
+    await seedStoredPage('sources/example', 'company', true);
+    const jobId = await seedJob({ proposal_admission_scope: null });
+
+    await expect(stage(
+      jobId,
+      1,
+      1,
+      createPage('sources/example'),
+      'Correctable scope.',
+    )).rejects.toMatchObject({
+      code: 'inventory_effect_mismatch',
+      message: expect.stringMatching(/sources\/example.*soft-deleted.*restore.*repair.*do not mark it create/is),
+    });
+
+    const [untouched] = await engine.executeRaw<{
+      scope: string | null;
+      inventory: unknown;
+      fragment_count: string;
+    }>(
+      `SELECT data->>'proposal_admission_scope' AS scope,
+              data->'proposal_page_inventory' AS inventory,
+              (SELECT count(*)::text FROM agent_job_proposal_fragments WHERE job_id = minion_jobs.id) AS fragment_count
+         FROM minion_jobs WHERE id = $1`,
+      [jobId],
+    );
+    expect(untouched).toEqual({ scope: null, inventory: null, fragment_count: '0' });
   });
 
   it('freezes one exact inventory and rejects changed later calls before inserting a fragment', async () => {

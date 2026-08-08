@@ -227,6 +227,7 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toMatch(/effect must match the current non-deleted page state in the bound source/);
     expect(skill).toMatch(/exists but is marked `create`.*use `update`.*exact baseline/s);
     expect(skill).toMatch(/does not exist but is marked `update`.*use `create`/s);
+    expect(skill).toMatch(/soft-deleted.*restore or repair.*never mark it `create`/s);
     expect(skill).toMatch(/Repeat the\s+same full `page_inventory` unchanged on every stage call/);
     expect(skill).toContain('`nextExpectedSlot`');
     expect(skill).toContain('at most 32 pages');

@@ -843,23 +843,25 @@ async function assertFirstInventoryEffectsMatchCorpus(
   if (binding.pageInventory !== null && binding.pageInventory !== undefined) return;
   // The durable source binding keeps same-slug pages in every other source
   // from changing whether this inventory entry is a create or an update.
-  const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug
+  const rows = await engine.executeRaw<{ slug: string; deleted_at: string | null }>(
+    `SELECT slug, deleted_at
        FROM pages
       WHERE source_id = $1
-        AND deleted_at IS NULL
         AND slug = ANY($2::text[])`,
     [binding.sourceId, inventory.map(entry => entry.slug)],
   );
-  const existingSlugs = new Set(rows.map(row => row.slug));
+  const pageStates = new Map(rows.map(row => [row.slug, row.deleted_at === null ? 'active' : 'deleted']));
   // Return the complete correction set so the agent can rebuild and retry one
   // coherent inventory instead of discovering effect mistakes one at a time.
   const mismatches = inventory.flatMap((entry) => {
-    const exists = existingSlugs.has(entry.slug);
-    if (exists && entry.effect === 'create') {
+    const state = pageStates.get(entry.slug);
+    if (state === 'deleted') {
+      return [`${entry.slug} is soft-deleted; restore or repair the page before retrying, and do not mark it create.`];
+    }
+    if (state === 'active' && entry.effect === 'create') {
       return [`${entry.slug} exists but is marked create; use update and read its exact baseline before staging.`];
     }
-    if (!exists && entry.effect === 'update') {
+    if (state === undefined && entry.effect === 'update') {
       return [`${entry.slug} does not exist but is marked update; use create.`];
     }
     return [];
