@@ -53,9 +53,10 @@ describe('registerBuiltinHandlers', () => {
 describe('autopilot-cycle handler — partial failure does NOT throw', () => {
   test('phase failure returns partial:true + structured report, no throw', async () => {
     // Call the handler directly with a job pointing at a nonexistent repo.
-    // Filesystem-dependent phases (lint, backlinks, sync) all fail because
-    // the dir / .git repo isn't there. DB-dependent phases (extract,
-    // embed, orphans) run fine against the in-memory test engine.
+    // Filesystem-dependent phases (lint and sync) fail because the dir / .git
+    // repo isn't there. Backlinks uses the canonical graph audit when an
+    // engine is available, so it remains independent of repoPath. Other
+    // DB-dependent phases run fine against the in-memory test engine.
     //
     // CRITICAL INVARIANT: the handler must return successfully even when
     // phases fail. Throwing would cause the Minion to retry, blocking
@@ -79,13 +80,16 @@ describe('autopilot-cycle handler — partial failure does NOT throw', () => {
     expect(report).toBeDefined();
     expect(report.schema_version).toBe('1');
     expect(Array.isArray(report.phases)).toBe(true);
-    // The filesystem-dependent phases should have failed on a missing dir.
+    // Filesystem-dependent phases fail on a missing dir; the graph-backed
+    // backlink audit remains healthy and records its execution mode.
     const failedPhases = report.phases
       .filter((p: any) => p.status === 'fail')
       .map((p: any) => p.phase);
     expect(failedPhases).toContain('lint');
-    expect(failedPhases).toContain('backlinks');
     expect(failedPhases).toContain('sync');
+    const backlinks = report.phases.find((p: any) => p.phase === 'backlinks');
+    expect(backlinks.status).toBe('ok');
+    expect(backlinks.details.mode).toBe('graph');
   });
 
   test('all phases succeed → result has structured report (smoke)', async () => {

@@ -102,7 +102,14 @@ outcome yourself:
 
 These are autonomous maintenance outcomes, not requests for human approval.
 
-## Output
+## Anti-Patterns
+
+- Do not broaden the manifest to a second page or source.
+- Do not write when identity evidence is ambiguous or below threshold.
+- Do not manufacture reciprocal prose, candidates, confidence, or verification.
+- Do not ask a human to approve an outcome the manifest already authorizes.
+
+## Output Format
 
 ```json
 {

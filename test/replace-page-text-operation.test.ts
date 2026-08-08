@@ -98,6 +98,10 @@ describe('replace_page_text operation', () => {
       noEmbed: true,
       sourceId: 'default',
     });
+    await engine.addTimelineEntry('people/alice-example', {
+      date: '2026-01-01',
+      summary: 'Alice joined Acme.',
+    }, { sourceId: 'default' });
     await importFromContent(engine, 'people/alice-example', fixture.replaceAll('Alice', 'Other Alice'), {
       noEmbed: true,
       sourceId: 'other',
@@ -122,6 +126,7 @@ describe('replace_page_text operation', () => {
     };
 
     const after = await engine.getPage('people/alice-example', { sourceId: 'default' });
+    const afterTimeline = await engine.getTimeline('people/alice-example', { sourceId: 'default' });
     const other = await engine.getPage('people/alice-example', { sourceId: 'other' });
     const afterTags = await engine.getTags('people/alice-example', { sourceId: 'default' });
 
@@ -135,7 +140,7 @@ describe('replace_page_text operation', () => {
     });
     expect(after?.compiled_truth).toContain('Alice works at Widget Co.');
     expect(after?.compiled_truth).toContain('| 1 | Alice works at Acme. |');
-    expect(after?.timeline).toContain('Alice joined Acme.');
+    expect(afterTimeline.map((entry) => entry.summary)).toContain('Alice joined Acme.');
     expect(after?.frontmatter.email).toBe('alice@example.com');
     expect(afterTags).toEqual(beforeTags);
     expect(other?.compiled_truth).toContain('Other Alice works at Acme.');

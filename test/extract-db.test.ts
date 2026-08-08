@@ -165,10 +165,12 @@ describe('gbrain extract timeline --source db', () => {
   test('extracts dated timeline entries from page content', async () => {
     await engine.putPage('people/alice', {
       type: 'person', title: 'Alice',
-      compiled_truth: 'Alice is the CEO.',
-      timeline: `## Timeline
+      compiled_truth: `Alice is the CEO.
+
+## Timeline
 - **2026-01-15** | Joined as CEO
 - **2026-02-20** | Closed Series A`,
+      timeline: '',
     });
 
     await runExtract(engine, ['timeline', '--source', 'db']);
@@ -180,8 +182,8 @@ describe('gbrain extract timeline --source db', () => {
 
   test('idempotent via DB constraint', async () => {
     await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: '- **2026-01-15** | Same event',
+      type: 'person', title: 'Alice',
+      compiled_truth: '- **2026-01-15** | Same event', timeline: '',
     });
     await runExtract(engine, ['timeline', '--source', 'db']);
     await runExtract(engine, ['timeline', '--source', 'db']);
@@ -191,10 +193,11 @@ describe('gbrain extract timeline --source db', () => {
 
   test('skips invalid dates', async () => {
     await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: `- **2026-01-15** | Valid
+      type: 'person', title: 'Alice',
+      compiled_truth: `- **2026-01-15** | Valid
 - **2026-13-45** | Invalid month/day
 - **2026-02-30** | Feb 30 doesnt exist`,
+      timeline: '',
     });
     await runExtract(engine, ['timeline', '--source', 'db']);
     const entries = await engine.getTimeline('people/alice');
@@ -204,10 +207,11 @@ describe('gbrain extract timeline --source db', () => {
 
   test('handles multiple date format variants', async () => {
     await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: `- **2026-01-15** | Pipe variant
+      type: 'person', title: 'Alice',
+      compiled_truth: `- **2026-01-15** | Pipe variant
 - **2026-02-20** -- Double dash variant
 - **2026-03-10** - Single dash variant`,
+      timeline: '',
     });
     await runExtract(engine, ['timeline', '--source', 'db']);
     const entries = await engine.getTimeline('people/alice');
@@ -216,8 +220,8 @@ describe('gbrain extract timeline --source db', () => {
 
   test('--dry-run --json emits JSON, no DB writes', async () => {
     await engine.putPage('people/alice', {
-      type: 'person', title: 'Alice', compiled_truth: '',
-      timeline: '- **2026-01-15** | Test event',
+      type: 'person', title: 'Alice',
+      compiled_truth: '- **2026-01-15** | Test event', timeline: '',
     });
 
     const lines: string[] = [];
@@ -252,8 +256,10 @@ describe('gbrain extract all --source db', () => {
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.putPage('companies/acme', {
       type: 'company', title: 'Acme',
-      compiled_truth: '[Alice](people/alice) joined as CEO.',
-      timeline: '- **2026-01-15** | Hired Alice',
+      compiled_truth: `[Alice](people/alice) joined as CEO.
+
+- **2026-01-15** | Hired Alice`,
+      timeline: '',
     });
 
     await runExtract(engine, ['all', '--source', 'db']);

@@ -30,12 +30,14 @@ function writeFakeGit(): void {
   const script = `#!/usr/bin/env bash
 has_clone=0
 has_remote_get_url=0
+has_inside_work_tree=0
 for ((i=1; i<=$#; i++)); do
   arg="\${!i}"
   next_idx=$((i+1))
   next="\${!next_idx:-}"
   if [ "$arg" = "clone" ]; then has_clone=1; fi
   if [ "$arg" = "remote" ] && [ "$next" = "get-url" ]; then has_remote_get_url=1; fi
+  if [ "$arg" = "rev-parse" ] && [ "$next" = "--is-inside-work-tree" ]; then has_inside_work_tree=1; fi
 done
 if [ "$has_clone" = "1" ]; then
   dest="\${@: -1}"
@@ -45,6 +47,10 @@ if [ "$has_clone" = "1" ]; then
 fi
 if [ "$has_remote_get_url" = "1" ]; then
   echo "https://github.com/example/repo"
+  exit 0
+fi
+if [ "$has_inside_work_tree" = "1" ]; then
+  echo "true"
   exit 0
 fi
 exit 0

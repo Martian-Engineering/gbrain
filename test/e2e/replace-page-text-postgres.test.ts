@@ -84,6 +84,7 @@ Postgres Parity works at Old Company.
       section: 'body',
     });
     const after = await engine.getPage(slug, { sourceId: 'default' });
+    const afterTimeline = await engine.getTimeline(slug, { sourceId: 'default' });
 
     expect(applied).toMatchObject({
       status: 'applied',
@@ -94,7 +95,8 @@ Postgres Parity works at Old Company.
     });
     expect(after?.compiled_truth).toContain('works at New Company.');
     expect(after?.compiled_truth).toContain('| 1 | Postgres Parity works at Old Company. |');
-    expect(after?.timeline).toContain('joined Old Company.');
+    expect(afterTimeline.map((entry) => entry.summary))
+      .toContain('Postgres Parity joined Old Company.');
     expect(after?.frontmatter.email).toBe('parity@example.com');
     expect(await engine.getTags(slug, { sourceId: 'default' })).toEqual(['parity']);
 
