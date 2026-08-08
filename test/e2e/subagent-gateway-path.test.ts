@@ -32,7 +32,10 @@ import {
   type ChatBlock,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
-import { stageAgentJobProposalPage } from '../../src/core/minions/agent-job-proposals.ts';
+import {
+  stageAgentJobProposalPage,
+  type StageProposalPageInput,
+} from '../../src/core/minions/agent-job-proposals.ts';
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -169,6 +172,92 @@ function buildHandler(toolRegistry: ToolDef[]) {
 
 describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gateway.toolLoop)', () => {
   afterAll(() => clearGateway());
+
+  it('returns a malformed stage as a tool error and accepts its correction in the same job', async () => {
+    const inventory = [{ slug: 'sources/example', effect: 'create' as const }];
+    const malformedInput: StageProposalPageInput = {
+      artifact_id: 'artifact-1', source_id: 'company',
+      admission_scope: 'Derived scope.', sequence: 1, total_pages: 1,
+      page_inventory: inventory,
+      page: {
+        slug: 'sources/example', effect: 'create', title: 'Example',
+        bodyMarkdown: 'Complete page.', appendMarkdown: 'Unexpected append.',
+      },
+    };
+    const correctedInput: StageProposalPageInput = {
+      ...malformedInput,
+      page: {
+        slug: 'sources/example', effect: 'create', title: 'Example',
+        bodyMarkdown: 'Complete page.',
+      },
+    };
+    let turn = 0;
+    __setChatTransportForTests(async () => {
+      turn++;
+      if (turn <= 2) {
+        return {
+          text: '',
+          blocks: [{
+            type: 'tool-call', toolCallId: `stage-${turn}`,
+            toolName: 'brain_stage_ingestion_proposal_page',
+            input: turn === 1 ? malformedInput : correctedInput,
+          }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-sonnet-4-6',
+          providerId: 'anthropic',
+        } satisfies ChatResult;
+      }
+      return {
+        text: 'staged after correction',
+        blocks: [{ type: 'text', text: 'staged after correction' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-sonnet-4-6',
+        providerId: 'anthropic',
+      } satisfies ChatResult;
+    });
+    const { jobId, ctx } = await makeFakeJob({
+      prompt: 'stage and correct errors', model: 'anthropic:claude-sonnet-4-6',
+      data: {
+        __owner_client_id: 'lore-client', source_id: 'company',
+        proposal_artifact_id: 'artifact-1', proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Derived scope.', allowed_slug_prefixes: ['sources/*'],
+      },
+    });
+    const tool: ToolDef = {
+      name: 'brain_stage_ingestion_proposal_page',
+      description: 'stage', input_schema: { type: 'object' },
+      idempotent: true, mutating: false,
+      async execute(input) {
+        return stageAgentJobProposalPage(engine, jobId, input as StageProposalPageInput);
+      },
+    };
+
+    const result = await buildHandler([tool])(ctx);
+
+    expect(result).toMatchObject({ result: 'staged after correction', stop_reason: 'end_turn' });
+    const executions = await engine.executeRaw<{ status: string; error: string | null }>(
+      `SELECT status, error FROM subagent_tool_executions WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    expect(executions).toEqual([
+      { status: 'failed', error: 'page must contain exactly: slug, effect, title, bodyMarkdown.' },
+      { status: 'complete', error: null },
+    ]);
+    const messages = await engine.executeRaw<{ role: string }>(
+      `SELECT role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`,
+      [jobId],
+    );
+    expect(messages.map(row => row.role)).toEqual([
+      'user', 'assistant', 'user', 'assistant', 'user', 'assistant',
+    ]);
+    const fragments = await engine.executeRaw<{ sequence: number; page: unknown }>(
+      `SELECT sequence, page FROM agent_job_proposal_fragments WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(fragments).toEqual([{ sequence: 1, page: correctedInput.page }]);
+  });
 
   it('rejects an oversized staged page before gateway assistant or tool persistence', async () => {
     __setChatTransportForTests(async () => ({

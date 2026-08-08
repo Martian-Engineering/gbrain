@@ -20,6 +20,11 @@ import {
 } from '../src/core/minions/tools/brain-allowlist.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import type { ToolCtx } from '../src/core/minions/types.ts';
+import {
+  PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
+  PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
+  PROPOSAL_UPDATE_PAGE_JSON_SCHEMA,
+} from '../src/core/ingestion-proposal-contract.ts';
 
 let engine: PGLiteEngine;
 const config: GBrainConfig = { engine: 'pglite' } as GBrainConfig;
@@ -156,6 +161,83 @@ describe('buildBrainTools', () => {
     const slug = ((getPage!.input_schema as any).properties as any).slug;
     expect(slug).toBeDefined();
     expect(slug.pattern).toBeUndefined();
+  });
+
+  test('stage proposal schema exposes exact create and update page shapes', () => {
+    const operation = operations.find(op => op.name === 'stage_ingestion_proposal_page')!;
+    const schema = __testing.stageIngestionProposalPageSchema(operation) as any;
+
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual([
+      'artifact_id',
+      'source_id',
+      'admission_scope',
+      'sequence',
+      'total_pages',
+      'page_inventory',
+      'page',
+    ]);
+
+    const inventoryItem = schema.properties.page_inventory.items;
+    expect(inventoryItem).toEqual(PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA);
+    expect(inventoryItem.additionalProperties).toBe(false);
+    expect(inventoryItem.required).toEqual(['slug', 'effect']);
+    expect(inventoryItem.properties.slug).toMatchObject({ type: 'string' });
+    expect(inventoryItem.properties.effect).toEqual({
+      type: 'string',
+      enum: ['create', 'update'],
+    });
+
+    const [createPage, updatePage] = schema.properties.page.anyOf;
+    expect(createPage).toEqual(PROPOSAL_CREATE_PAGE_JSON_SCHEMA);
+    expect(updatePage).toEqual(PROPOSAL_UPDATE_PAGE_JSON_SCHEMA);
+    expect(createPage.additionalProperties).toBe(false);
+    expect(createPage.required).toEqual(['slug', 'effect', 'title', 'bodyMarkdown']);
+    expect(createPage.properties.effect).toEqual({ type: 'string', enum: ['create'] });
+    expect(createPage.properties).toEqual({
+      slug: { type: 'string' },
+      effect: { type: 'string', enum: ['create'] },
+      title: { type: 'string' },
+      bodyMarkdown: { type: 'string' },
+    });
+
+    expect(updatePage.additionalProperties).toBe(false);
+    expect(updatePage.required).toEqual(['slug', 'effect', 'appendMarkdown']);
+    expect(updatePage.properties.effect).toEqual({ type: 'string', enum: ['update'] });
+    expect(updatePage.properties).toEqual({
+      slug: { type: 'string' },
+      effect: { type: 'string', enum: ['update'] },
+      appendMarkdown: { type: 'string' },
+    });
+  });
+
+  test('stage proposal identity omission preserves the exact nested schema', () => {
+    const operation = operations.find(op => op.name === 'stage_ingestion_proposal_page')!;
+    const baseSchema = __testing.stageIngestionProposalPageSchema(operation) as any;
+    const proposalBinding = {
+      artifactId: 'artifact-1',
+      sourceId: 'company',
+      admissionScope: 'Include project delivery notes.',
+    };
+    const stage = buildBrainTools({ subagentId: 42, engine, config, proposalBinding })
+      .find(tool => tool.name === 'brain_stage_ingestion_proposal_page')!;
+    const schema = stage.input_schema as any;
+
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties)).toEqual([
+      'sequence',
+      'total_pages',
+      'page_inventory',
+      'page',
+    ]);
+    expect(schema.required).toEqual([
+      'sequence',
+      'total_pages',
+      'page_inventory',
+      'page',
+    ]);
+    expect(schema.properties.page_inventory).toEqual(baseSchema.properties.page_inventory);
+    expect(schema.properties.page).toEqual(baseSchema.properties.page);
   });
 
   test('proposal tools keep immutable job identity out of model-owned input', () => {

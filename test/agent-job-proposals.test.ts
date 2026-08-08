@@ -7,6 +7,8 @@ import {
   PROPOSAL_MANIFEST_MAX_BYTES,
   PROPOSAL_MAX_PAGES,
   PROPOSAL_STAGE_INPUT_MAX_BYTES,
+  AgentJobProposalError,
+  __testing as proposalTesting,
   assertProposalToolTurnPersistable,
   assertProposalToolTurnPersistableForJob,
   canonicalProposalJson,
@@ -16,6 +18,7 @@ import {
   stageAgentJobProposalPage,
   type ProposalPageInventoryEntry,
   type ScopedProposalPage,
+  type StageProposalPageInput,
 } from '../src/core/minions/agent-job-proposals.ts';
 import { compactToolLoopMessages } from '../src/core/ai/tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../src/core/ingestion-proposal-context-policy.ts';
@@ -113,6 +116,46 @@ async function stage(
 }
 
 describe('proposal turn pre-persistence boundary', () => {
+  it('propagates an unlisted future parser error before persistence', () => {
+    const futureError = new AgentJobProposalError('future_parse_invariant', 'Future invariant failed.');
+
+    expect(() => proposalTesting.parseStageProposalPageCoreForPersistence(
+      {},
+      () => { throw futureError; },
+    )).toThrow(futureError);
+  });
+
+  it.each([
+    {
+      label: 'create',
+      page: {
+        slug: 'sources/example', effect: 'create', title: 'Example',
+        bodyMarkdown: 'Complete page.', appendMarkdown: 'Unexpected append.',
+      },
+    },
+    {
+      label: 'update',
+      page: {
+        slug: 'sources/example', effect: 'update', appendMarkdown: 'Append.',
+        title: 'Unexpected title',
+      },
+    },
+  ])('defers a bounded malformed $label page to execution-time correction', async ({ page }) => {
+    const jobId = await seedJob();
+    const input: StageProposalPageInput = {
+      artifact_id: 'artifact-1', source_id: 'company',
+      admission_scope: 'Include project delivery notes.', sequence: 1, total_pages: 1,
+      page_inventory: [{ slug: page.slug, effect: page.effect }],
+      page,
+    };
+
+    await expect(assertProposalToolTurnPersistableForJob(engine, jobId, [{
+      type: 'tool-call', toolName: 'brain_stage_ingestion_proposal_page', input,
+    }])).resolves.toBeUndefined();
+    await expect(stageAgentJobProposalPage(engine, jobId, input))
+      .rejects.toMatchObject({ code: 'invalid_keys' });
+  });
+
   it('uses immutable job identity when a compacted stage call omits it', async () => {
     const jobId = await seedJob();
     const page = createPage('sources/example');
