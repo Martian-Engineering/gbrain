@@ -33,6 +33,16 @@ describe('migration v135 — timeline reference columns', () => {
     expect(LATEST_VERSION).toBeGreaterThanOrEqual(135);
   });
 
+  test('v139 accepts deployment users with inherited BYPASSRLS authority', () => {
+    const migration = MIGRATIONS.find(entry => entry.version === 139);
+    expect(migration).toMatchObject({
+      name: 'ingestion_proposal_application_ledger',
+      idempotent: true,
+    });
+    expect(migration?.sql).toContain("pg_has_role(current_user, pr.oid, 'USAGE')");
+    expect(migration?.sql).not.toContain('pr.rolname = current_user');
+  });
+
   test('adds refs, widens event dedup, and preserves row-backed timeline search', async () => {
     await engine.putPage('legacy-search-page', {
       type: 'note',
@@ -81,7 +91,7 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.setConfig('version', '134');
 
     const first = await runMigrations(engine);
-    expect(first).toEqual({ applied: 4, current: 138 });
+    expect(first).toEqual({ applied: 5, current: 139 });
     const columns = await engine.executeRaw<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable
          FROM information_schema.columns
@@ -120,6 +130,6 @@ describe('migration v135 — timeline reference columns', () => {
 
     await engine.setConfig('version', '134');
     const second = await runMigrations(engine);
-    expect(second).toEqual({ applied: 4, current: 138 });
+    expect(second).toEqual({ applied: 5, current: 139 });
   }, 30_000);
 });

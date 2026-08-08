@@ -109,6 +109,9 @@ async function seedApplyJob(frozen: FrozenCreateProposal): Promise<number> {
     approved_proposal_job_id: frozen.proposalJobId,
     approved_proposal_digest: frozen.manifest.proposalDigest,
     approved_proposal_page_digests: frozen.manifest.pageDigests,
+    approved_proposal_timeline_digests: frozen.manifest.timelineDigests,
+    approved_proposal_link_digests: frozen.manifest.linkDigests,
+    approved_proposal_inventory_digest: frozen.manifest.inventoryDigest,
     })],
   );
   return Number(jobs[0]!.id);

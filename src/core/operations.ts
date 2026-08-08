@@ -5447,7 +5447,12 @@ const submit_agent: Operation = {
     const approvedProposalDigest = typeof p.approved_proposal_digest === 'string'
       ? p.approved_proposal_digest.trim()
       : '';
-    const usesApplyProposalTool = requestedTools.includes('apply_ingestion_proposal_page');
+    const approvedProposalTools = new Set([
+      'apply_ingestion_proposal_page',
+      'apply_ingestion_proposal_relation',
+      'finalize_ingestion_proposal_application',
+    ]);
+    const usesApplyProposalTool = requestedTools.some(tool => approvedProposalTools.has(tool));
     const hasApprovedProposalAuthority = approvedProposalJobId !== null
       && approvedProposalDigest.length > 0;
     const usesStagingProposalTool = requestedTools.some(tool => (
@@ -5457,7 +5462,7 @@ const submit_agent: Operation = {
     const usesProposalTools = hasApprovedProposalAuthority || requestedTools.some((tool) => (
       tool === 'stage_ingestion_proposal_page'
       || tool === 'finalize_ingestion_proposal'
-      || tool === 'apply_ingestion_proposal_page'
+      || approvedProposalTools.has(tool)
     ));
     if ((approvedProposalJobId !== null) !== (approvedProposalDigest.length > 0)) {
       throw new OperationError(
@@ -5485,14 +5490,14 @@ const submit_agent: Operation = {
     }
     const extraApprovedMutations = hasApprovedProposalAuthority
       ? requestedTools.filter(tool => (
-        tool !== 'apply_ingestion_proposal_page'
+        !approvedProposalTools.has(tool)
         && agentMutatingOperationNames().has(tool)
       ))
       : [];
     if (extraApprovedMutations.length > 0) {
       throw new OperationError(
         'invalid_params',
-        'submit_agent: only apply_ingestion_proposal_page may mutate in an approved proposal apply job.',
+        'submit_agent: approved proposal apply jobs may mutate only through server-bound proposal operations.',
       );
     }
     if (approvedProposalDigest && !/^[a-f0-9]{64}$/.test(approvedProposalDigest)) {
@@ -5632,6 +5637,9 @@ const submit_agent: Operation = {
       admissionScope: string;
       capturePageSlug: string;
       pageDigests: Array<{ sequence: number; slug: string; digest: string }>;
+      timelineDigests: Array<{ sequence: number; digest: string }>;
+      linkDigests: Array<{ sequence: number; digest: string }>;
+      inventoryDigest: string;
     } | undefined;
     if (approvedProposalJobId && approvedProposalDigest) {
       const proposal = await import('./minions/agent-job-proposal-apply.ts');
@@ -5787,6 +5795,9 @@ const submit_agent: Operation = {
       jobData.approved_proposal_job_id = approvedAuthority.proposalJobId;
       jobData.approved_proposal_digest = approvedAuthority.proposalDigest;
       jobData.approved_proposal_page_digests = approvedAuthority.pageDigests;
+      jobData.approved_proposal_timeline_digests = approvedAuthority.timelineDigests;
+      jobData.approved_proposal_link_digests = approvedAuthority.linkDigests;
+      jobData.approved_proposal_inventory_digest = approvedAuthority.inventoryDigest;
     }
     const job = await queue.add(
       'subagent',
@@ -5922,6 +5933,76 @@ const apply_ingestion_proposal_page: Operation = {
           'job_not_bound',
           'slug_not_allowed',
         ]);
+        throw new OperationError(
+          permissionCodes.has(error.code) ? 'permission_denied' : error.code,
+          error.message,
+        );
+      }
+      throw error;
+    }
+  },
+};
+
+const apply_ingestion_proposal_relation: Operation = {
+  name: 'apply_ingestion_proposal_relation',
+  description: 'Apply one exact frozen timeline or typed-link slot by proposal authority, relation kind, and one-based sequence. Relation content is always resolved server-side.',
+  params: {
+    proposal_job_id: { type: 'number', required: true, description: 'Exact approved proposal job id', trace: { kind: 'job' } },
+    proposal_digest: { type: 'string', required: true, description: 'Exact approved proposal digest', trace: { kind: 'proposal' } },
+    relation_kind: { type: 'string', required: true, enum: ['timeline', 'link'], description: 'Frozen relation inventory kind' },
+    sequence: { type: 'number', required: true, description: 'One-based sequence within the selected relation kind' },
+    source_id: { type: 'string', required: true, description: 'Exact approved source id', trace: { kind: 'source' } },
+  },
+  mutating: true,
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError(
+        'permission_denied',
+        'apply_ingestion_proposal_relation is available only inside an authorized apply agent job.',
+      );
+    }
+    const proposal = await import('./minions/agent-job-proposal-relation-apply.ts');
+    try {
+      return await proposal.applyAgentJobProposalRelation(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      const contract = await import('./ingestion-proposal-contract.ts');
+      if (error instanceof contract.AgentJobProposalError) {
+        const permissionCodes = new Set(['permission_denied', 'job_not_bound', 'slug_not_allowed']);
+        throw new OperationError(
+          permissionCodes.has(error.code) ? 'permission_denied' : error.code,
+          error.message,
+        );
+      }
+      throw error;
+    }
+  },
+};
+
+const finalize_ingestion_proposal_application: Operation = {
+  name: 'finalize_ingestion_proposal_application',
+  description: 'Re-verify every frozen page, timeline, and link receipt against current durable state and return the complete server application receipt.',
+  params: {
+    proposal_job_id: { type: 'number', required: true, description: 'Exact approved proposal job id', trace: { kind: 'job' } },
+    proposal_digest: { type: 'string', required: true, description: 'Exact approved proposal digest', trace: { kind: 'proposal' } },
+    source_id: { type: 'string', required: true, description: 'Exact approved source id', trace: { kind: 'source' } },
+  },
+  // The finalizer persists job evidence but never mutates corpus state.
+  mutating: false,
+  scope: 'agent',
+  handler: async (ctx, p) => {
+    if (ctx.viaSubagent !== true || ctx.jobId === undefined) {
+      throw new OperationError(
+        'permission_denied',
+        'finalize_ingestion_proposal_application is available only inside an authorized apply agent job.',
+      );
+    }
+    const proposal = await import('./minions/agent-job-proposal-application.ts');
+    try {
+      return await proposal.finalizeAgentJobProposalApplication(ctx.engine, ctx.jobId, p as any);
+    } catch (error) {
+      if (error instanceof proposal.AgentJobProposalError) {
+        const permissionCodes = new Set(['permission_denied', 'job_not_bound', 'slug_not_allowed']);
         throw new OperationError(
           permissionCodes.has(error.code) ? 'permission_denied' : error.code,
           error.message,
@@ -8942,7 +9023,8 @@ export const operations: Operation[] = [
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
   submit_agent, stage_ingestion_proposal_page, finalize_ingestion_proposal,
-  apply_ingestion_proposal_page,
+  apply_ingestion_proposal_page, apply_ingestion_proposal_relation,
+  finalize_ingestion_proposal_application,
   get_agent_job, get_agent_job_proposal, get_agent_job_execution_evidence,
   // Orphans
   find_orphans,

@@ -434,7 +434,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
             } as ContentBlock);
           } catch (e) {
             const errText = e instanceof Error ? (e.stack ?? e.message) : String(e);
-            await persistToolExecFailed(engine, ctx.id, last.message_idx, use.id, use.name, use.input, errText);
+            await persistToolExecFailed(
+              engine, ctx.id, last.message_idx, use.id, use.name, use.input,
+              errText, toolErrorCode(e),
+            );
             synthesizedResults.push({
               type: 'tool_result', tool_use_id: use.id,
               content: errText, is_error: true,
@@ -764,7 +767,10 @@ export function makeSubagentHandler(deps: SubagentDeps) {
           const errText = e instanceof Error
             ? (e.stack ?? e.message)
             : String(e);
-          await persistToolExecFailed(engine, ctx.id, assistantIdx, use.id, toolName, use.input, errText);
+          await persistToolExecFailed(
+            engine, ctx.id, assistantIdx, use.id, toolName, use.input,
+            errText, toolErrorCode(e),
+          );
           logSubagentHeartbeat({
             job_id: ctx.id,
             event: 'tool_failed',
@@ -1052,12 +1058,16 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
         [JSON.stringify(output ?? null), gbrainToolUseId],
       );
     },
-    onToolCallFailed: async (gbrainToolUseId, errorMsg) => {
+    onToolCallFailed: async (gbrainToolUseId, errorMsg, errorCode) => {
       await engine.executeRaw(
         `UPDATE subagent_tool_executions
-           SET status = 'failed', error = $1, ended_at = now()
-         WHERE gbrain_tool_use_id::text = $2`,
-        [errorMsg, gbrainToolUseId],
+           SET status = 'failed', error = $1, output = $2::text::jsonb, ended_at = now()
+         WHERE gbrain_tool_use_id::text = $3`,
+        [
+          errorMsg,
+          JSON.stringify(boundedToolFailure(errorCode)),
+          gbrainToolUseId,
+        ],
       );
     },
     // Persist the tool-result user turn so a resume reloads a balanced
@@ -1234,7 +1244,10 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output });
       } catch (e) {
         const errText = e instanceof Error ? (e.stack ?? e.message) : String(e);
-        await persistToolExecFailed(engine, jobId, msg.message_idx, call.toolCallId, call.toolName, call.input, errText);
+        await persistToolExecFailed(
+          engine, jobId, msg.message_idx, call.toolCallId, call.toolName, call.input,
+          errText, toolErrorCode(e),
+        );
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: errText, isError: true });
       }
     }
@@ -1506,16 +1519,39 @@ async function persistToolExecFailed(
   toolName: string,
   input: unknown,
   error: string,
+  errorCode?: string,
 ): Promise<void> {
   // INSERT-or-UPDATE to failed — covers both "no pending row yet" (tool
   // rejected upfront) and "pending row exists" (tool threw mid-execute).
   await engine.executeRaw(
-    `INSERT INTO subagent_tool_executions (job_id, message_idx, tool_use_id, tool_name, input, status, error, ended_at)
-     VALUES ($1, $2, $3, $4, $5::text::jsonb, 'failed', $6, now())
+    `INSERT INTO subagent_tool_executions (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ended_at)
+     VALUES ($1, $2, $3, $4, $5::text::jsonb, 'failed', $6::text::jsonb, $7, now())
      ON CONFLICT (job_id, tool_use_id) DO UPDATE
-       SET status = 'failed', error = EXCLUDED.error, ended_at = now()`,
-    [jobId, messageIdx, toolUseId, toolName, typeof input === 'string' ? input : JSON.stringify(input), error],
+       SET status = 'failed', output = EXCLUDED.output, error = EXCLUDED.error, ended_at = now()`,
+    [
+      jobId,
+      messageIdx,
+      toolUseId,
+      toolName,
+      typeof input === 'string' ? input : JSON.stringify(input),
+      JSON.stringify(boundedToolFailure(errorCode)),
+      error,
+    ],
   );
+}
+
+// Persist only a bounded machine code; raw private diagnostics stay in error.
+function boundedToolFailure(errorCode: string | undefined): { failure_code: string } | null {
+  return errorCode && /^[a-z][a-z0-9_]{0,63}$/.test(errorCode)
+    ? { failure_code: errorCode }
+    : null;
+}
+
+function toolErrorCode(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null &&
+      typeof (error as { code?: unknown }).code === 'string'
+    ? (error as { code: string }).code
+    : undefined;
 }
 
 // ── Internal: helpers ───────────────────────────────────────

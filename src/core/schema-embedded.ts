@@ -1173,6 +1173,7 @@ CREATE TABLE IF NOT EXISTS ingestion_proposal_authority_pages (
   applied_content_hash TEXT,
   applied_rebased  BOOLEAN,
   applied_at       TIMESTAMPTZ,
+  applied_write_through JSONB,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (proposal_id, sequence),
   CONSTRAINT chk_ingestion_proposal_authority_page_sequence
@@ -1195,6 +1196,59 @@ CREATE TABLE IF NOT EXISTS ingestion_proposal_authority_pages (
       AND applied_rebased IS NOT NULL AND applied_at IS NOT NULL)
   )
 );
+
+CREATE TABLE IF NOT EXISTS ingestion_proposal_application_runs (
+  proposal_id BIGINT NOT NULL,
+  proposal_digest TEXT NOT NULL,
+  owner_client_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  admission_scope TEXT NOT NULL,
+  capture_page_slug TEXT NOT NULL,
+  inventory_digest TEXT NOT NULL,
+  first_apply_job_id BIGINT NOT NULL,
+  last_apply_job_id BIGINT NOT NULL,
+  preflight_at TIMESTAMPTZ NOT NULL,
+  final_receipt JSONB,
+  final_receipt_digest TEXT,
+  finalized_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (proposal_id, proposal_digest),
+  CONSTRAINT chk_ingestion_proposal_application_digest CHECK (
+    proposal_digest ~ '^[a-f0-9]{64}$' AND inventory_digest ~ '^[a-f0-9]{64}$'
+  ),
+  CONSTRAINT chk_ingestion_proposal_application_final CHECK (
+    (final_receipt IS NULL AND final_receipt_digest IS NULL AND finalized_at IS NULL)
+    OR (final_receipt IS NOT NULL AND final_receipt_digest ~ '^[a-f0-9]{64}$' AND finalized_at IS NOT NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_application_owner
+  ON ingestion_proposal_application_runs (owner_client_id, source_id);
+
+CREATE TABLE IF NOT EXISTS ingestion_proposal_relation_outcomes (
+  proposal_id BIGINT NOT NULL,
+  proposal_digest TEXT NOT NULL,
+  relation_kind TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  relation_digest TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  apply_job_id BIGINT NOT NULL,
+  target_slug TEXT NOT NULL,
+  observed_row_id BIGINT NOT NULL,
+  outcome TEXT NOT NULL,
+  write_through JSONB,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (proposal_id, proposal_digest, relation_kind, sequence),
+  CONSTRAINT chk_ingestion_proposal_relation_kind CHECK (relation_kind IN ('timeline','link')),
+  CONSTRAINT chk_ingestion_proposal_relation_sequence CHECK (sequence >= 1),
+  CONSTRAINT chk_ingestion_proposal_relation_digest CHECK (
+    proposal_digest ~ '^[a-f0-9]{64}$' AND relation_digest ~ '^[a-f0-9]{64}$'
+  ),
+  CONSTRAINT chk_ingestion_proposal_relation_outcome CHECK (outcome IN ('applied','already_applied'))
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_proposal_relation_source
+  ON ingestion_proposal_relation_outcomes (source_id, proposal_id);
 
 -- Rate-lease table — concurrency cap on outbound providers (e.g.
 -- anthropic:messages). Acquire: INSERT if active < max_concurrent under
@@ -1646,6 +1700,8 @@ BEGIN
     ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE ingestion_proposal_authorities ENABLE ROW LEVEL SECURITY;
     ALTER TABLE ingestion_proposal_authority_pages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ingestion_proposal_application_runs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ingestion_proposal_relation_outcomes ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
     ALTER TABLE dream_verdicts ENABLE ROW LEVEL SECURITY;

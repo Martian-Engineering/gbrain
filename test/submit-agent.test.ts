@@ -1006,6 +1006,261 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(JSON.stringify(owned.execution_evidence)).not.toContain('private reviewed text');
   });
 
+  it('projects relation and proposal-finalizer evidence without frozen relation content', async () => {
+    await seedClient('lore', {
+      bound_tools: [
+        'apply_ingestion_proposal_relation',
+        'finalize_ingestion_proposal_application',
+      ],
+    });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'company' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES
+         ($1, 1, 'relation-1', 'brain_apply_ingestion_proposal_relation',
+          $2::jsonb, 'complete', $3::jsonb, 0),
+         ($1, 2, 'finalize-1', 'brain_finalize_ingestion_proposal_application',
+          $4::jsonb, 'complete', $5::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          relation_kind: 'timeline',
+          sequence: 1,
+          source_id: 'company',
+          text: 'private relation text must not appear',
+        }),
+        JSON.stringify({
+          status: 'applied',
+          relation_kind: 'timeline',
+          proposal_job_id: 41,
+          sequence: 1,
+          source_id: 'company',
+          proposal_digest: 'a'.repeat(64),
+          relation_digest: 'b'.repeat(64),
+          target_slug: 'sources/example',
+          write_through: { written: true, path: '/private/repo/sources/example.md' },
+        }),
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          source_id: 'company',
+        }),
+        JSON.stringify({
+          status: 'applied_proposal',
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          source_id: 'company',
+          inventory_digest: 'c'.repeat(64),
+          pages: { total: 2, applied: 2, rebased: 1 },
+          timeline_entries: { total: 1, applied: 1 },
+          links: { total: 3, applied: 3 },
+          receipt_digest: 'd'.repeat(64),
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence).toMatchObject({
+      availability: 'complete',
+      unsupported_mutation_count: 0,
+      operations: [
+        {
+          sequence: 0,
+          operation: 'apply_ingestion_proposal_relation',
+          execution_status: 'complete',
+          source_id: 'company',
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          relation_kind: 'timeline',
+          proposal_sequence: 1,
+          relation_digest: 'b'.repeat(64),
+          target_slug: 'sources/example',
+          outcome: 'applied',
+          write_through_status: 'written',
+        },
+        {
+          sequence: 1,
+          operation: 'finalize_ingestion_proposal_application',
+          execution_status: 'complete',
+          source_id: 'company',
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          inventory_digest: 'c'.repeat(64),
+          receipt_digest: 'd'.repeat(64),
+          pages_total: 2,
+          pages_applied: 2,
+          pages_rebased: 1,
+          timeline_total: 1,
+          timeline_applied: 1,
+          links_total: 3,
+          links_applied: 3,
+          outcome: 'applied_proposal',
+        },
+      ],
+    });
+    expect(owned.execution_evidence.allowed_recovery_actions).toContain(
+      'finalize_verified_success',
+    );
+    const evidence = JSON.stringify(owned.execution_evidence);
+    expect(evidence).not.toContain('private relation text');
+    expect(evidence).not.toContain('/private/repo');
+  });
+
+  it('projects bounded proposal failure codes without raw diagnostics', async () => {
+    await seedClient('lore', { bound_tools: ['apply_ingestion_proposal_relation'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'failed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'company' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES ($1, 1, 'relation-failed', 'brain_apply_ingestion_proposal_relation',
+               $2::jsonb, 'failed', $3::jsonb, $4, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          relation_kind: 'timeline',
+          sequence: 1,
+          source_id: 'company',
+        }),
+        JSON.stringify({ failure_code: 'proposal_authority_unavailable' }),
+        'private authority lookup diagnostic',
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.operations[0]).toMatchObject({
+      operation: 'apply_ingestion_proposal_relation',
+      execution_status: 'failed',
+      failure_code: 'proposal_authority_unavailable',
+      outcome: 'unknown',
+    });
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain('private authority lookup');
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'finalize_verified_success',
+    );
+  });
+
+  it('requires a completed finalizer before proposal application is verified', async () => {
+    await seedClient('lore', { bound_tools: ['apply_ingestion_proposal_relation'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'completed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'company' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'relation-complete', 'brain_apply_ingestion_proposal_relation',
+               $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          relation_kind: 'link',
+          sequence: 1,
+          source_id: 'company',
+        }),
+        JSON.stringify({
+          status: 'applied',
+          relation_kind: 'link',
+          proposal_job_id: 41,
+          sequence: 1,
+          source_id: 'company',
+          proposal_digest: 'a'.repeat(64),
+          relation_digest: 'b'.repeat(64),
+          target_slug: 'sources/example',
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.availability).toBe('complete');
+    expect(owned.execution_evidence.allowed_recovery_actions).toContain(
+      'continue_approved_work',
+    );
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'finalize_verified_success',
+    );
+  });
+
+  it('never offers verified-success closeout after the latest finalizer failed', async () => {
+    await seedClient('lore', { bound_tools: ['finalize_ingestion_proposal_application'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'failed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'company' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, ordinal)
+       VALUES ($1, 1, 'finalizer-failed', 'brain_finalize_ingestion_proposal_application',
+               $2::jsonb, 'failed', $3::jsonb, $4, 0)`,
+      [
+        row.id,
+        JSON.stringify({
+          proposal_job_id: 41,
+          proposal_digest: 'a'.repeat(64),
+          source_id: 'company',
+        }),
+        JSON.stringify({ failure_code: 'incomplete_application' }),
+        'private finalizer diagnostic',
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence).toMatchObject({
+      availability: 'complete',
+      operations: [{
+        operation: 'finalize_ingestion_proposal_application',
+        execution_status: 'failed',
+        failure_code: 'incomplete_application',
+        outcome: 'unknown',
+        inventory_digest: null,
+        receipt_digest: null,
+      }],
+    });
+    expect(owned.execution_evidence.allowed_recovery_actions).toContain(
+      'retry_filing_from_current_state',
+    );
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'finalize_verified_success',
+    );
+    expect(JSON.stringify(owned.execution_evidence)).not.toContain('private finalizer diagnostic');
+  });
+
   it('returns bounded authoritative write evidence without raw content or errors', async () => {
     await seedClient('lore', { bound_tools: ['get_page', 'put_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
@@ -1500,8 +1755,13 @@ describe('staged proposal operation contract', () => {
       admission_scope: 'Include delivery notes.',
       total_pages: 1,
       summary: 'Ready for review.',
-      proposed_timeline_entries: [],
-      proposed_links: [],
+      proposed_timeline_entries: [{
+        pageSlug: 'sources/example',
+        date: '2026-08-08',
+        text: 'The reviewed event occurred.',
+        ref: 'sources/example',
+      }],
+      proposed_links: [{ from: 'sources/example', to: 'sources/example', type: 'related' }],
       unresolved: [],
     }) as any;
 
@@ -1512,9 +1772,17 @@ describe('staged proposal operation contract', () => {
       admissionScope: 'Include delivery notes.',
       summary: 'Ready for review.',
       pageDigests: [{ sequence: 1, slug: 'sources/example', digest: staged.digest }],
+      timelineDigests: [{ sequence: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      linkDigests: [{ sequence: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+      inventoryDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
       proposalDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      proposedTimelineEntries: [],
-      proposedLinks: [],
+      proposedTimelineEntries: [{
+        pageSlug: 'sources/example',
+        date: '2026-08-08',
+        text: 'The reviewed event occurred.',
+        ref: 'sources/example',
+      }],
+      proposedLinks: [{ from: 'sources/example', to: 'sources/example', type: 'related' }],
       unresolved: [],
     });
 
@@ -1526,6 +1794,9 @@ describe('staged proposal operation contract', () => {
       id: row.id,
       proposal_digest: manifest.proposalDigest,
       page_digests: manifest.pageDigests,
+      timeline_digests: manifest.timelineDigests,
+      link_digests: manifest.linkDigests,
+      inventory_digest: manifest.inventoryDigest,
       plan: {
         artifactId: 'artifact-1',
         sourceId: 'company',
@@ -1537,8 +1808,8 @@ describe('staged proposal operation contract', () => {
           title: 'Example',
           bodyMarkdown: '# Example',
         }],
-        proposedTimelineEntries: [],
-        proposedLinks: [],
+        proposedTimelineEntries: manifest.proposedTimelineEntries,
+        proposedLinks: manifest.proposedLinks,
         unresolved: [],
       },
     });
@@ -1546,14 +1817,22 @@ describe('staged proposal operation contract', () => {
       `INSERT INTO sources (id, name) VALUES ('company', 'Company') ON CONFLICT (id) DO NOTHING`,
     );
     await seedClient('lore', {
-      bound_tools: ['apply_ingestion_proposal_page'],
+      bound_tools: [
+        'apply_ingestion_proposal_page',
+        'apply_ingestion_proposal_relation',
+        'finalize_ingestion_proposal_application',
+      ],
       bound_source_id: 'company',
       bound_slug_prefixes: ['sources/'],
       bound_max_concurrent: 3,
     });
     const applyJob = await callSubmitAgent(makeCtx({ clientId: 'lore' }), {
       prompt: 'Apply the exact approved proposal.',
-      allowed_tools: ['apply_ingestion_proposal_page'],
+      allowed_tools: [
+        'apply_ingestion_proposal_page',
+        'apply_ingestion_proposal_relation',
+        'finalize_ingestion_proposal_application',
+      ],
       allowed_slug_prefixes: ['sources/'],
       proposal_artifact_id: 'artifact-1',
       proposal_capture_page_slug: 'sources/example',
@@ -1570,6 +1849,9 @@ describe('staged proposal operation contract', () => {
       approved_proposal_job_id: row.id,
       approved_proposal_digest: manifest.proposalDigest,
       approved_proposal_page_digests: manifest.pageDigests,
+      approved_proposal_timeline_digests: manifest.timelineDigests,
+      approved_proposal_link_digests: manifest.linkDigests,
+      approved_proposal_inventory_digest: manifest.inventoryDigest,
       proposal_artifact_id: 'artifact-1',
       proposal_capture_page_slug: 'sources/example',
       proposal_admission_scope: 'Include delivery notes.',
@@ -1633,7 +1915,7 @@ describe('staged proposal operation contract', () => {
       proposal_admission_scope: 'Include delivery notes.',
       approved_proposal_job_id: row.id,
       approved_proposal_digest: manifest.proposalDigest,
-    })).rejects.toThrow(/only apply_ingestion_proposal_page may mutate/i);
+    })).rejects.toThrow(/only through server-bound proposal operations/i);
     await expect(get_agent_job_proposal!.handler(
       makeCtx({ clientId: 'other' }),
       { id: row.id, proposal_digest: manifest.proposalDigest },

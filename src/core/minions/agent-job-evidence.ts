@@ -9,9 +9,48 @@ const TRACKED_TOOLS = [
   'brain_add_link',
   'brain_remove_link',
   'brain_apply_ingestion_proposal_page',
+  'brain_apply_ingestion_proposal_relation',
+  'brain_finalize_ingestion_proposal_application',
 ] as const;
 
 type ExecutionStatus = 'pending' | 'complete' | 'failed';
+
+const PROPOSAL_FAILURE_CODES = new Set([
+  'proposal_authority_unavailable',
+  'proposal_authority_expired',
+  'proposal_authority_page_missing',
+  'apply_failed',
+  'baseline_unavailable',
+  'digest_mismatch',
+  'incomplete_application',
+  'invalid_apply_receipt',
+  'invalid_digest',
+  'invalid_integer',
+  'invalid_job_id',
+  'invalid_keys',
+  'invalid_object',
+  'invalid_page',
+  'invalid_page_inventory',
+  'invalid_params',
+  'invalid_sequence',
+  'invalid_slug',
+  'invalid_string',
+  'job_not_bound',
+  'off_plan_page',
+  'off_plan_relation',
+  'out_of_order',
+  'page_unavailable',
+  'permission_denied',
+  'relation_collision',
+  'relation_target_unavailable',
+  'slug_not_allowed',
+  'stage_input_too_large',
+  'stale_page',
+  'stale_relation',
+  'proposal_application_failed',
+] as const);
+
+type ProposalFailureCode = typeof PROPOSAL_FAILURE_CODES extends Set<infer T> ? T : never;
 
 interface ToolExecutionRow {
   tool_name: string;
@@ -76,6 +115,17 @@ export async function readAgentJobExecutionEvidence(
   const failedMutation = operations.some((operation) =>
     isMutationOperation(operation) && operation.execution_status === 'failed'
   );
+  const proposalFinalizers = operations.filter((operation) =>
+    operation.operation === 'finalize_ingestion_proposal_application'
+  );
+  const latestProposalFinalizer = proposalFinalizers.at(-1);
+  const usesProposalApplication = operations.some((operation) => [
+    'apply_ingestion_proposal_page',
+    'apply_ingestion_proposal_relation',
+    'finalize_ingestion_proposal_application',
+  ].includes(String(operation.operation)));
+  const proposalFinalizationVerified = latestProposalFinalizer?.execution_status === 'complete'
+    && !completedMutationLacksProof(latestProposalFinalizer);
   const incompleteMutation = operations.some((operation) =>
     completedMutationLacksProof(operation)
   );
@@ -99,6 +149,8 @@ export async function readAgentJobExecutionEvidence(
       pending,
       pendingMutation,
       failedMutation,
+      usesProposalApplication,
+      proposalFinalizationVerified,
       unsupportedMutationCount,
     }),
     source_id: sourceId,
@@ -126,6 +178,29 @@ function completedMutationLacksProof(operation: Record<string, unknown>): boolea
       typeof operation.rebased !== 'boolean' ||
       (operation.effect === 'create' && operation.previous_content_hash !== null) ||
       (operation.effect === 'update' && typeof operation.previous_content_hash !== 'string');
+  }
+  if (operation.operation === 'apply_ingestion_proposal_relation') {
+    return operation.outcome === 'unknown' ||
+      typeof operation.proposal_job_id !== 'number' ||
+      typeof operation.proposal_sequence !== 'number' ||
+      typeof operation.proposal_digest !== 'string' ||
+      typeof operation.relation_digest !== 'string' ||
+      typeof operation.target_slug !== 'string' ||
+      !['timeline', 'link'].includes(String(operation.relation_kind)) ||
+      (operation.relation_kind === 'timeline' &&
+        !['written', 'skipped'].includes(String(operation.write_through_status))) ||
+      (operation.relation_kind === 'link' && operation.write_through_status !== null);
+  }
+  if (operation.operation === 'finalize_ingestion_proposal_application') {
+    return operation.outcome === 'unknown' ||
+      typeof operation.proposal_job_id !== 'number' ||
+      typeof operation.proposal_digest !== 'string' ||
+      typeof operation.inventory_digest !== 'string' ||
+      typeof operation.receipt_digest !== 'string' ||
+      [
+        'pages_total', 'pages_applied', 'pages_rebased',
+        'timeline_total', 'timeline_applied', 'links_total', 'links_applied',
+      ].some(key => typeof operation[key] !== 'number');
   }
   if (operation.operation === 'add_timeline_entry') {
     return typeof operation.timeline_payload_sha256 !== 'string' ||
@@ -179,6 +254,8 @@ function recoveryActions(input: {
   pending: boolean;
   pendingMutation: boolean;
   failedMutation: boolean;
+  usesProposalApplication: boolean;
+  proposalFinalizationVerified: boolean;
   unsupportedMutationCount: number;
 }): RecoveryAction[] {
   const retryFilingFromCurrentState = input.terminal &&
@@ -194,8 +271,12 @@ function recoveryActions(input: {
     return closeOrRefresh;
   }
   if (input.availability === 'complete') {
+    const canFinalizeVerifiedSuccess = !input.usesProposalApplication
+      || input.proposalFinalizationVerified;
     return [
-      'finalize_verified_success',
+      ...(canFinalizeVerifiedSuccess
+        ? ['finalize_verified_success' as const]
+        : []),
       'continue_approved_work',
       ...(retryFilingFromCurrentState
         ? ['retry_filing_from_current_state' as const]
@@ -210,6 +291,8 @@ function isMutationOperation(operation: Record<string, unknown>): boolean {
   return [
     'put_page',
     'apply_ingestion_proposal_page',
+    'apply_ingestion_proposal_relation',
+    'finalize_ingestion_proposal_application',
     'add_timeline_entry',
     'add_link',
     'remove_link',
@@ -290,6 +373,72 @@ function evidenceForRow(
       applied_content_hash: outputMatchesRequest ? hashValue(output.content_hash) : null,
       rebased: outputMatchesRequest ? booleanValue(output.rebased) : null,
       outcome: outputMatchesRequest && effect && status ? status : 'unknown',
+      failure_code: proposalFailureCode(row.status, output.failure_code),
+    };
+  }
+  if (row.tool_name === 'brain_apply_ingestion_proposal_relation') {
+    const proposalJobId = integerValue(input.proposal_job_id);
+    const proposalSequence = integerValue(input.sequence);
+    const proposalDigest = hashValue(input.proposal_digest);
+    const requestedSource = stringValue(input.source_id);
+    const relationKind = input.relation_kind === 'timeline' || input.relation_kind === 'link'
+      ? input.relation_kind
+      : null;
+    const status = output.status === 'applied' || output.status === 'already_applied'
+      ? output.status
+      : null;
+    const outputMatchesRequest = row.status === 'complete' &&
+      output.proposal_job_id === proposalJobId &&
+      output.sequence === proposalSequence &&
+      output.proposal_digest === proposalDigest &&
+      output.source_id === requestedSource &&
+      output.relation_kind === relationKind &&
+      requestedSource === sourceId;
+    return {
+      ...base,
+      proposal_job_id: proposalJobId,
+      proposal_digest: proposalDigest,
+      relation_kind: relationKind,
+      proposal_sequence: proposalSequence,
+      relation_digest: outputMatchesRequest ? hashValue(output.relation_digest) : null,
+      target_slug: outputMatchesRequest ? stringValue(output.target_slug) : null,
+      outcome: outputMatchesRequest && status ? status : 'unknown',
+      write_through_status: outputMatchesRequest
+        ? relationWriteThroughStatus(relationKind, output.write_through)
+        : null,
+      failure_code: proposalFailureCode(row.status, output.failure_code),
+    };
+  }
+  if (row.tool_name === 'brain_finalize_ingestion_proposal_application') {
+    const proposalJobId = integerValue(input.proposal_job_id);
+    const proposalDigest = hashValue(input.proposal_digest);
+    const requestedSource = stringValue(input.source_id);
+    const status = output.status === 'applied_proposal' || output.status === 'already_finalized'
+      ? output.status
+      : null;
+    const outputMatchesRequest = row.status === 'complete' &&
+      output.proposal_job_id === proposalJobId &&
+      output.proposal_digest === proposalDigest &&
+      output.source_id === requestedSource &&
+      requestedSource === sourceId;
+    const pages = objectValue(output.pages);
+    const timeline = objectValue(output.timeline_entries);
+    const links = objectValue(output.links);
+    return {
+      ...base,
+      proposal_job_id: proposalJobId,
+      proposal_digest: proposalDigest,
+      inventory_digest: outputMatchesRequest ? hashValue(output.inventory_digest) : null,
+      receipt_digest: outputMatchesRequest ? hashValue(output.receipt_digest) : null,
+      pages_total: outputMatchesRequest ? nonnegativeIntegerValue(pages.total) : null,
+      pages_applied: outputMatchesRequest ? nonnegativeIntegerValue(pages.applied) : null,
+      pages_rebased: outputMatchesRequest ? nonnegativeIntegerValue(pages.rebased) : null,
+      timeline_total: outputMatchesRequest ? nonnegativeIntegerValue(timeline.total) : null,
+      timeline_applied: outputMatchesRequest ? nonnegativeIntegerValue(timeline.applied) : null,
+      links_total: outputMatchesRequest ? nonnegativeIntegerValue(links.total) : null,
+      links_applied: outputMatchesRequest ? nonnegativeIntegerValue(links.applied) : null,
+      outcome: outputMatchesRequest && status ? status : 'unknown',
+      failure_code: proposalFailureCode(row.status, output.failure_code),
     };
   }
   if (row.tool_name === 'brain_add_timeline_entry') {
@@ -341,6 +490,32 @@ function nullableHash(value: unknown): string | null {
 
 function integerValue(value: unknown): number | null {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+}
+
+function nonnegativeIntegerValue(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
+}
+
+function relationWriteThroughStatus(
+  relationKind: 'timeline' | 'link' | null,
+  value: unknown,
+): 'written' | 'skipped' | 'failed' | null {
+  if (relationKind !== 'timeline') return null;
+  const writeThrough = objectValue(value);
+  if (writeThrough.written === true) return 'written';
+  if (typeof writeThrough.skipped === 'string') return 'skipped';
+  if (typeof writeThrough.error === 'string') return 'failed';
+  return null;
+}
+
+function proposalFailureCode(
+  status: ExecutionStatus,
+  value: unknown,
+): ProposalFailureCode | null {
+  if (status !== 'failed') return null;
+  return typeof value === 'string' && PROPOSAL_FAILURE_CODES.has(value as ProposalFailureCode)
+    ? value as ProposalFailureCode
+    : 'proposal_application_failed';
 }
 
 function booleanValue(value: unknown): boolean | null {

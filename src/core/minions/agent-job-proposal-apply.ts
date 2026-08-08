@@ -22,6 +22,7 @@ import {
   getOwnedAgentJobProposal,
   type ScopedAdmissionProposalPlan,
 } from './agent-job-proposals.ts';
+import type { ProposalRelationDigest } from './agent-job-proposal-relations.ts';
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
 
@@ -50,7 +51,7 @@ export interface ApplyProposalPageResult {
   write_through?: WriteThroughResult;
 }
 
-interface StoredProposalFragment {
+export interface StoredProposalFragment {
   sequence: number;
   total_pages: number;
   owner_client_id: string;
@@ -64,13 +65,13 @@ interface StoredProposalFragment {
   baseline_content_hash: string | null;
 }
 
-interface PrivateUpdateBaseline {
+export interface PrivateUpdateBaseline {
   title: string;
   markdown: string;
   contentHash: string;
 }
 
-interface ApplyJobBinding {
+export interface ApplyJobBinding {
   ownerClientId: string;
   actor: string;
   sourceId: string;
@@ -81,6 +82,9 @@ interface ApplyJobBinding {
   approvedProposalJobId: number;
   approvedProposalDigest: string;
   approvedPageDigests: ProposalPageDigest[];
+  approvedTimelineDigests: ProposalRelationDigest[];
+  approvedLinkDigests: ProposalRelationDigest[];
+  approvedInventoryDigest: string;
 }
 
 interface ApplyProposalRow extends StoredProposalFragment {
@@ -92,6 +96,7 @@ interface ApplyProposalRow extends StoredProposalFragment {
   applied_previous_content_hash: string | null;
   applied_content_hash: string | null;
   applied_rebased: boolean | null;
+  applied_write_through: WriteThroughResult | null;
   applied_at: string | null;
 }
 
@@ -105,6 +110,9 @@ export interface ApprovedProposalAuthority {
   admissionScope: string;
   capturePageSlug: string;
   pageDigests: ProposalPageDigest[];
+  timelineDigests: ProposalRelationDigest[];
+  linkDigests: ProposalRelationDigest[];
+  inventoryDigest: string;
   plan: ScopedAdmissionProposalPlan;
 }
 
@@ -159,6 +167,9 @@ export async function getOwnedApprovedProposalAuthority(
     admissionScope: row.admission_scope,
     capturePageSlug,
     pageDigests: owned.page_digests,
+    timelineDigests: owned.timeline_digests,
+    linkDigests: owned.link_digests,
+    inventoryDigest: owned.inventory_digest,
     plan: owned.plan,
   };
 }
@@ -185,7 +196,10 @@ export async function applyAgentJobProposalPage(
   }
 
   const result = await engine.transaction(async (tx) => {
-    const applyBinding = await readApplyJobBinding(tx, applyJobId, true);
+    const application = await import('./agent-job-proposal-application.ts');
+    const context = await application.ensureProposalApplicationPreflight(tx, applyJobId, input);
+    await application.assertNextProposalPage(tx, input);
+    const applyBinding = context.binding;
     const proposal = await readApplyProposalRow(tx, applyBinding, input);
     assertApplyAuthority(applyBinding, proposal, input);
     const page = parseProposalPage(proposal.page);
@@ -242,9 +256,12 @@ export async function applyAgentJobProposalPage(
       });
     }
   });
+  if (writeThroughComplete(result.write_through)) return result;
   const writeThrough = await writePageThrough(engine, result.slug, {
     sourceId: result.source_id,
   });
+  const application = await import('./agent-job-proposal-application.ts');
+  await application.recordProposalPageWriteThrough(engine, input, writeThrough);
   return { ...result, write_through: writeThrough };
 }
 
@@ -314,7 +331,7 @@ async function readApplyProposalRow(
             p.artifact_id, p.admission_scope, f.page, f.page_digest,
             f.baseline_title, f.baseline_markdown, f.baseline_content_hash,
             f.applied_previous_content_hash, f.applied_content_hash,
-            f.applied_rebased, f.applied_at,
+            f.applied_rebased, f.applied_write_through, f.applied_at,
             p.owner_client_id AS proposal_owner_client_id,
             p.source_id AS proposal_source_id, p.proposal_digest,
             p.page_digests, p.plan
@@ -376,7 +393,7 @@ function assertApplyAuthority(
   }
 }
 
-async function readApplyJobBinding(
+export async function readApplyJobBinding(
   engine: BrainEngine,
   jobId: number,
   lock: boolean,
@@ -393,6 +410,9 @@ async function readApplyJobBinding(
     approved_proposal_job_id: string | null;
     approved_proposal_digest: string | null;
     approved_page_digests: unknown;
+    approved_timeline_digests: unknown;
+    approved_link_digests: unknown;
+    approved_inventory_digest: string | null;
   }>(
     `SELECT name, data->>'__owner_client_id' AS owner_client_id,
             data->>'__owner_principal' AS owner_principal,
@@ -403,7 +423,10 @@ async function readApplyJobBinding(
             data->'allowed_slug_prefixes' AS allowed_slug_prefixes,
             data->>'approved_proposal_job_id' AS approved_proposal_job_id,
             data->>'approved_proposal_digest' AS approved_proposal_digest,
-            data->'approved_proposal_page_digests' AS approved_page_digests
+            data->'approved_proposal_page_digests' AS approved_page_digests,
+            data->'approved_proposal_timeline_digests' AS approved_timeline_digests,
+            data->'approved_proposal_link_digests' AS approved_link_digests,
+            data->>'approved_proposal_inventory_digest' AS approved_inventory_digest
        FROM minion_jobs WHERE id = $1${lock ? ' FOR UPDATE' : ''}`,
     [jobId],
   );
@@ -421,6 +444,10 @@ async function readApplyJobBinding(
     || !SHA256_RE.test(row.approved_proposal_digest)
     || !Array.isArray(row.approved_page_digests)
     || row.approved_page_digests.length === 0
+    || !Array.isArray(row.approved_timeline_digests)
+    || !Array.isArray(row.approved_link_digests)
+    || !row.approved_inventory_digest
+    || !SHA256_RE.test(row.approved_inventory_digest)
   ) {
     throw new AgentJobProposalError(
       'job_not_bound',
@@ -429,6 +456,14 @@ async function readApplyJobBinding(
   }
   assertValidSourceId(row.source_id);
   const approvedPageDigests = parseApprovedPageDigests(row.approved_page_digests);
+  const approvedTimelineDigests = parseApprovedRelationDigests(
+    row.approved_timeline_digests,
+    'timeline',
+  );
+  const approvedLinkDigests = parseApprovedRelationDigests(
+    row.approved_link_digests,
+    'link',
+  );
   return {
     ownerClientId: row.owner_client_id,
     actor: row.owner_principal ? `principal:${row.owner_principal}` : `mcp:${row.owner_client_id}`,
@@ -440,6 +475,9 @@ async function readApplyJobBinding(
     approvedProposalJobId: Number(row.approved_proposal_job_id),
     approvedProposalDigest: row.approved_proposal_digest,
     approvedPageDigests,
+    approvedTimelineDigests,
+    approvedLinkDigests,
+    approvedInventoryDigest: row.approved_inventory_digest,
   };
 }
 
@@ -461,6 +499,26 @@ function parseApprovedPageDigests(raw: unknown): ProposalPageDigest[] {
   });
 }
 
+/** Parse a compact relation manifest frozen when the apply job was submitted. */
+function parseApprovedRelationDigests(
+  raw: unknown,
+  kind: 'timeline' | 'link',
+): ProposalRelationDigest[] {
+  if (!Array.isArray(raw) || raw.length > 40) {
+    throw new AgentJobProposalError('job_not_bound', `Approved ${kind} manifest is invalid.`);
+  }
+  return raw.map((value, index) => {
+    const entry = readRecord(value, `approved ${kind} digest`);
+    assertExactKeys(entry, ['sequence', 'digest'], `approved ${kind} digest`);
+    const sequence = readPositiveInteger(entry.sequence, `approved ${kind} sequence`);
+    const digest = readString(entry.digest, `approved ${kind} digest`);
+    if (sequence !== index + 1 || !SHA256_RE.test(digest)) {
+      throw new AgentJobProposalError('job_not_bound', `Approved ${kind} manifest is invalid.`);
+    }
+    return { sequence, digest };
+  });
+}
+
 async function readApplicablePage(
   engine: BrainEngine,
   slug: string,
@@ -473,7 +531,8 @@ async function readApplicablePage(
   return page as Page & { content_hash: string };
 }
 
-function appendAttempt(
+/** Inspect whether a frozen append is pending, safely rebasable, or already present. */
+export function appendAttempt(
   currentMarkdown: string,
   baseline: PrivateUpdateBaseline,
   appendMarkdown: string,
@@ -698,12 +757,20 @@ async function appliedReplayResult(
     previous_content_hash: proposal.applied_previous_content_hash,
     content_hash: proposal.applied_content_hash,
     rebased: proposal.applied_rebased,
+    ...(proposal.applied_write_through
+      ? { write_through: proposal.applied_write_through }
+      : {}),
   };
+}
+
+function writeThroughComplete(result: WriteThroughResult | undefined): boolean {
+  return result?.written === true || result?.skipped === 'no_repo_configured';
 }
 
 
 /** Reconstruct a private update baseline without accepting partial rows. */
-function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
+/** Reconstruct a complete private update baseline from one frozen fragment. */
+export function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
   const page = parseProposalPage(fragment.page);
   if (page.effect === 'create') return null;
   if (
@@ -722,7 +789,8 @@ function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBa
 }
 
 /** Bind a public page intent to its server-private baseline. */
-function digestFrozenProposalPage(
+/** Bind a public page proposal to its server-private update baseline. */
+export function digestFrozenProposalPage(
   page: ScopedProposalPage,
   baseline: PrivateUpdateBaseline | null,
 ): string {
