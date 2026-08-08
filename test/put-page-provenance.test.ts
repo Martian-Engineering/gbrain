@@ -165,6 +165,7 @@ describe('put_page provenance — CV6 spoofing guard (ctx.remote !== false)', ()
     await putPageOp.handler(ctx, {
       slug: 'wiki/p3a-remote-spoof-attempt',
       content: '---\ntype: note\ntitle: Spoof\n---\n\nbody',
+      expected_content_hash: null,
       source_kind: 'capture-cli', // client lies: pretends to be local CLI
       source_uri: 'spoofed://attacker-supplied',
       ingested_via: 'file-watcher', // client lies: claims daemon source
@@ -191,6 +192,7 @@ describe('put_page provenance — CV6 spoofing guard (ctx.remote !== false)', ()
     await putPageOp.handler(ctx, {
       slug: 'wiki/p3a-undefined-trust',
       content: '---\ntype: note\ntitle: Undefined\n---\n\nbody',
+      expected_content_hash: null,
       source_kind: 'capture-cli',
     });
     const prov = await readProvenance('wiki/p3a-undefined-trust');
@@ -264,9 +266,13 @@ describe('put_page provenance — CV12 COALESCE-preserve UPDATE', () => {
 
     // Second: remote MCP edit (server stamps mcp:put_page)
     const remoteCtx = makeCtx({ remote: true });
+    const reviewed = await engine.getPage('wiki/p3a-local-then-remote', {
+      sourceId: 'default',
+    });
     await putPageOp.handler(remoteCtx, {
       slug: 'wiki/p3a-local-then-remote',
       content: '---\ntype: note\ntitle: V2\n---\n\nremote edit',
+      expected_content_hash: reviewed!.content_hash,
     });
 
     // Remote second write is itself a provenance write (server-stamped),
@@ -300,6 +306,7 @@ describe('put_page provenance — T2 subagent namespace regression', () => {
       putPageOp.handler(ctx, {
         slug: 'wiki/secret/leak',
         content: '---\ntype: note\ntitle: Leak\n---\n\nbody',
+        expected_content_hash: null,
         source_kind: 'capture-cli',
         source_uri: 'file:///tmp/spoof',
         ingested_via: 'put_page',
@@ -317,6 +324,7 @@ describe('put_page provenance — T2 subagent namespace regression', () => {
     await putPageOp.handler(ctx, {
       slug: 'wiki/agents/42/scratch',
       content: '---\ntype: note\ntitle: Subagent OK\n---\n\nbody',
+      expected_content_hash: null,
       source_kind: 'capture-cli', // Spoof attempt — ignored by CV6
     });
     const prov = await readProvenance('wiki/agents/42/scratch');

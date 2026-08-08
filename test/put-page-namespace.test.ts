@@ -40,13 +40,21 @@ describe('put_page namespace (v0.15 subagent rule)', () => {
 
     test('MCP write (remote=true, viaSubagent=undefined) accepts arbitrary slug', async () => {
       const ctx = makeCtx({ remote: true });
-      const result = await put_page.handler(ctx, { slug: 'wiki/analysis/foo', content: 'stub' });
+      const result = await put_page.handler(ctx, {
+        slug: 'wiki/analysis/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       expect(result).toMatchObject({ dry_run: true, action: 'put_page', slug: 'wiki/analysis/foo' });
     });
 
     test('viaSubagent=false is the same as unset', async () => {
       const ctx = makeCtx({ remote: true, viaSubagent: false, subagentId: 42 });
-      const result = await put_page.handler(ctx, { slug: 'anything/goes', content: 'stub' });
+      const result = await put_page.handler(ctx, {
+        slug: 'anything/goes',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       expect(result).toMatchObject({ dry_run: true });
     });
   });
@@ -54,57 +62,93 @@ describe('put_page namespace (v0.15 subagent rule)', () => {
   describe('subagent namespace rule', () => {
     test('accepts wiki/agents/<subagentId>/ prefix', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
-      const result = await put_page.handler(ctx, { slug: 'wiki/agents/42/notes', content: 'stub' });
+      const result = await put_page.handler(ctx, {
+        slug: 'wiki/agents/42/notes',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       expect(result).toMatchObject({ dry_run: true, slug: 'wiki/agents/42/notes' });
     });
 
     test('accepts deep paths under the prefix', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
-      const result = await put_page.handler(ctx, { slug: 'wiki/agents/42/runs/2026-04-20/summary', content: 'stub' });
+      const result = await put_page.handler(ctx, {
+        slug: 'wiki/agents/42/runs/2026-04-20/summary',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       expect(result).toMatchObject({ dry_run: true });
     });
 
     test('rejects leading slash (slug grammar + anchor)', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
-      const p = put_page.handler(ctx, { slug: '/wiki/agents/42/foo', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: '/wiki/agents/42/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
     });
 
     test('rejects wrong subagentId', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
-      const p = put_page.handler(ctx, { slug: 'wiki/agents/12/foo', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: 'wiki/agents/12/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
     });
 
     test('rejects prefix-collision attempt (wiki/agents/12evil/* with subagentId=12)', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 12 });
-      const p = put_page.handler(ctx, { slug: 'wiki/agents/12evil/foo', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: 'wiki/agents/12evil/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
     });
 
     test('rejects bare prefix with no suffix (slug.length === prefix.length)', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
-      const p = put_page.handler(ctx, { slug: 'wiki/agents/42/', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: 'wiki/agents/42/',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
     });
 
     test('FAIL-CLOSED: viaSubagent=true with undefined subagentId rejects any slug', async () => {
       const ctx = makeCtx({ viaSubagent: true });
-      const p = put_page.handler(ctx, { slug: 'wiki/agents/42/foo', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: 'wiki/agents/42/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
       await expect(p).rejects.toThrow(/subagentId/);
     });
 
     test('FAIL-CLOSED: viaSubagent=true with NaN subagentId rejects', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: Number.NaN });
-      const p = put_page.handler(ctx, { slug: 'wiki/agents/NaN/foo', content: 'stub' });
+      const p = put_page.handler(ctx, {
+        slug: 'wiki/agents/NaN/foo',
+        content: 'stub',
+        expected_content_hash: null,
+      });
       await expect(p).rejects.toBeInstanceOf(OperationError);
     });
 
     test('error code is permission_denied (not validation)', async () => {
       const ctx = makeCtx({ viaSubagent: true, subagentId: 42 });
       try {
-        await put_page.handler(ctx, { slug: 'people/alice', content: 'stub' });
+        await put_page.handler(ctx, {
+          slug: 'people/alice',
+          content: 'stub',
+          expected_content_hash: null,
+        });
         throw new Error('should have thrown');
       } catch (e) {
         expect(e).toBeInstanceOf(OperationError);

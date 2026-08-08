@@ -24,7 +24,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 const put_page = operations.find(o => o.name === 'put_page') as Operation;
 if (!put_page) throw new Error('put_page op missing');
 
-const BODY = { content: '# test' };
+const BODY = { content: '# test', expected_content_hash: null };
 
 function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
   const engine = {} as BrainEngine; // dry_run short-circuits before touching the engine
