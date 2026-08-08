@@ -22,15 +22,17 @@ export const pageReadVerificationContextPolicy: ToolLoopContextPolicy = {
 /** Project a large authenticated page result to validated identity and revision only. */
 function projectPageReadResult(value: unknown, maxBytes: number): unknown {
   const serialized = safeJson(value);
+  const originalBytes = utf8Bytes(serialized);
+  if (originalBytes <= maxBytes) return value;
+
   const identity = readVerificationIdentity(value);
   if (!identity) return unavailableProjection(maxBytes);
-  if (utf8Bytes(serialized) <= maxBytes) return value;
 
   const projection = {
     ...identity,
     working_context_projection: {
       schema: PROJECTION_SCHEMA,
-      original_json_utf8_bytes: utf8Bytes(serialized),
+      original_json_utf8_bytes: originalBytes,
       interpretation: 'authenticated_page_identity_and_content_hash_only',
     },
   };

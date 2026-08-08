@@ -124,6 +124,30 @@ describe('page-read verification working-context policy', () => {
     expect(JSON.stringify(projected)).not.toContain('abc123');
   });
 
+  it('keeps a small malformed result exact when other history requires compaction', () => {
+    const output = {
+      error: 'page_not_found',
+      message: 'Page not found: projects/missing-filing',
+    };
+    const round = pageReadRound(output);
+    const messages: ChatMessage[] = [
+      round[0]!,
+      { role: 'assistant', content: `OLD_PRIVATE_HISTORY_${'x'.repeat(20_000)}` },
+      ...round.slice(1),
+    ];
+    const durableSnapshot = structuredClone(messages);
+
+    const compacted = compactToolLoopMessages(messages, 2_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [pageReadVerificationContextPolicy],
+    });
+
+    expect(projectedResult(compacted)).toEqual(output);
+    expect(JSON.stringify(compacted)).not.toContain('OLD_PRIVATE_HISTORY_');
+    expect(JSON.stringify(compacted)).not.toContain('gbrain.page_read_verification_projection.v1');
+    expect(messages).toEqual(durableSnapshot);
+  });
+
   it.each([
     'companies/acme.io',
     'people/foo_bar',
