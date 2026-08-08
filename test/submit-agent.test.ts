@@ -934,7 +934,7 @@ describe('get_agent_job owner-scoped receipt', () => {
   async function seedDurableProposal(
     jobId: number,
     fixture: ReturnType<typeof proposalFixture>,
-    overrides: { ownerClientId?: string; manifest?: unknown } = {},
+    overrides: { ownerClientId?: string; manifest?: unknown; pageDigests?: unknown } = {},
   ): Promise<void> {
     await engine.executeRaw(
       `INSERT INTO agent_job_proposals
@@ -945,7 +945,7 @@ describe('get_agent_job owner-scoped receipt', () => {
       [
         jobId,
         overrides.ownerClientId ?? 'lore',
-        JSON.stringify(fixture.pageDigests),
+        JSON.stringify(overrides.pageDigests ?? fixture.pageDigests),
         JSON.stringify(fixture.plan),
         fixture.proposalDigest,
         JSON.stringify(overrides.manifest ?? fixture.manifest),
@@ -961,6 +961,7 @@ describe('get_agent_job owner-scoped receipt', () => {
       rawResult?: string;
       proposalOwner?: string;
       manifest?: unknown;
+      pageDigests?: unknown;
     } = {},
   ): Promise<number> {
     const [row] = await engine.executeRaw<{ id: number }>(
@@ -981,6 +982,7 @@ describe('get_agent_job owner-scoped receipt', () => {
     await seedDurableProposal(row.id, fixture, {
       ownerClientId: options.proposalOwner,
       manifest: options.manifest,
+      pageDigests: options.pageDigests,
     });
     return row.id;
   }
@@ -1067,6 +1069,65 @@ describe('get_agent_job owner-scoped receipt', () => {
       makeCtx({ clientId: 'lore' }),
       { id: jobId },
     )).rejects.toMatchObject({ code: 'proposal_identity_mismatch' });
+  });
+
+  it('fails closed on corrupt nested manifest fields and bounds', async () => {
+    const fixture = proposalFixture();
+    const pageDigestsWithExtraField = fixture.pageDigests.map(entry => ({
+      ...entry,
+      privatePlan: 'must not cross the compact receipt boundary',
+    }));
+    const corruptions = [
+      {
+        manifest: { ...fixture.manifest, pageDigests: pageDigestsWithExtraField },
+        pageDigests: pageDigestsWithExtraField,
+      },
+      {
+        manifest: {
+          ...fixture.manifest,
+          proposedTimelineEntries: [{
+            pageSlug: 'sources/example',
+            date: '2026-08-08',
+            text: 'Example event',
+            ref: 'sources/example',
+            arbitrary: 'unexpected',
+          }],
+        },
+      },
+      {
+        manifest: {
+          ...fixture.manifest,
+          proposedTimelineEntries: [{
+            pageSlug: 'sources/example',
+            date: '2026-08-08',
+            text: 'Valid nested event with stale digest inventory.',
+            ref: 'sources/example',
+          }],
+        },
+      },
+      {
+        manifest: {
+          ...fixture.manifest,
+          proposedLinks: [{
+            from: 'sources/example',
+            to: 'sources/other',
+            type: 'related-to',
+            arbitrary: 'unexpected',
+          }],
+        },
+      },
+      {
+        manifest: { ...fixture.manifest, unresolved: ['x'.repeat(501)] },
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const jobId = await seedProposalJob(fixture, corruption);
+      await expect(get_agent_job.handler(
+        makeCtx({ clientId: 'lore' }),
+        { id: jobId },
+      )).rejects.toMatchObject({ code: 'proposal_identity_mismatch' });
+    }
   });
 
   it('attributes unbound jobs to the runtime default source', async () => {

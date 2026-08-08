@@ -493,7 +493,7 @@ export async function finalizeAgentJobProposal(
       timeline,
       links,
     );
-    const manifest: FinalizedProposalManifest = {
+    const manifest = parseFinalizedProposalManifest({
       status: 'staged_proposal',
       artifactId: binding.artifactId,
       sourceId: binding.sourceId,
@@ -507,7 +507,7 @@ export async function finalizeAgentJobProposal(
       proposedTimelineEntries: timeline,
       proposedLinks: links,
       unresolved,
-    };
+    }, totalPages);
     const manifestJson = canonicalProposalJson(manifest);
     const manifestBytes = Buffer.byteLength(manifestJson, 'utf8');
     if (manifestBytes > PROPOSAL_MANIFEST_MAX_BYTES) {
@@ -720,35 +720,97 @@ export async function readCompletedOwnedAgentJobProposalManifest(
 
 /** Accept only the exact compact manifest shape and row-bound identity. */
 function compactManifestFromRow(row: StoredCompletedProposal): FinalizedProposalManifest | null {
-  if (!row.manifest || typeof row.manifest !== 'object' || Array.isArray(row.manifest)) return null;
-  const manifest = row.manifest as Record<string, unknown>;
-  const expectedKeys = [
+  try {
+    const manifest = parseFinalizedProposalManifest(row.manifest, Number(row.total_pages));
+    if (
+      manifest.artifactId !== row.artifact_id
+      || manifest.sourceId !== row.source_id
+      || manifest.admissionScope !== row.admission_scope
+      || manifest.proposalDigest !== row.proposal_digest
+      || canonicalProposalJson(manifest.pageDigests) !== canonicalProposalJson(row.page_digests)
+    ) return null;
+    return manifest;
+  } catch (error) {
+    if (error instanceof AgentJobProposalError) return null;
+    throw error;
+  }
+}
+
+/** Strictly parse and rederive a complete compact finalized-proposal manifest. */
+export function parseFinalizedProposalManifest(
+  raw: unknown,
+  totalPages: number,
+): FinalizedProposalManifest {
+  const record = readRecord(raw, 'finalized proposal manifest');
+  assertExactKeys(record, [
     'status', 'artifactId', 'sourceId', 'admissionScope', 'summary',
     'pageDigests', 'timelineDigests', 'linkDigests', 'inventoryDigest',
     'proposalDigest', 'proposedTimelineEntries', 'proposedLinks', 'unresolved',
-  ].sort();
-  const actualKeys = Object.keys(manifest).sort();
-  if (
-    actualKeys.length !== expectedKeys.length
-    || actualKeys.some((key, index) => key !== expectedKeys[index])
-    || manifest.status !== 'staged_proposal'
-    || manifest.artifactId !== row.artifact_id
-    || manifest.sourceId !== row.source_id
-    || manifest.admissionScope !== row.admission_scope
-    || typeof manifest.summary !== 'string'
-    || manifest.proposalDigest !== row.proposal_digest
-    || !SHA256_RE.test(row.proposal_digest)
-    || !SHA256_RE.test(String(manifest.inventoryDigest))
-    || !Array.isArray(manifest.pageDigests)
-    || manifest.pageDigests.length !== Number(row.total_pages)
-    || canonicalProposalJson(manifest.pageDigests) !== canonicalProposalJson(row.page_digests)
-    || !Array.isArray(manifest.timelineDigests)
-    || !Array.isArray(manifest.linkDigests)
-    || !Array.isArray(manifest.proposedTimelineEntries)
-    || !Array.isArray(manifest.proposedLinks)
-    || !Array.isArray(manifest.unresolved)
-  ) return null;
-  return manifest as unknown as FinalizedProposalManifest;
+  ], 'finalized proposal manifest');
+  if (record.status !== 'staged_proposal') {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized proposal status is invalid.');
+  }
+  const pageDigests = parseFinalizedPageDigests(record.pageDigests, totalPages);
+  const proposedTimelineEntries = parseProposalTimelineEntries(record.proposedTimelineEntries);
+  const proposedLinks = parseProposalLinks(record.proposedLinks);
+  const inventory = buildProposalApplicationDigestInventory(
+    pageDigests,
+    proposedTimelineEntries,
+    proposedLinks,
+  );
+  const proposalDigest = readString(record.proposalDigest, 'manifest.proposalDigest');
+  if (!SHA256_RE.test(proposalDigest)) {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized proposal digest is invalid.');
+  }
+  const manifest: FinalizedProposalManifest = {
+    status: 'staged_proposal',
+    artifactId: readBoundedString(record.artifactId, 'manifest.artifactId', 255),
+    sourceId: readBoundedString(record.sourceId, 'manifest.sourceId', 255),
+    admissionScope: readBoundedString(
+      record.admissionScope,
+      'manifest.admissionScope',
+      PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+    ),
+    summary: readBoundedString(record.summary, 'manifest.summary', 1_000),
+    pageDigests,
+    timelineDigests: inventory.timelineDigests,
+    linkDigests: inventory.linkDigests,
+    inventoryDigest: inventory.inventoryDigest,
+    proposalDigest,
+    proposedTimelineEntries,
+    proposedLinks,
+    unresolved: parseProposalUnresolved(record.unresolved),
+  };
+  assertValidSourceId(manifest.sourceId);
+  if (canonicalProposalJson(raw) !== canonicalProposalJson(manifest)) {
+    throw new AgentJobProposalError(
+      'proposal_identity_mismatch',
+      'Finalized proposal manifest does not match its canonical digest inventory.',
+    );
+  }
+  return manifest;
+}
+
+/** Strictly parse the ordered page digest inventory in a compact manifest. */
+function parseFinalizedPageDigests(raw: unknown, totalPages: number): ProposalPageDigest[] {
+  const expectedPages = readProposalPageCount(totalPages);
+  if (!Array.isArray(raw) || raw.length !== expectedPages) {
+    throw new AgentJobProposalError('proposal_identity_mismatch', 'Finalized page digest inventory is incomplete.');
+  }
+  return raw.map((entry, index) => {
+    const record = readRecord(entry, `pageDigests[${index}]`);
+    assertExactKeys(record, ['sequence', 'slug', 'digest'], `pageDigests[${index}]`);
+    const sequence = readPositiveInteger(record.sequence, `pageDigests[${index}].sequence`);
+    const slug = readCanonicalSlug(record.slug, `pageDigests[${index}].slug`);
+    const digest = readString(record.digest, `pageDigests[${index}].digest`);
+    if (sequence !== index + 1 || !SHA256_RE.test(digest)) {
+      throw new AgentJobProposalError(
+        'proposal_identity_mismatch',
+        'Finalized page digest inventory is invalid.',
+      );
+    }
+    return { sequence, slug, digest };
+  });
 }
 
 async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean): Promise<JobBinding> {
