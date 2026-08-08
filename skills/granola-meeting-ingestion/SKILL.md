@@ -237,8 +237,16 @@ from the `get_page` read used to draft each update into `baseMarkdown` and
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Once the
-inventory is frozen, read and construct each page in order, then immediately call
-`brain_stage_ingestion_proposal_page` in its own agent turn with the exact
+inventory is frozen, use `search`, `query`, `list_pages`, and `resolve_slugs`
+results to work through it without preloading full page bodies. Never request
+more than one `get_page` in the same assistant turn or tool batch. For an update,
+call exactly one `get_page` only when ready to construct and stage that entry. After an update
+target's `get_page` returns, the very next assistant turn must call
+`brain_stage_ingestion_proposal_page` for that same update, as the only tool call
+in that turn. Do not call `get_page` for another target, or make any other large
+read, between that baseline read and its staging call.
+
+Call `brain_stage_ingestion_proposal_page` with the exact
 `artifact_id`, `source_id`, `admission_scope`, one-based `sequence`, stable
 `total_pages`, and page object. Stage only one page per turn. Preserve the
 returned `{sequence, slug, digest}`; later turns may rely on that durable digest

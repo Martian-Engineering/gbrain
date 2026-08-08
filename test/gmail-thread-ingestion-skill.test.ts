@@ -169,6 +169,19 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('`capturePageSlug` is never adjusted');
   });
 
+  test('stages each update immediately after its sole exact baseline read', () => {
+    expect(skill).toMatch(
+      /Never request\s+more than one\s+`get_page` in the same assistant\s+turn or tool batch/,
+    );
+    expect(skill).toMatch(
+      /After an update\s+target's `get_page` returns, the very next\s+assistant turn must call\s+`brain_stage_ingestion_proposal_page` for that same\s+update/,
+    );
+    expect(skill).toMatch(/as the only tool call\s+in that turn/);
+    expect(skill).toMatch(
+      /Do not call `get_page` for another\s+target, or make any other large\s+read, between that baseline read and its staging\s+call/,
+    );
+  });
+
   test('stages a normal-mode partial exclusion before any corpus write', () => {
     expect(skill).toMatch(/newly\s+discovered partial exclusion[\s\S]*staged_proposal/);
     expect(skill).toMatch(/before any\s+corpus mutation/);

@@ -214,8 +214,20 @@ timeline entries as `{pageSlug,date,text,ref,refLabel?}` with a strict
 material.
 
 Before staging, freeze the complete ordered page inventory and stable
-`total_pages`; it may contain at most 32 pages. Stage only one page per turn by
-calling `brain_stage_ingestion_proposal_page` with the exact `artifact_id`,
+`total_pages`; it may contain at most 32 pages. Use `search`, `query`,
+`list_pages`, and `resolve_slugs` results to work through it without preloading
+full page bodies. Never request more than one `get_page` in the same assistant
+turn or tool batch.
+For an update, call exactly one `get_page` only when ready to construct and stage
+that entry. Copy its exact body and `content_hash` into `baseMarkdown` and
+`expectedContentHash`. After an update target's `get_page` returns, the very next
+assistant turn must call `brain_stage_ingestion_proposal_page` for that same
+update, as the only tool call in that turn. Do not call `get_page` for another
+target, or make any other large read, between that baseline read and its staging
+call.
+
+Stage only one page per turn by calling `brain_stage_ingestion_proposal_page`
+with the exact `artifact_id`,
 `source_id`, `admission_scope`, one-based `sequence`, stable `total_pages`, and
 `page` object. Then call `brain_finalize_ingestion_proposal` in its own turn
 with the same exact `artifact_id`, `source_id`, `admission_scope`, and

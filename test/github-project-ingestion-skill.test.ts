@@ -233,6 +233,19 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('Omit both fields for a create');
   });
 
+  test('stages each update immediately after its sole exact baseline read', () => {
+    expect(skill).toMatch(
+      /Never request\s+more than one\s+`get_page` in the same assistant\s+turn or tool batch/,
+    );
+    expect(skill).toMatch(
+      /After an update\s+target's `get_page` returns, the very next\s+assistant turn must call\s+`brain_stage_ingestion_proposal_page` for that same\s+update/,
+    );
+    expect(skill).toMatch(/as the only tool call\s+in that turn/);
+    expect(skill).toMatch(
+      /Do not call `get_page` for another\s+target, or make any other large\s+read, between that baseline read and its staging\s+call/,
+    );
+  });
+
   test('carries bounded timeline and link mutations in the scoped proposal', () => {
     expect(skill).toContain(
       'proposedTimelineEntries: <optional frozen timeline entries in apply mode>',
