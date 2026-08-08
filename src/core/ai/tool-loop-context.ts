@@ -60,6 +60,12 @@ interface ToolRound {
   evidence: ToolEvidence[];
 }
 
+interface ScoredToolRound {
+  round: ToolRound;
+  exactResultCount: number;
+  exactResultBytes: number;
+}
+
 interface WorkingContextProjectionSource {
   kind: 'tool_input' | 'tool_result';
   toolName: string;
@@ -239,18 +245,161 @@ function buildTaskAnchor(messages: ChatMessage[]): ChatMessage {
   return { role: 'user', content: combined };
 }
 
-/** Find the largest payload representation whose complete round fits. */
+/** Find the fitting projection that retains the most exact read results. */
 function compactRoundToFit(
   round: ToolRound,
   availableBytes: number,
   options: ToolLoopContextOptions,
 ): ToolRound | null {
   if (availableBytes <= 0) return null;
+  let best: ScoredToolRound | null = null;
   for (const perPayload of PAYLOAD_LIMITS) {
     const compacted = compactRound(round, perPayload, options);
-    if (jsonBytes([compacted.assistant, compacted.result]) <= availableBytes) return compacted;
+    if (jsonBytes([compacted.assistant, compacted.result]) <= availableBytes) {
+      const candidate = restoreExactNonMutatingResults(
+        round,
+        compacted,
+        availableBytes,
+        options,
+      );
+      if (
+        best === null
+        || candidate.exactResultCount > best.exactResultCount
+        || (
+          candidate.exactResultCount === best.exactResultCount
+          && candidate.exactResultBytes > best.exactResultBytes
+        )
+      ) {
+        best = candidate;
+      }
+    }
   }
-  return null;
+  return best?.round ?? null;
+}
+
+/** Spend remaining round budget on complete successful read results. */
+function restoreExactNonMutatingResults(
+  original: ToolRound,
+  compacted: ToolRound,
+  availableBytes: number,
+  options: ToolLoopContextOptions,
+): ScoredToolRound {
+  const originalResults = new Map(
+    toolResultBlocks(original.result).map(block => [block.toolCallId, block]),
+  );
+  const compactedResults = new Map(
+    toolResultBlocks(compacted.result).map(block => [block.toolCallId, block]),
+  );
+  const candidates = original.evidence.flatMap(evidence => {
+    const originalResult = originalResults.get(evidence.toolCallId);
+    const compactedResult = compactedResults.get(evidence.toolCallId);
+    if (
+      evidence.failed
+      || isMutationSensitive(evidence.toolName, options.mutatingToolNames)
+      || !originalResult
+      || !compactedResult
+      || originalResult.toolName !== evidence.toolName
+    ) {
+      return [];
+    }
+    const exactJson = safeJson(originalResult.output);
+    const compactedJson = safeJson(compactedResult.output);
+    return [{
+      toolCallId: evidence.toolCallId,
+      output: originalResult.output,
+      exactJson,
+      compactedJson,
+      exactBytes: utf8Bytes(exactJson),
+      additionalBytes: utf8Bytes(exactJson) - utf8Bytes(compactedJson),
+    }];
+  });
+
+  // JSON serialization is additive at each result's `output` value. Select
+  // the best exact-output subset by byte delta, then rebuild only once.
+  let remainingBytes = availableBytes - jsonBytes([compacted.assistant, compacted.result]);
+  let exactResultCount = 0;
+  let exactResultBytes = 0;
+  const restoredOutputs = new Map<string, unknown>();
+  const selectable = [];
+  for (const candidate of candidates) {
+    if (candidate.exactJson === candidate.compactedJson) {
+      exactResultCount++;
+      exactResultBytes += candidate.exactBytes;
+    } else if (candidate.additionalBytes <= 0) {
+      restoredOutputs.set(candidate.toolCallId, candidate.output);
+      remainingBytes -= candidate.additionalBytes;
+      exactResultCount++;
+      exactResultBytes += candidate.exactBytes;
+    } else {
+      selectable.push(candidate);
+    }
+  }
+
+  // One state per reachable byte delta is sufficient: for equal cost, a
+  // higher count (then more exact bytes) dominates every later extension.
+  const selections = new Map<number, {
+    count: number;
+    exactBytes: number;
+    mask: bigint;
+  }>([[0, { count: 0, exactBytes: 0, mask: 0n }]]);
+  for (const [index, candidate] of selectable.entries()) {
+    for (const [cost, selection] of [...selections]) {
+      const nextCost = cost + candidate.additionalBytes;
+      if (nextCost > remainingBytes) continue;
+      const next = {
+        count: selection.count + 1,
+        exactBytes: selection.exactBytes + candidate.exactBytes,
+        mask: selection.mask | (1n << BigInt(index)),
+      };
+      const current = selections.get(nextCost);
+      if (
+        !current
+        || next.count > current.count
+        || (next.count === current.count && next.exactBytes > current.exactBytes)
+      ) {
+        selections.set(nextCost, next);
+      }
+    }
+  }
+
+  let bestSelection = selections.get(0)!;
+  for (const selection of selections.values()) {
+    if (
+      selection.count > bestSelection.count
+      || (
+        selection.count === bestSelection.count
+        && selection.exactBytes > bestSelection.exactBytes
+      )
+    ) {
+      bestSelection = selection;
+    }
+  }
+  exactResultCount += bestSelection.count;
+  exactResultBytes += bestSelection.exactBytes;
+  for (const [index, candidate] of selectable.entries()) {
+    if ((bestSelection.mask & (1n << BigInt(index))) !== 0n) {
+      restoredOutputs.set(candidate.toolCallId, candidate.output);
+    }
+  }
+
+  if (restoredOutputs.size === 0) {
+    return { round: compacted, exactResultCount, exactResultBytes };
+  }
+  return {
+    round: {
+      ...compacted,
+      result: {
+        ...compacted.result,
+        content: mapBlocks(compacted.result, block => (
+          block.type === 'tool-result' && restoredOutputs.has(block.toolCallId)
+            ? { ...block, output: restoredOutputs.get(block.toolCallId) }
+            : block
+        )),
+      },
+    },
+    exactResultCount,
+    exactResultBytes,
+  };
 }
 
 /** Bound historical tool inputs/results while keeping provider call IDs paired. */
@@ -259,6 +408,9 @@ function compactRound(
   perPayloadBytes: number,
   options: ToolLoopContextOptions,
 ): ToolRound {
+  const evidenceById = new Map(
+    round.evidence.map(evidence => [evidence.toolCallId, evidence]),
+  );
   return {
     ...round,
     assistant: {
@@ -283,13 +435,21 @@ function compactRound(
       ...round.result,
       content: mapBlocks(round.result, block => {
         if (block.type !== 'tool-result') return block;
+        const evidence = evidenceById.get(block.toolCallId);
+        const toolName = evidence?.toolName ?? block.toolName;
         return {
           ...block,
-          output: boundValue(block.output, perPayloadBytes, {
-            kind: 'tool_result',
-            toolName: block.toolName,
-            preserveStructuralIdentity: false,
-          }),
+          output: boundValue(
+            block.output,
+            // The assistant call owns tool identity. A mismatched result name
+            // must not disguise a mutation as an exact restorable read.
+            evidence && evidence.toolName !== block.toolName ? 0 : perPayloadBytes,
+            {
+              kind: 'tool_result',
+              toolName,
+              preserveStructuralIdentity: false,
+            },
+          ),
         };
       }),
     },
