@@ -17,6 +17,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+const APPROVED_UPDATE_MARKDOWN = '## Delivery\n\nApproved update.\n';
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -53,7 +54,9 @@ async function seedCorpus(): Promise<void> {
   );
 }
 
-async function freezeProposal(): Promise<ApprovedProposalAuthority> {
+async function freezeProposal(
+  options: { ordinaryCreateBody?: string } = {},
+): Promise<ApprovedProposalAuthority> {
   const jobId = await seedJob({
     __owner_client_id: 'lore-client',
     source_id: 'company',
@@ -62,9 +65,17 @@ async function freezeProposal(): Promise<ApprovedProposalAuthority> {
     proposal_admission_scope: 'Include source-grounded delivery notes.',
     allowed_slug_prefixes: ['sources/*', 'projects/*'],
   });
+  const secondSlug = options.ordinaryCreateBody === undefined
+    ? 'projects/target'
+    : 'projects/new-target';
   const inventory = [
     { slug: 'sources/capture', effect: 'create' as const },
-    { slug: 'projects/target', effect: 'update' as const },
+    {
+      slug: secondSlug,
+      effect: options.ordinaryCreateBody === undefined
+        ? 'update' as const
+        : 'create' as const,
+    },
   ];
   await stageAgentJobProposalPage(engine, jobId, {
     artifact_id: 'artifact-1',
@@ -87,11 +98,18 @@ async function freezeProposal(): Promise<ApprovedProposalAuthority> {
     sequence: 2,
     total_pages: 2,
     page_inventory: inventory,
-    page: {
-      slug: 'projects/target',
-      effect: 'update',
-      appendMarkdown: '## Delivery\n\nApproved update.',
-    },
+    page: options.ordinaryCreateBody === undefined
+      ? {
+        slug: secondSlug,
+        effect: 'update',
+        appendMarkdown: APPROVED_UPDATE_MARKDOWN,
+      }
+      : {
+        slug: secondSlug,
+        effect: 'create',
+        title: 'New target',
+        bodyMarkdown: options.ordinaryCreateBody,
+      },
   });
   const manifest = await finalizeAgentJobProposal(engine, jobId, {
     artifact_id: 'artifact-1',
@@ -100,7 +118,7 @@ async function freezeProposal(): Promise<ApprovedProposalAuthority> {
     total_pages: 2,
     summary: 'Capture and target update.',
     proposed_timeline_entries: [{
-      pageSlug: 'projects/target',
+      pageSlug: secondSlug,
       date: '2026-08-08',
       text: 'Approved delivery milestone.',
       ref: 'sources/capture',
@@ -108,7 +126,7 @@ async function freezeProposal(): Promise<ApprovedProposalAuthority> {
     }],
     proposed_links: [{
       from: 'sources/capture',
-      to: 'projects/target',
+      to: secondSlug,
       type: 'documents',
     }],
   });
@@ -184,6 +202,27 @@ describe('approved ingestion proposal application contract', () => {
 });
 
 describe('whole approved proposal application', () => {
+  it('preserves an ordinary frozen create body byte-for-byte', async () => {
+    await seedCorpus();
+    const bodyMarkdown = [
+      '---',
+      'type: meeting',
+      'date: 2026-08-09',
+      '---',
+      '',
+      '# Exact approved body',
+      '',
+    ].join('\n');
+    const authority = await freezeProposal({ ordinaryCreateBody: bodyMarkdown });
+    const applyJobId = await seedApplyJob(authority);
+
+    await applyAgentJobProposalPage(engine, applyJobId, pageInput(authority, 1));
+    await applyAgentJobProposalPage(engine, applyJobId, pageInput(authority, 2));
+
+    const page = await engine.getPage('projects/new-target', { sourceId: 'company' });
+    expect(page?.compiled_truth).toBe(bodyMarkdown);
+  });
+
   it('preflights every later slot before the first corpus mutation', async () => {
     await seedCorpus();
     const authority = await freezeProposal();
@@ -239,6 +278,9 @@ describe('whole approved proposal application', () => {
     const applyJobId = await seedApplyJob(authority);
     await applyAgentJobProposalPage(engine, applyJobId, pageInput(authority, 1));
     await applyAgentJobProposalPage(engine, applyJobId, pageInput(authority, 2));
+
+    const updated = await engine.getPage('projects/target', { sourceId: 'company' });
+    expect(updated?.compiled_truth).toBe(`# Target\n\n${APPROVED_UPDATE_MARKDOWN}`);
 
     const timeline = await applyAgentJobProposalRelation(
       engine,

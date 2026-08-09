@@ -611,9 +611,7 @@ async function applyFrozenCreate(
       remote: true,
       withinTransaction: true,
       skipLinkExtraction: true,
-      ...(page.slug === binding.capturePageSlug
-        ? { verbatimBodyMarkdown: page.bodyMarkdown }
-        : {}),
+      verbatimBodyMarkdown: page.bodyMarkdown,
       writeContext: {
         actor: binding.actor,
         writeIntent: 'live_ingest',
@@ -666,9 +664,7 @@ async function persistAppend(
     remote: true,
     withinTransaction: true,
     skipLinkExtraction: true,
-    ...(page.slug === binding.capturePageSlug
-      ? { verbatimBodyMarkdown: markdown }
-      : {}),
+    verbatimBodyMarkdown: markdown,
     writeContext: {
       actor: binding.actor,
       writeIntent: 'live_ingest',
