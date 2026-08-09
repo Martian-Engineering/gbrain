@@ -326,7 +326,10 @@ function parseInventoryEntries(raw: unknown, totalPages?: number): ProposalPageI
 }
 
 /** Parse one complete create or compact update under the staged proposal contract. */
-export function parseProposalPage(raw: unknown): ScopedProposalPage {
+export function parseProposalPage(
+  raw: unknown,
+  options: { opaqueMarkdownForSlug?: string } = {},
+): ScopedProposalPage {
   const page = readRecord(raw, 'page');
   if (page.effect !== 'create' && page.effect !== 'update') {
     throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
@@ -336,14 +339,19 @@ export function parseProposalPage(raw: unknown): ScopedProposalPage {
     : PROPOSAL_UPDATE_PAGE_KEYS;
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
+  const opaqueMarkdown = slug === options.opaqueMarkdownForSlug;
   if (page.effect === 'update') {
-    const appendMarkdown = readNonBlankString(page.appendMarkdown, 'page.appendMarkdown');
-    assertNoManagedRegionMarker(appendMarkdown);
+    const appendMarkdown = opaqueMarkdown
+      ? readString(page.appendMarkdown, 'page.appendMarkdown')
+      : readNonBlankString(page.appendMarkdown, 'page.appendMarkdown');
+    if (!opaqueMarkdown) assertNoManagedRegionMarker(appendMarkdown);
     return { slug, effect: page.effect, appendMarkdown };
   }
   const title = readBoundedString(page.title, 'page.title', 1_000);
-  const bodyMarkdown = readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
-  assertNoManagedRegionMarker(bodyMarkdown);
+  const bodyMarkdown = opaqueMarkdown
+    ? readString(page.bodyMarkdown, 'page.bodyMarkdown')
+    : readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
+  if (!opaqueMarkdown) assertNoManagedRegionMarker(bodyMarkdown);
   return { slug, effect: page.effect, title, bodyMarkdown };
 }
 

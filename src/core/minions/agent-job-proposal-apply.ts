@@ -202,14 +202,16 @@ export async function applyAgentJobProposalPage(
     const applyBinding = context.binding;
     const proposal = await readApplyProposalRow(tx, applyBinding, input);
     assertApplyAuthority(applyBinding, proposal, input);
-    const page = parseProposalPage(proposal.page);
+    const page = parseProposalPage(proposal.page, {
+      opaqueMarkdownForSlug: applyBinding.capturePageSlug,
+    });
     if (proposal.applied_at !== null) {
       return appliedReplayResult(tx, proposal, input, page);
     }
     if (page.effect === 'create') {
       return applyFrozenCreate(tx, applyBinding, applyJobId, proposal, input, page);
     }
-    const baseline = baselineFromFragment(proposal);
+    const baseline = baselineFromFragment(proposal, applyBinding.capturePageSlug);
     if (!baseline || digestFrozenProposalPage(page, baseline) !== input.page_digest) {
       throw new AgentJobProposalError('digest_mismatch', 'The selected append does not match its frozen private baseline.');
     }
@@ -377,7 +379,9 @@ function assertApplyAuthority(
     || digestProposalValue(proposal.plan) !== input.proposal_digest
     || !manifestEntry
     || manifestEntry.sequence !== input.sequence
-    || manifestEntry.slug !== parseProposalPage(proposal.page).slug
+    || manifestEntry.slug !== parseProposalPage(proposal.page, {
+      opaqueMarkdownForSlug: applyBinding.capturePageSlug,
+    }).slug
     || manifestEntry.digest !== input.page_digest
     || proposal.page_digest !== input.page_digest
     || !approvedEntry
@@ -573,7 +577,7 @@ async function applyFrozenCreate(
   page: Extract<ScopedProposalPage, { effect: 'create' }>,
 ): Promise<ApplyProposalPageResult> {
   if (
-    baselineFromFragment(proposal) !== null
+    baselineFromFragment(proposal, binding.capturePageSlug) !== null
     || digestFrozenProposalPage(page, null) !== input.page_digest
   ) {
     throw new AgentJobProposalError(
@@ -607,6 +611,9 @@ async function applyFrozenCreate(
       remote: true,
       withinTransaction: true,
       skipLinkExtraction: true,
+      ...(page.slug === binding.capturePageSlug
+        ? { verbatimBodyMarkdown: page.bodyMarkdown }
+        : {}),
       writeContext: {
         actor: binding.actor,
         writeIntent: 'live_ingest',
@@ -659,6 +666,9 @@ async function persistAppend(
     remote: true,
     withinTransaction: true,
     skipLinkExtraction: true,
+    ...(page.slug === binding.capturePageSlug
+      ? { verbatimBodyMarkdown: markdown }
+      : {}),
     writeContext: {
       actor: binding.actor,
       writeIntent: 'live_ingest',
@@ -768,10 +778,12 @@ function writeThroughComplete(result: WriteThroughResult | undefined): boolean {
 }
 
 
-/** Reconstruct a private update baseline without accepting partial rows. */
 /** Reconstruct a complete private update baseline from one frozen fragment. */
-export function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
-  const page = parseProposalPage(fragment.page);
+export function baselineFromFragment(
+  fragment: StoredProposalFragment,
+  opaqueMarkdownForSlug?: string,
+): PrivateUpdateBaseline | null {
+  const page = parseProposalPage(fragment.page, { opaqueMarkdownForSlug });
   if (page.effect === 'create') return null;
   if (
     fragment.baseline_title === null

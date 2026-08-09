@@ -63,11 +63,14 @@ export type {
   StageProposalPageInput,
   StageProposalPageResult,
 } from '../ingestion-proposal-contract.ts';
+/** Maximum UTF-8 size of server-bound verbatim capture Markdown. */
+export const PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES = 512 * 1024;
+
 /** Maximum UTF-8 size of one finalized, canonical proposal plan. */
-export const PROPOSAL_AGGREGATE_MAX_BYTES = 98_304;
+export const PROPOSAL_AGGREGATE_MAX_BYTES = 768 * 1024;
 
 /** Maximum UTF-8 size after the canonical plan is embedded as a JSON string. */
-export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 98_304;
+export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 1536 * 1024;
 
 /** Maximum UTF-8 size of the compact receipt manifest. */
 export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
@@ -144,6 +147,7 @@ interface JobBinding {
   artifactId: string;
   admissionScope: string | null;
   capturePageSlug: string;
+  capturePageVerbatimMarkdown: string | null;
   allowedSlugPrefixes: string[];
   pageInventory: unknown;
 }
@@ -216,8 +220,37 @@ function parseStageProposalPageCoreForPersistence(
   }
 }
 
-/** Test seams for the fail-closed pre-persistence parser boundary. */
-export const __testing = { parseStageProposalPageCoreForPersistence };
+/** Test seams for fail-closed proposal persistence boundaries. */
+export const __testing = {
+  parseStageProposalPageCoreForPersistence,
+  assertProposalPlanWithinLimits,
+  assertCanonicalProposalJsonWithinLimits,
+};
+
+/** Enforce both canonical and transport-escaped finalized plan ceilings. */
+function assertProposalPlanWithinLimits(plan: ScopedAdmissionProposalPlan): string {
+  const planJson = canonicalProposalJson(plan);
+  assertCanonicalProposalJsonWithinLimits(planJson);
+  return planJson;
+}
+
+/** Enforce finalized-plan ceilings on an already canonicalized value. */
+function assertCanonicalProposalJsonWithinLimits(planJson: string): void {
+  const planBytes = Buffer.byteLength(planJson, 'utf8');
+  if (planBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'proposal_too_large',
+      `Finalized proposal is ${planBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
+    );
+  }
+  const escapedPlanBytes = Buffer.byteLength(JSON.stringify(planJson), 'utf8');
+  if (escapedPlanBytes > PROPOSAL_ESCAPED_PLAN_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'proposal_too_large',
+      `Escaped finalized proposal is ${escapedPlanBytes} UTF-8 bytes; maximum is ${PROPOSAL_ESCAPED_PLAN_MAX_BYTES}.`,
+    );
+  }
+}
 
 /**
  * Validate page-staging calls before an assistant turn is persisted.
@@ -298,11 +331,12 @@ export async function assertProposalToolTurnPersistableForJob(
 
   await engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
-    assertBindingMatches(binding, candidate);
-    assertSlugAllowed(binding, candidate.page.slug, 'Proposed page');
+    const boundCandidate = bindVerbatimCapturePage(binding, candidate);
+    assertBindingMatches(binding, boundCandidate);
+    assertSlugAllowed(binding, boundCandidate.page.slug, 'Proposed page');
     const fragments = await readStoredFragments(tx, jobId);
-    const replay = assertCumulativeStageFits(binding, candidate, fragments);
-    if (!replay) await freezeProposalCandidate(tx, binding, candidate);
+    const replay = assertCumulativeStageFits(binding, boundCandidate, fragments);
+    if (!replay) await freezeProposalCandidate(tx, binding, boundCandidate);
   });
 }
 
@@ -327,10 +361,11 @@ export async function stageAgentJobProposalPage(
   input: StageProposalPageInput,
 ): Promise<StageProposalPageResult> {
   assertSafeJobId(jobId);
-  const candidate = parseStageProposalPageInput(input);
+  const parsedCandidate = parseStageProposalPageInput(input);
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
+    const candidate = bindVerbatimCapturePage(binding, parsedCandidate);
     assertBindingMatches(binding, candidate);
     assertPageInventoryForBinding(binding, candidate.pageInventory);
     const frozenInventory = parseFrozenPageInventory(binding, candidate.totalPages);
@@ -444,8 +479,8 @@ export async function finalizeAgentJobProposal(
       ) {
         throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
       }
-      const page = parseProposalPage(fragment.page);
-      if (digestFrozenProposalPage(page, baselineFromFragment(fragment)) !== fragment.page_digest) {
+      const page = parseStoredProposalPage(fragment.page, binding);
+      if (digestStoredProposalFragment(fragment, binding) !== fragment.page_digest) {
         throw new AgentJobProposalError('digest_mismatch', `Digest mismatch at sequence ${expectedSequence}.`);
       }
       if (seenSlugs.has(page.slug)) {
@@ -479,21 +514,7 @@ export async function finalizeAgentJobProposal(
       proposedLinks: links,
       unresolved,
     };
-    const planJson = canonicalProposalJson(plan);
-    const planBytes = Buffer.byteLength(planJson, 'utf8');
-    if (planBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
-      throw new AgentJobProposalError(
-        'proposal_too_large',
-        `Finalized proposal is ${planBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
-      );
-    }
-    const escapedPlanBytes = Buffer.byteLength(JSON.stringify(planJson), 'utf8');
-    if (escapedPlanBytes > PROPOSAL_ESCAPED_PLAN_MAX_BYTES) {
-      throw new AgentJobProposalError(
-        'proposal_too_large',
-        `Escaped finalized proposal is ${escapedPlanBytes} UTF-8 bytes; maximum is ${PROPOSAL_ESCAPED_PLAN_MAX_BYTES}.`,
-      );
-    }
+    const planJson = assertProposalPlanWithinLimits(plan);
     const proposalDigest = digestProposalValue(plan);
     const applicationInventory = buildProposalApplicationDigestInventory(
       pageDigests,
@@ -567,10 +588,7 @@ export async function finalizeAgentJobProposal(
       || authority.pages.length !== totalPages
       || pageDigests.some((entry, index) => (
         entry.digest !== authority.pages[index]?.page_digest
-        || entry.digest !== digestFrozenProposalPage(
-          parseProposalPage(authority.pages[index]?.page),
-          baselineFromFragment(authority.pages[index]!),
-        )
+        || entry.digest !== digestStoredProposalFragment(authority.pages[index]!, binding)
       ))
     ) {
       throw new AgentJobProposalError(
@@ -648,9 +666,9 @@ export async function getOwnedAgentJobProposal(
       entry.sequence !== index + 1
       || entry.slug !== plan.proposedPages[index]?.slug
       || entry.digest !== fragments[index]?.page_digest
-      || entry.digest !== digestFrozenProposalPage(
-        parseProposalPage(fragments[index]?.page),
-        baselineFromFragment(fragments[index]!),
+      || entry.digest !== digestAuthorityProposalFragment(
+        fragments[index]!,
+        authority.capturePageSlug,
       )
     ))
   ) {
@@ -835,6 +853,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
     artifact_id: string | null;
     admission_scope: string | null;
     capture_page_slug: string | null;
+    capture_page_verbatim_markdown: string | null;
     allowed_slug_prefixes: unknown;
     page_inventory: unknown;
   }>(
@@ -844,6 +863,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
             data->>'proposal_artifact_id' AS artifact_id,
             data->>'proposal_admission_scope' AS admission_scope,
             data->>'proposal_capture_page_slug' AS capture_page_slug,
+            data->>'proposal_capture_page_verbatim_markdown' AS capture_page_verbatim_markdown,
             data->'allowed_slug_prefixes' AS allowed_slug_prefixes,
             data->'proposal_page_inventory' AS page_inventory
        FROM minion_jobs
@@ -873,15 +893,68 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
       'Agent job capture page is outside its bound slug fence.',
     );
   }
+  const capturePageVerbatimMarkdown = row.capture_page_verbatim_markdown;
+  if (capturePageVerbatimMarkdown !== null) {
+    const bytes = Buffer.byteLength(capturePageVerbatimMarkdown, 'utf8');
+    if (bytes === 0 || bytes > PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES) {
+      throw new AgentJobProposalError(
+        'verbatim_capture_too_large',
+        `Verbatim capture Markdown must contain 1-${PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES} UTF-8 bytes.`,
+      );
+    }
+  }
   return {
     ownerClientId: row.owner_client_id,
     sourceId,
     artifactId: row.artifact_id,
     admissionScope: row.admission_scope,
     capturePageSlug,
+    capturePageVerbatimMarkdown,
     allowedSlugPrefixes,
     pageInventory: row.page_inventory,
   };
+}
+
+/** Replace model-authored capture prose with exact server-bound source bytes. */
+function bindVerbatimCapturePage<T extends ParsedStageProposalPageCore>(
+  binding: JobBinding,
+  candidate: T,
+): T {
+  if (
+    candidate.page.slug !== binding.capturePageSlug
+    || binding.capturePageVerbatimMarkdown === null
+  ) return candidate;
+  const page = candidate.page.effect === 'create'
+    ? { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown }
+    : { ...candidate.page, appendMarkdown: binding.capturePageVerbatimMarkdown };
+  return { ...candidate, page };
+}
+
+/** Validate a stored page envelope while treating bound source bytes as opaque. */
+function parseStoredProposalPage(raw: unknown, binding: JobBinding): ScopedProposalPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return parseProposalPage(raw);
+  }
+  const record = raw as Record<string, unknown>;
+  const verbatimMarkdown = binding.capturePageVerbatimMarkdown;
+  if (record.slug !== binding.capturePageSlug || verbatimMarkdown === null) {
+    return parseProposalPage(raw);
+  }
+  const contentKey = record.effect === 'create'
+    ? 'bodyMarkdown'
+    : record.effect === 'update'
+    ? 'appendMarkdown'
+    : null;
+  if (contentKey === null) return parseProposalPage(raw);
+  if (record[contentKey] !== verbatimMarkdown) {
+    throw new AgentJobProposalError(
+      'binding_mismatch',
+      'The stored capture page does not contain its exact server-bound source Markdown.',
+    );
+  }
+  return parseProposalPage(raw, {
+    opaqueMarkdownForSlug: binding.capturePageSlug,
+  });
 }
 
 function assertBindingMatches(
@@ -1078,8 +1151,11 @@ function assertCumulativeStageFits(
     ) {
       throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
     }
-    const page = parseProposalPage(fragment.page);
-    const pageDigest = digestFrozenProposalPage(page, baselineFromFragment(fragment));
+    const page = parseStoredProposalPage(fragment.page, binding);
+    const pageDigest = digestFrozenProposalPage(
+      page,
+      baselineFromFragment(fragment, page),
+    );
     if (pageDigest !== fragment.page_digest) {
       throw new AgentJobProposalError('digest_mismatch', 'A staged fragment does not match its stored digest.');
     }
@@ -1137,8 +1213,10 @@ async function freezeProposalCandidate(
 }
 
 /** Reconstruct a private baseline without accepting partially populated rows. */
-function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
-  const page = parseProposalPage(fragment.page);
+function baselineFromFragment(
+  fragment: StoredProposalFragment,
+  page: ScopedProposalPage,
+): PrivateUpdateBaseline | null {
   if (page.effect === 'create') return null;
   if (
     fragment.baseline_title === null
@@ -1153,6 +1231,26 @@ function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBa
     markdown: fragment.baseline_markdown,
     contentHash: fragment.baseline_content_hash,
   };
+}
+
+/** Recompute one stored fragment digest through its exact source binding. */
+function digestStoredProposalFragment(
+  fragment: StoredProposalFragment,
+  binding: JobBinding,
+): string {
+  const page = parseStoredProposalPage(fragment.page, binding);
+  return digestFrozenProposalPage(page, baselineFromFragment(fragment, page));
+}
+
+/** Recompute an independent authority digest after its origin job is gone. */
+function digestAuthorityProposalFragment(
+  fragment: StoredProposalFragment,
+  capturePageSlug: string,
+): string {
+  const page = parseProposalPage(fragment.page, {
+    opaqueMarkdownForSlug: capturePageSlug,
+  });
+  return digestFrozenProposalPage(page, baselineFromFragment(fragment, page));
 }
 
 /** Bind a public page intent to its server-private baseline. */

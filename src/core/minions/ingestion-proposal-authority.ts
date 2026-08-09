@@ -113,17 +113,19 @@ export async function readOwnedIngestionProposalAuthority<TPlan, TPageDigests>(
   proposalDigest: string,
 ): Promise<{
   proposalDigest: string;
+  capturePageSlug: string;
   pageDigests: TPageDigests;
   plan: TPlan;
   expired: boolean;
 } | null> {
   const rows = await engine.executeRaw<{
     proposal_digest: string;
+    capture_page_slug: string;
     page_digests: TPageDigests;
     plan: TPlan;
     expired: boolean;
   }>(
-    `SELECT proposal_digest, page_digests, plan,
+    `SELECT proposal_digest, capture_page_slug, page_digests, plan,
             expires_at <= now() AS expired
        FROM ingestion_proposal_authorities
       WHERE proposal_id = $1 AND owner_client_id = $2 AND proposal_digest = $3`,
@@ -132,6 +134,7 @@ export async function readOwnedIngestionProposalAuthority<TPlan, TPageDigests>(
   if (!rows[0]) return null;
   return {
     proposalDigest: rows[0].proposal_digest,
+    capturePageSlug: rows[0].capture_page_slug,
     pageDigests: rows[0].page_digests,
     plan: rows[0].plan,
     expired: rows[0].expired,

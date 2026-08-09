@@ -316,6 +316,8 @@ export async function importFromContent(
     withinTransaction?: boolean;
     /** Internal reviewed-body seam: do not derive graph edges from page text. */
     skipLinkExtraction?: boolean;
+    /** Internal source-artifact seam: preserve these reviewed body bytes verbatim. */
+    verbatimBodyMarkdown?: string;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -339,6 +341,10 @@ export async function importFromContent(
 
   const incomingTimeline = stripTimelineSection(content);
   const parsed = parseMarkdown(incomingTimeline.content, slug + '.md', { activePack: opts.activePack });
+  if (opts.verbatimBodyMarkdown !== undefined) {
+    parsed.compiled_truth = opts.verbatimBodyMarkdown;
+    parsed.timeline = '';
+  }
 
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
   // input. parseMarkdown preserves every frontmatter key except type/title/
