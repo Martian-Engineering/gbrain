@@ -479,8 +479,8 @@ export async function finalizeAgentJobProposal(
       ) {
         throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
       }
-      const page = parseProposalPage(fragment.page);
-      if (digestFrozenProposalPage(page, baselineFromFragment(fragment)) !== fragment.page_digest) {
+      const page = parseStoredProposalPage(fragment.page, binding);
+      if (digestStoredProposalFragment(fragment, binding) !== fragment.page_digest) {
         throw new AgentJobProposalError('digest_mismatch', `Digest mismatch at sequence ${expectedSequence}.`);
       }
       if (seenSlugs.has(page.slug)) {
@@ -588,10 +588,7 @@ export async function finalizeAgentJobProposal(
       || authority.pages.length !== totalPages
       || pageDigests.some((entry, index) => (
         entry.digest !== authority.pages[index]?.page_digest
-        || entry.digest !== digestFrozenProposalPage(
-          parseProposalPage(authority.pages[index]?.page),
-          baselineFromFragment(authority.pages[index]!),
-        )
+        || entry.digest !== digestStoredProposalFragment(authority.pages[index]!, binding)
       ))
     ) {
       throw new AgentJobProposalError(
@@ -669,9 +666,9 @@ export async function getOwnedAgentJobProposal(
       entry.sequence !== index + 1
       || entry.slug !== plan.proposedPages[index]?.slug
       || entry.digest !== fragments[index]?.page_digest
-      || entry.digest !== digestFrozenProposalPage(
-        parseProposalPage(fragments[index]?.page),
-        baselineFromFragment(fragments[index]!),
+      || entry.digest !== digestAuthorityProposalFragment(
+        fragments[index]!,
+        authority.capturePageSlug,
       )
     ))
   ) {
@@ -933,6 +930,33 @@ function bindVerbatimCapturePage<T extends ParsedStageProposalPageCore>(
   return { ...candidate, page };
 }
 
+/** Validate a stored page envelope while treating bound source bytes as opaque. */
+function parseStoredProposalPage(raw: unknown, binding: JobBinding): ScopedProposalPage {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return parseProposalPage(raw);
+  }
+  const record = raw as Record<string, unknown>;
+  const verbatimMarkdown = binding.capturePageVerbatimMarkdown;
+  if (record.slug !== binding.capturePageSlug || verbatimMarkdown === null) {
+    return parseProposalPage(raw);
+  }
+  const contentKey = record.effect === 'create'
+    ? 'bodyMarkdown'
+    : record.effect === 'update'
+    ? 'appendMarkdown'
+    : null;
+  if (contentKey === null) return parseProposalPage(raw);
+  if (record[contentKey] !== verbatimMarkdown) {
+    throw new AgentJobProposalError(
+      'binding_mismatch',
+      'The stored capture page does not contain its exact server-bound source Markdown.',
+    );
+  }
+  return parseProposalPage(raw, {
+    opaqueMarkdownForSlug: binding.capturePageSlug,
+  });
+}
+
 function assertBindingMatches(
   binding: JobBinding,
   requested: Pick<ParsedStageProposalPageInput, 'artifactId' | 'sourceId' | 'admissionScope'>,
@@ -1127,8 +1151,11 @@ function assertCumulativeStageFits(
     ) {
       throw new AgentJobProposalError('binding_mismatch', 'A staged fragment does not match its job binding.');
     }
-    const page = parseProposalPage(fragment.page);
-    const pageDigest = digestFrozenProposalPage(page, baselineFromFragment(fragment));
+    const page = parseStoredProposalPage(fragment.page, binding);
+    const pageDigest = digestFrozenProposalPage(
+      page,
+      baselineFromFragment(fragment, page),
+    );
     if (pageDigest !== fragment.page_digest) {
       throw new AgentJobProposalError('digest_mismatch', 'A staged fragment does not match its stored digest.');
     }
@@ -1186,8 +1213,10 @@ async function freezeProposalCandidate(
 }
 
 /** Reconstruct a private baseline without accepting partially populated rows. */
-function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBaseline | null {
-  const page = parseProposalPage(fragment.page);
+function baselineFromFragment(
+  fragment: StoredProposalFragment,
+  page: ScopedProposalPage,
+): PrivateUpdateBaseline | null {
   if (page.effect === 'create') return null;
   if (
     fragment.baseline_title === null
@@ -1202,6 +1231,26 @@ function baselineFromFragment(fragment: StoredProposalFragment): PrivateUpdateBa
     markdown: fragment.baseline_markdown,
     contentHash: fragment.baseline_content_hash,
   };
+}
+
+/** Recompute one stored fragment digest through its exact source binding. */
+function digestStoredProposalFragment(
+  fragment: StoredProposalFragment,
+  binding: JobBinding,
+): string {
+  const page = parseStoredProposalPage(fragment.page, binding);
+  return digestFrozenProposalPage(page, baselineFromFragment(fragment, page));
+}
+
+/** Recompute an independent authority digest after its origin job is gone. */
+function digestAuthorityProposalFragment(
+  fragment: StoredProposalFragment,
+  capturePageSlug: string,
+): string {
+  const page = parseProposalPage(fragment.page, {
+    opaqueMarkdownForSlug: capturePageSlug,
+  });
+  return digestFrozenProposalPage(page, baselineFromFragment(fragment, page));
 }
 
 /** Bind a public page intent to its server-private baseline. */

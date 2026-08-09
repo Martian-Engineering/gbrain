@@ -860,7 +860,15 @@ describe('durable agent-job proposal staging', () => {
   });
 
   it('freezes the exact server-bound Markdown as the capture page body', async () => {
-    const verbatimMarkdown = '# Transcript\n\nSpeaker: Exact source text.\n';
+    const verbatimMarkdown = [
+      '# Transcript',
+      '',
+      '<!-- timeline -->',
+      '<!-- gbrain:source:begin -->',
+      'Speaker: Exact source text.',
+      '<!-- gbrain:source:end -->',
+      '',
+    ].join('\n');
     const jobId = await seedJob({
       proposal_capture_page_verbatim_markdown: verbatimMarkdown,
     });

@@ -332,7 +332,14 @@ export async function finalizeAgentJobProposalApplication(
     ) {
       throw new AgentJobProposalError('incomplete_application', 'Not every frozen page has complete durable application proof.');
     }
-    for (const row of pageRows) await verifyAppliedPage(tx, context.authority.sourceId, row);
+    for (const row of pageRows) {
+      await verifyAppliedPage(
+        tx,
+        context.authority.sourceId,
+        context.authority.capturePageSlug,
+        row,
+      );
+    }
 
     const outcomes = await tx.executeRaw<RelationOutcomeRow>(
       `SELECT relation_kind, sequence, relation_digest, source_id, apply_job_id,
@@ -414,8 +421,10 @@ async function preflightFrozenInventory(
   }
   const planned = new Map(authority.plan.proposedPages.map(page => [page.slug, page.effect]));
   for (const fragment of fragments) {
-    const page = parseProposalPage(fragment.page);
-    const baseline = baselineFromFragment(fragment);
+    const page = parseProposalPage(fragment.page, {
+      opaqueMarkdownForSlug: authority.capturePageSlug,
+    });
+    const baseline = baselineFromFragment(fragment, authority.capturePageSlug);
     if (digestFrozenProposalPage(page, baseline) !== fragment.page_digest) {
       throw new AgentJobProposalError('digest_mismatch', 'Frozen page inventory digest does not match.');
     }
@@ -541,9 +550,12 @@ async function readPageReceiptRows(engine: BrainEngine, proposalId: number): Pro
 async function verifyAppliedPage(
   engine: BrainEngine,
   sourceId: string,
+  capturePageSlug: string,
   row: PageReceiptRow,
 ): Promise<void> {
-  const page = parseProposalPage(row.page);
+  const page = parseProposalPage(row.page, {
+    opaqueMarkdownForSlug: capturePageSlug,
+  });
   const current = await engine.getPage(page.slug, { sourceId, includeDeleted: true });
   if (!current || current.deleted_at || !row.applied_content_hash || current.content_hash !== row.applied_content_hash) {
     throw new AgentJobProposalError('stale_page', `Applied page ${page.slug} no longer matches its receipt.`);

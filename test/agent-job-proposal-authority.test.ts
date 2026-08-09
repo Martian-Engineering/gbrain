@@ -49,7 +49,11 @@ interface FrozenCreateProposal {
 /** Finalize one create proposal under the normal ingestion job binding. */
 async function finalizeCreateProposal(
   suffix: string,
-  queueOptions: { remove_on_complete?: boolean; remove_on_fail?: boolean } = {},
+  queueOptions: {
+    remove_on_complete?: boolean;
+    remove_on_fail?: boolean;
+    verbatimMarkdown?: string;
+  } = {},
 ): Promise<FrozenCreateProposal> {
   const slug = `sources/durable-${suffix}`;
   const jobs = await engine.executeRaw<{ id: number }>(
@@ -63,6 +67,9 @@ async function finalizeCreateProposal(
     source_id: 'company',
     proposal_artifact_id: `artifact-${suffix}`,
     proposal_capture_page_slug: slug,
+    ...(queueOptions.verbatimMarkdown === undefined
+      ? {}
+      : { proposal_capture_page_verbatim_markdown: queueOptions.verbatimMarkdown }),
     proposal_admission_scope: 'Include durable proposal notes.',
     allowed_slug_prefixes: ['sources/*'],
     }), queueOptions.remove_on_complete ?? false, queueOptions.remove_on_fail ?? false],
@@ -189,6 +196,34 @@ describe('durable ingestion proposal authority', () => {
     expect(result.status).toBe('applied');
     expect(await engine.getPage('sources/durable-apply-after-prune', { sourceId: 'company' }))
       .not.toBeNull();
+  });
+
+  it('applies exact opaque source Markdown through the durable authority', async () => {
+    const verbatimMarkdown = [
+      '# Transcript',
+      '',
+      '<!-- timeline -->',
+      '<!-- gbrain:source:begin -->',
+      'Speaker: Exact source text.',
+      '<!-- gbrain:source:end -->',
+      '',
+    ].join('\n');
+    const frozen = await finalizeCreateProposal('opaque-source', {
+      verbatimMarkdown,
+    });
+    const applyJobId = await seedApplyJob(frozen);
+    await applyAgentJobProposalPage(engine, applyJobId, {
+      proposal_job_id: frozen.proposalJobId,
+      proposal_digest: frozen.manifest.proposalDigest,
+      sequence: 1,
+      page_digest: frozen.pageDigest,
+      source_id: 'company',
+    });
+
+    const page = await engine.getPage('sources/durable-opaque-source', {
+      sourceId: 'company',
+    });
+    expect(page?.compiled_truth).toBe(verbatimMarkdown);
   });
 
   it('fails closed after expiry, mutates nothing, and cleans private authority explicitly', async () => {
