@@ -26,6 +26,7 @@ import {
   resolveToolLoopMessageBudgets,
 } from '../../src/core/ai/tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../../src/core/ingestion-proposal-context-policy.ts';
+import { pageReadVerificationContextPolicy } from '../../src/core/page-read-verification-context-policy.ts';
 
 /** Find a persisted tool result in the provider-facing prompt. */
 function resultOutput(messages: ChatMessage[], toolCallId: string): unknown {
@@ -45,7 +46,7 @@ describe('OpenAI tool-loop context budgeting', () => {
     resetGateway();
   });
 
-  it('retains a production-sized latest read when exact OpenAI tokens fit', async () => {
+  it('keeps a production-sized page body out of preferred OpenAI context while retaining hash proof', async () => {
     configureGateway({
       chat_model: 'openai:gpt-5.6-terra',
       embedding_model: 'openai:text-embedding-3-large',
@@ -71,15 +72,18 @@ describe('OpenAI tool-loop context budgeting', () => {
         inputSchema: { type: 'object', properties: { slug: { type: 'string' } } },
       },
     ];
+    const privateBodyMarker = 'TERRA_PRIVATE_PAGE_BODY_';
+    const compiledTruth = privateBodyMarker
+      + 'b'.repeat(140_952 - Buffer.byteLength(privateBodyMarker, 'utf8'));
     const exactOutput = {
       id: 6_537,
       slug: 'companies/signalcore',
       source_id: 'martian',
       content_hash: 'a'.repeat(64),
-      timeline: 't'.repeat(52_663),
-      compiled_truth: 'b'.repeat(9_091),
+      timeline: '',
+      compiled_truth: compiledTruth,
     };
-    expect(Buffer.byteLength(JSON.stringify(exactOutput), 'utf8')).toBe(61_933);
+    expect(Buffer.byteLength(exactOutput.compiled_truth, 'utf8')).toBe(140_952);
     const oldSearchBody = `OLD_SEARCH_RAW_${'s'.repeat(44_000)}`;
     const oldStageBody = `OLD_STAGE_RAW_${'m'.repeat(22_000)}`;
     const stageInventory = [
@@ -185,11 +189,21 @@ describe('OpenAI tool-loop context budgeting', () => {
     const byteSafeOnly = compactToolLoopMessages(
       durableMessages,
       budgets.byteSafeBytes,
-      { mutatingToolNames, toolPolicies: [proposalInventoryContextPolicy] },
+      {
+        mutatingToolNames,
+        toolPolicies: [proposalInventoryContextPolicy, pageReadVerificationContextPolicy],
+      },
     );
     expect(resultOutput(byteSafeOnly, 'canonical-baseline')).not.toEqual(exactOutput);
-    expect(JSON.stringify(resultOutput(byteSafeOnly, 'canonical-baseline')))
-      .toContain('working_context_projection');
+    expect(resultOutput(byteSafeOnly, 'canonical-baseline')).toMatchObject({
+      source_id: 'martian',
+      slug: 'companies/signalcore',
+      content_hash: 'a'.repeat(64),
+      working_context_projection: {
+        schema: 'gbrain.page_read_verification_projection.v1',
+      },
+    });
+    expect(JSON.stringify(byteSafeOnly)).not.toContain(privateBodyMarker);
 
     let providerMessages: ChatMessage[] = [];
     __setChatTransportForTests(async options => {
@@ -241,7 +255,14 @@ describe('OpenAI tool-loop context budgeting', () => {
       },
     });
 
-    expect(resultOutput(providerMessages, 'canonical-baseline')).toEqual(exactOutput);
+    expect(resultOutput(providerMessages, 'canonical-baseline')).toMatchObject({
+      source_id: 'martian',
+      slug: 'companies/signalcore',
+      content_hash: 'a'.repeat(64),
+      working_context_projection: {
+        schema: 'gbrain.page_read_verification_projection.v1',
+      },
+    });
     expect(providerMessages).toHaveLength(4);
     const providerText = providerMessages
       .map(message => typeof message.content === 'string' ? message.content : '')
@@ -250,6 +271,7 @@ describe('OpenAI tool-loop context budgeting', () => {
     expect(providerText).toContain('stage-page-fragment');
     expect(JSON.stringify(providerMessages)).not.toContain('OLD_SEARCH_RAW_');
     expect(JSON.stringify(providerMessages)).not.toContain('OLD_STAGE_RAW_');
+    expect(JSON.stringify(providerMessages)).not.toContain(privateBodyMarker);
     expect(Buffer.byteLength(JSON.stringify(providerMessages), 'utf8'))
       .toBeLessThanOrEqual(budgets.preferredProjectionBytes);
     expect(openAiToolLoopRequestFits({
@@ -259,7 +281,8 @@ describe('OpenAI tool-loop context budgeting', () => {
       modelMessages: toModelMessages(providerMessages),
     })).toBe(true);
     expect(durableMessages).toEqual(durableSnapshot);
-  }, 15_000);
+    expect(JSON.stringify(durableMessages)).toContain(privateBodyMarker);
+  }, 30_000);
 
   it('rejects a preferred dense-Unicode result when exact tokens exceed the target', () => {
     const model = 'openai:gpt-5.6-terra';

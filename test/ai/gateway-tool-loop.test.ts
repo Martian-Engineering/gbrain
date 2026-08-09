@@ -199,6 +199,74 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect((resultTurns[0].blocks[0] as Extract<ChatBlock, { type: 'tool-result' }>).toolCallId).toBe('tc1');
   });
 
+  it('keeps a large page read durable while giving the next model turn only hash proof', async () => {
+    const privateBodyMarker = 'DURABLE_PRIVATE_FILING_';
+    const compiledTruth = privateBodyMarker
+      + 'x'.repeat(140_952 - Buffer.byteLength(privateBodyMarker, 'utf8'));
+    const page = {
+      source_id: 'company',
+      slug: 'projects/large-filing',
+      content_hash: 'a'.repeat(64),
+      compiled_truth: compiledTruth,
+    };
+    expect(Buffer.byteLength(page.compiled_truth, 'utf8')).toBe(140_952);
+    let turn = 0;
+    let secondTurnMessages: ChatMessage[] | undefined;
+    __setChatTransportForTests(async (opts) => {
+      turn++;
+      if (turn === 1) {
+        return {
+          text: '',
+          blocks: [{
+            type: 'tool-call',
+            toolCallId: 'large-page-read',
+            toolName: 'brain_get_page',
+            input: { source_id: 'company', slug: 'projects/large-filing' },
+          }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-sonnet-4-6',
+          providerId: 'anthropic',
+        };
+      }
+      secondTurnMessages = opts.messages;
+      return {
+        text: 'verified',
+        blocks: [{ type: 'text', text: 'verified' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-sonnet-4-6',
+        providerId: 'anthropic',
+      };
+    });
+
+    const persistedResults: ChatBlock[][] = [];
+    const result = await toolLoop({
+      initialMessages: [{ role: 'user', content: 'Verify the large written filing.' }],
+      tools: [{ name: 'brain_get_page', description: 'Read a page.', inputSchema: { type: 'object' } }],
+      toolHandlers: new Map([['brain_get_page', {
+        idempotent: true,
+        mutating: false,
+        async execute() { return page; },
+      }]]),
+      contextWindowTokens: 24_000,
+      onToolResultTurn: async (_turnIdx, _messageIdx, blocks) => {
+        persistedResults.push(structuredClone(blocks));
+      },
+    });
+
+    expect(persistedResults).toHaveLength(1);
+    expect((persistedResults[0]![0] as Extract<ChatBlock, { type: 'tool-result' }>).output)
+      .toEqual(page);
+    expect(JSON.stringify(result.messages)).toContain('DURABLE_PRIVATE_FILING_');
+
+    const providerJson = JSON.stringify(secondTurnMessages);
+    expect(providerJson).toContain('gbrain.page_read_verification_projection.v1');
+    expect(providerJson).toContain('projects/large-filing');
+    expect(providerJson).toContain('a'.repeat(64));
+    expect(providerJson).not.toContain('DURABLE_PRIVATE_FILING_');
+  });
+
   it('replay short-circuits a complete prior tool execution', async () => {
     let chatCalls = 0;
     __setChatTransportForTests(async () => {

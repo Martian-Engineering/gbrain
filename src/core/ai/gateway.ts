@@ -62,6 +62,7 @@ import {
   resolveToolLoopMessageBudgets,
 } from './tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../ingestion-proposal-context-policy.ts';
+import { pageReadVerificationContextPolicy } from '../page-read-verification-context-policy.ts';
 import { assertProposalToolTurnPersistable } from '../minions/agent-job-proposals.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
@@ -3409,7 +3410,7 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
           .filter(tool => opts.toolHandlers.get(tool.name)?.mutating !== false)
           .map(tool => tool.name),
       ),
-      toolPolicies: [proposalInventoryContextPolicy],
+      toolPolicies: [proposalInventoryContextPolicy, pageReadVerificationContextPolicy],
       preferredProjectionBytes: messageBudgets.preferredProjectionBytes,
       preferredProjectionFits: messageBudgets.openAiTokenLimits
         ? candidate => openAiToolLoopRequestFits({

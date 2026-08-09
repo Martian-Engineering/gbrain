@@ -58,8 +58,9 @@ export interface ToolLoopContextEvidence {
 /** Domain policy for projecting one tool's input and summarized evidence. */
 export interface ToolLoopContextPolicy {
   readonly toolName: string;
-  projectInput(input: unknown, maxBytes: number): unknown;
-  summarizeDroppedEvidence(evidence: readonly ToolLoopContextEvidence[]): string | null;
+  projectInput?(input: unknown, maxBytes: number): unknown;
+  projectResult?(output: unknown, maxBytes: number): unknown;
+  summarizeDroppedEvidence?(evidence: readonly ToolLoopContextEvidence[]): string | null;
 }
 
 interface ToolRound {
@@ -281,14 +282,17 @@ function buildPreferredNewestSingletonProjection(
   const summary = buildLedgerSummary(rounds.slice(0, -1), otherCount, options);
   for (const perPayload of PAYLOAD_LIMITS) {
     const compacted = compactRound(originalRound, perPayload, options);
-    const exactResult: ChatMessage = {
-      ...compacted.result,
-      content: mapBlocks(compacted.result, block => (
-        block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
-          ? { ...block, output: originalResult.output }
-          : block
-      )),
-    };
+    const policy = policyForTool(options, evidence.toolName);
+    const exactResult: ChatMessage = policy?.projectResult
+      ? compacted.result
+      : {
+          ...compacted.result,
+          content: mapBlocks(compacted.result, block => (
+            block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
+              ? { ...block, output: originalResult.output }
+              : block
+          )),
+        };
     const preferred = [
       task,
       ...(summary ? [summary] : []),
@@ -459,6 +463,11 @@ function restoreExactNonMutatingResults(
     }
     const exactJson = safeJson(originalResult.output);
     const compactedJson = safeJson(compactedResult.output);
+    // A result policy may intentionally replace a large private payload with
+    // authenticated verification evidence. Never undo that privacy boundary.
+    if (policyForTool(options, evidence.toolName)?.projectResult && exactJson !== compactedJson) {
+      return [];
+    }
     return [{
       toolCallId: evidence.toolCallId,
       output: originalResult.output,
@@ -573,10 +582,10 @@ function compactRound(
       content: mapBlocks(round.assistant, block => {
         if (block.type === 'text') return { ...block, text: boundText(block.text, perPayloadBytes) };
         if (block.type !== 'tool-call') return block;
-        const policy = options.toolPolicies?.find(candidate => candidate.toolName === block.toolName);
+        const policy = policyForTool(options, block.toolName);
         return {
           ...block,
-          input: policy
+          input: policy?.projectInput
             ? policy.projectInput(block.input, perPayloadBytes)
             : boundValue(block.input, perPayloadBytes, {
               kind: 'tool_input',
@@ -595,19 +604,24 @@ function compactRound(
         if (block.type !== 'tool-result') return block;
         const evidence = evidenceById.get(block.toolCallId);
         const toolName = evidence?.toolName ?? block.toolName;
+        const resultPolicy = evidence?.toolName === block.toolName
+          ? policyForTool(options, toolName)
+          : undefined;
         return {
           ...block,
-          output: boundValue(
-            block.output,
-            // The assistant call owns tool identity. A mismatched result name
-            // must not disguise a mutation as an exact restorable read.
-            evidence && evidence.toolName !== block.toolName ? 0 : perPayloadBytes,
-            {
-              kind: 'tool_result',
-              toolName,
-              preserveStructuralIdentity: false,
-            },
-          ),
+          output: resultPolicy?.projectResult
+            ? resultPolicy.projectResult(block.output, perPayloadBytes)
+            : boundValue(
+                block.output,
+                // The assistant call owns tool identity. A mismatched result
+                // name must not disguise a mutation as an authenticated read.
+                evidence && evidence.toolName !== block.toolName ? 0 : perPayloadBytes,
+                {
+                  kind: 'tool_result',
+                  toolName,
+                  preserveStructuralIdentity: false,
+                },
+              ),
         };
       }),
     },
@@ -641,7 +655,7 @@ function buildLedgerSummary(
     .map(([name, count]) => `${name}: ${count.ok} complete, ${count.failed} failed`)
     .join('; ');
   const policySummaries = options.toolPolicies
-    ?.map(policy => policy.summarizeDroppedEvidence(droppedEvidence))
+    ?.map(policy => policy.summarizeDroppedEvidence?.(droppedEvidence) ?? null)
     .filter((summary): summary is string => summary !== null) ?? [];
   const text = [
     `[Context compacted: ${dropped.length} earlier balanced tool round(s) omitted from this provider request${otherCount ? `; ${otherCount} other historical message(s) omitted` : ''}.]`,
@@ -682,6 +696,14 @@ function boundIdentifier(value: string, maxBytes: number): string {
 
 function isMutationSensitive(name: string, names: ReadonlySet<string> | undefined): boolean {
   return names === undefined || names.has(name);
+}
+
+/** Resolve one domain policy without coupling the generic loop to tool names. */
+function policyForTool(
+  options: ToolLoopContextOptions,
+  toolName: string,
+): ToolLoopContextPolicy | undefined {
+  return options.toolPolicies?.find(candidate => candidate.toolName === toolName);
 }
 
 function flattenRounds(rounds: ToolRound[]): ChatMessage[] {
