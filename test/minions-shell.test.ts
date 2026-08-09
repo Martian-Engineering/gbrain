@@ -281,13 +281,15 @@ describe('shell-audit: computeAuditFilename', () => {
 // ---- shell-audit: write path -----------------------------------------------
 
 describe('shell-audit: write', () => {
+  const preloadAuditDir = process.env.GBRAIN_AUDIT_DIR;
   let tmpDir: string;
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shell-audit-test-'));
     process.env.GBRAIN_AUDIT_DIR = tmpDir;
   });
   afterAll(() => {
-    delete process.env.GBRAIN_AUDIT_DIR;
+    if (preloadAuditDir === undefined) delete process.env.GBRAIN_AUDIT_DIR;
+    else process.env.GBRAIN_AUDIT_DIR = preloadAuditDir;
   });
 
   test('GBRAIN_AUDIT_DIR env override resolves to the custom dir', () => {

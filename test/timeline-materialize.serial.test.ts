@@ -1,3 +1,10 @@
+/**
+ * Timeline materialization integration tests.
+ *
+ * This file configures the process-global AI gateway, so the serial suffix
+ * gives it a dedicated Bun process and prevents ambient provider credentials
+ * from triggering live embeddings against the fixture schema.
+ */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,10 +19,12 @@ import {
 } from '../src/core/timeline-view.ts';
 import { writePageThrough } from '../src/core/write-through.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
 
 beforeAll(async () => {
+  configureGateway({ env: {} });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
@@ -23,6 +32,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await engine.disconnect();
+  resetGateway();
 }, 60_000);
 
 beforeEach(async () => {
