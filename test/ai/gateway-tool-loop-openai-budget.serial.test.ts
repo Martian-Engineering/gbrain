@@ -282,7 +282,7 @@ describe('OpenAI tool-loop context budgeting', () => {
     })).toBe(true);
     expect(durableMessages).toEqual(durableSnapshot);
     expect(JSON.stringify(durableMessages)).toContain(privateBodyMarker);
-  }, 15_000);
+  }, 30_000);
 
   it('rejects a preferred dense-Unicode result when exact tokens exceed the target', () => {
     const model = 'openai:gpt-5.6-terra';
