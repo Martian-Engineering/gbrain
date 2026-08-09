@@ -95,24 +95,59 @@ export const PROPOSAL_CREATE_PAGE_JSON_SCHEMA = {
 } as const;
 
 /** Compact append intent for one existing page. */
-export interface ScopedProposalUpdatePage {
+export interface ScopedProposalAppendPage {
   slug: string;
   effect: 'update';
   appendMarkdown: string;
 }
 
-/** Exact fields accepted for a compact update-page proposal. */
-export const PROPOSAL_UPDATE_PAGE_KEYS = ['slug', 'effect', 'appendMarkdown'] as const;
+/** Exact fields accepted for a compact append proposal. */
+export const PROPOSAL_APPEND_PAGE_KEYS = ['slug', 'effect', 'appendMarkdown'] as const;
 
-/** Canonical model schema for a compact update-page proposal. */
-export const PROPOSAL_UPDATE_PAGE_JSON_SCHEMA = {
+/** Exact full-page rewrite reviewed against an explicit baseline. */
+export interface ScopedProposalRewritePage {
+  slug: string;
+  effect: 'update';
+  title: string;
+  bodyMarkdown: string;
+  baseMarkdown: string;
+  expectedContentHash: string;
+}
+
+/** Exact fields accepted for a full rewrite proposal. */
+export const PROPOSAL_REWRITE_PAGE_KEYS = [
+  'slug',
+  'effect',
+  'title',
+  'bodyMarkdown',
+  'baseMarkdown',
+  'expectedContentHash',
+] as const;
+
+/** Canonical model schema for a compact append operation. */
+export const PROPOSAL_APPEND_PAGE_JSON_SCHEMA = {
   type: 'object',
   properties: {
     slug: { type: 'string' },
     effect: { type: 'string', enum: ['update'] },
     appendMarkdown: { type: 'string' },
   },
-  required: PROPOSAL_UPDATE_PAGE_KEYS,
+  required: PROPOSAL_APPEND_PAGE_KEYS,
+  additionalProperties: false,
+} as const;
+
+/** Canonical model schema for an exact full-page rewrite operation. */
+export const PROPOSAL_REWRITE_PAGE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    effect: { type: 'string', enum: ['update'] },
+    title: { type: 'string' },
+    bodyMarkdown: { type: 'string' },
+    baseMarkdown: { type: 'string' },
+    expectedContentHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  },
+  required: PROPOSAL_REWRITE_PAGE_KEYS,
   additionalProperties: false,
 } as const;
 
@@ -133,7 +168,10 @@ function assertNoManagedRegionMarker(markdown: string): void {
 }
 
 /** One public page mutation admitted to a scoped ingestion proposal. */
-export type ScopedProposalPage = ScopedProposalCreatePage | ScopedProposalUpdatePage;
+export type ScopedProposalPage =
+  | ScopedProposalCreatePage
+  | ScopedProposalAppendPage
+  | ScopedProposalRewritePage;
 
 /** External tool input for one ordered proposal page. */
 export interface StageProposalPageInput {
@@ -325,7 +363,7 @@ function parseInventoryEntries(raw: unknown, totalPages?: number): ProposalPageI
   });
 }
 
-/** Parse one complete create or compact update under the staged proposal contract. */
+/** Parse one complete create, compact append, or reviewed full rewrite. */
 export function parseProposalPage(
   raw: unknown,
   options: { opaqueMarkdownForSlug?: string } = {},
@@ -334,13 +372,23 @@ export function parseProposalPage(
   if (page.effect !== 'create' && page.effect !== 'update') {
     throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
   }
+  const appendUpdate = page.effect === 'update' && Object.hasOwn(page, 'appendMarkdown');
+  const rewriteUpdate = page.effect === 'update' && Object.hasOwn(page, 'bodyMarkdown');
+  if (page.effect === 'update' && appendUpdate === rewriteUpdate) {
+    throw new AgentJobProposalError(
+      'invalid_keys',
+      'page must contain exactly one update shape: appendMarkdown or title, bodyMarkdown, baseMarkdown, and expectedContentHash.',
+    );
+  }
   const allowed = page.effect === 'create'
     ? PROPOSAL_CREATE_PAGE_KEYS
-    : PROPOSAL_UPDATE_PAGE_KEYS;
+    : appendUpdate
+    ? PROPOSAL_APPEND_PAGE_KEYS
+    : PROPOSAL_REWRITE_PAGE_KEYS;
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
   const opaqueMarkdown = slug === options.opaqueMarkdownForSlug;
-  if (page.effect === 'update') {
+  if (page.effect === 'update' && appendUpdate) {
     const appendMarkdown = opaqueMarkdown
       ? readString(page.appendMarkdown, 'page.appendMarkdown')
       : readNonBlankString(page.appendMarkdown, 'page.appendMarkdown');
@@ -352,7 +400,23 @@ export function parseProposalPage(
     ? readString(page.bodyMarkdown, 'page.bodyMarkdown')
     : readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
   if (!opaqueMarkdown) assertNoManagedRegionMarker(bodyMarkdown);
-  return { slug, effect: page.effect, title, bodyMarkdown };
+  if (page.effect === 'create') return { slug, effect: page.effect, title, bodyMarkdown };
+  const baseMarkdown = readString(page.baseMarkdown, 'page.baseMarkdown');
+  const expectedContentHash = readString(page.expectedContentHash, 'page.expectedContentHash');
+  if (!/^[a-f0-9]{64}$/.test(expectedContentHash)) {
+    throw new AgentJobProposalError(
+      'invalid_page',
+      'page.expectedContentHash must be 64 lowercase hexadecimal characters.',
+    );
+  }
+  return {
+    slug,
+    effect: page.effect,
+    title,
+    bodyMarkdown,
+    baseMarkdown,
+    expectedContentHash,
+  };
 }
 
 /** Format one-based duplicate positions as a compact correction hint. */

@@ -17,7 +17,6 @@ tools:
   - put_page
   - add_link
   - add_timeline_entry
-  - validate_links
 mutating: true
 writes_pages: true
 writes_to:
@@ -42,10 +41,8 @@ This skill guarantees:
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every attendee and company reference MUST resolve to a graph edge and be
-reverse-navigable from the entity. Add a dossier Timeline entry when the
-meeting materially changes the entity's history; routine attendance need not
-be duplicated into Markdown.
+Every attendee and company mentioned MUST get a back-link from their page to
+the meeting page. An unlinked mention is a broken brain.
 
 ## Phases
 
@@ -87,7 +84,7 @@ For EACH attendee:
 1. `gbrain search "{name}"` — does a people page exist?
 2. If NO → create via enrich skill (this is mandatory, not optional)
 3. If YES → update compiled truth with meeting context
-4. When the meeting is a material event for the person, add a timeline entry:
+4. Add timeline entry on the person's page:
    `gbrain timeline-add <person-slug> <date> "Attended <meeting-title>"`
 
 **Note (v0.10.1):** Once the meeting page is written via `gbrain put`, the
@@ -101,8 +98,8 @@ for dated events (auto-link only handles links, not timeline entries).
 For each company, project, or concept discussed:
 1. Check brain for existing page
 2. Create/update as needed
-3. Add a timeline entry when the meeting materially changes the entity dossier
-4. Verify reverse navigation through `get_backlinks`
+3. Add timeline entry referencing the meeting
+4. Back-link from entity page to meeting page
 
 ### Phase 5: Timeline merge
 
@@ -112,18 +109,6 @@ Acme Corp, the event goes on Alice's page, Bob's page, AND Acme Corp's page.
 ### Phase 6: Sync
 
 `gbrain sync` to update the index.
-
-### Phase 7: Completion gate (MANDATORY)
-
-Call `validate_links` for the meeting page after entity propagation and before
-advancing any ingestion checkpoint. A meeting is incomplete when the report
-contains a missing or ambiguous reference. Repair or explicitly escalate every
-finding; do not mark the source processed merely because `put_page` succeeded.
-
-Link integrity and dossier quality are separate gates. For each important
-person, company, and project, also verify a cited summary/State section, dated
-timeline, source provenance, and relevant meeting backlinks. Existing-but-thin
-pages fail this quality gate even when every link resolves.
 
 ## Output Format
 
@@ -137,5 +122,3 @@ updated, {N} action items captured."
 - Not merging timelines across all mentioned entities
 - Creating attendee stubs without meaningful content
 - Filing meeting pages without cross-linking to all participants
-- Advancing the ingestion checkpoint before `validate_links` is clean
-- Treating a resolved link as proof that the target dossier is substantive

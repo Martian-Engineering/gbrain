@@ -926,7 +926,9 @@ function bindVerbatimCapturePage<T extends ParsedStageProposalPageCore>(
   ) return candidate;
   const page = candidate.page.effect === 'create'
     ? { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown }
-    : { ...candidate.page, appendMarkdown: binding.capturePageVerbatimMarkdown };
+    : 'appendMarkdown' in candidate.page
+    ? { ...candidate.page, appendMarkdown: binding.capturePageVerbatimMarkdown }
+    : { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown };
   return { ...candidate, page };
 }
 
@@ -943,7 +945,7 @@ function parseStoredProposalPage(raw: unknown, binding: JobBinding): ScopedPropo
   const contentKey = record.effect === 'create'
     ? 'bodyMarkdown'
     : record.effect === 'update'
-    ? 'appendMarkdown'
+    ? Object.hasOwn(record, 'appendMarkdown') ? 'appendMarkdown' : 'bodyMarkdown'
     : null;
   if (contentKey === null) return parseProposalPage(raw);
   if (record[contentKey] !== verbatimMarkdown) {
@@ -1181,7 +1183,7 @@ function assertCumulativeStageFits(
   return replay;
 }
 
-/** Load and freeze the exact private baseline for a compact update intent. */
+/** Load and freeze the exact private baseline for an existing-page update. */
 async function freezeProposalCandidate(
   engine: BrainEngine,
   binding: JobBinding,
@@ -1205,6 +1207,18 @@ async function freezeProposalCandidate(
     markdown: page.compiled_truth,
     contentHash: page.content_hash,
   };
+  if (
+    !('appendMarkdown' in candidate.page)
+    && (
+      candidate.page.baseMarkdown !== baseline.markdown
+      || candidate.page.expectedContentHash !== baseline.contentHash
+    )
+  ) {
+    throw new AgentJobProposalError(
+      'baseline_mismatch',
+      `The reviewed rewrite baseline for ${candidate.page.slug} does not match the current page; read it again and rebuild the proposal.`,
+    );
+  }
   return {
     ...candidate,
     baseline,
@@ -1260,8 +1274,9 @@ function digestFrozenProposalPage(
 ): string {
   if (page.effect === 'create') return digestProposalValue(page);
   if (!baseline) {
-    throw new AgentJobProposalError('baseline_unavailable', 'A compact update requires a private baseline.');
+    throw new AgentJobProposalError('baseline_unavailable', 'An update requires a private baseline.');
   }
+  if (!('appendMarkdown' in page)) return digestProposalValue(page);
   return digestProposalValue({
     page,
     baselineTitle: baseline.title,
