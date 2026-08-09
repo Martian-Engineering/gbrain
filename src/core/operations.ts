@@ -6076,12 +6076,16 @@ const get_agent_job: Operation = {
       job.status,
       agentMutatingToolNames(),
     );
+    const { readProposalCallRejections } = await import(
+      './minions/agent-job-proposal-rejections.ts'
+    );
     return {
       id: job.id,
       status: job.status,
       progress: job.progress,
       receipt,
       execution_evidence: executionEvidence,
+      proposal_call_rejections: await readProposalCallRejections(ctx.engine, job.id, job.status),
       result_text: typeof raw === 'string' ? raw : null,
       error: job.error_text,
       created_at: job.created_at,
@@ -6191,6 +6195,9 @@ const get_agent_job_execution_evidence: Operation = {
     const { readAgentJobExecutionEvidence } = await import(
       './minions/agent-job-evidence.ts'
     );
+    const { readProposalCallRejections } = await import(
+      './minions/agent-job-proposal-rejections.ts'
+    );
     return {
       id: job.id,
       status: job.status,
@@ -6200,6 +6207,11 @@ const get_agent_job_execution_evidence: Operation = {
         actualSourceId,
         job.status,
         agentMutatingToolNames(),
+      ),
+      proposal_call_rejections: await readProposalCallRejections(
+        ctx.engine,
+        job.id,
+        job.status,
       ),
     };
   },

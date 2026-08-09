@@ -511,7 +511,8 @@ export class MinionQueue {
       `UPDATE minion_jobs SET status = 'waiting', error_text = NULL,
         lock_token = NULL, lock_until = NULL, delay_until = NULL,
         finished_at = NULL, started_at = NULL, attempts_made = 0,
-        attempts_started = 0, stalled_counter = 0, updated_at = now()
+        attempts_started = 0, proposal_rejection_generation =
+          proposal_rejection_generation + 1, stalled_counter = 0, updated_at = now()
        WHERE id = $1 AND status IN ('failed', 'dead')
        RETURNING *`,
       [id]

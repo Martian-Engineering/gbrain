@@ -885,6 +885,7 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   max_attempts     INTEGER     NOT NULL DEFAULT 3,
   attempts_made    INTEGER     NOT NULL DEFAULT 0,
   attempts_started INTEGER     NOT NULL DEFAULT 0,
+  proposal_rejection_generation BIGINT NOT NULL DEFAULT 0,
   backoff_type     TEXT        NOT NULL DEFAULT 'exponential',
   backoff_delay    INTEGER     NOT NULL DEFAULT 1000,
   backoff_jitter   REAL        NOT NULL DEFAULT 0.2,
@@ -919,6 +920,7 @@ CREATE TABLE IF NOT EXISTS minion_jobs (
   CONSTRAINT chk_jitter_range CHECK (backoff_jitter >= 0.0 AND backoff_jitter <= 1.0),
   CONSTRAINT chk_attempts_order CHECK (attempts_made <= attempts_started),
   CONSTRAINT chk_nonnegative CHECK (attempts_made >= 0 AND attempts_started >= 0 AND stalled_counter >= 0 AND max_attempts >= 1 AND max_stalled >= 0),
+  CONSTRAINT chk_proposal_rejection_generation CHECK (proposal_rejection_generation >= 0 AND proposal_rejection_generation <= 9007199254740991),
   CONSTRAINT chk_depth_nonnegative CHECK (depth >= 0),
   CONSTRAINT chk_max_children_positive CHECK (max_children IS NULL OR max_children > 0),
   CONSTRAINT chk_timeout_positive CHECK (timeout_ms IS NULL OR timeout_ms > 0)
@@ -1067,6 +1069,27 @@ CREATE TABLE IF NOT EXISTS subagent_tool_executions (
   CONSTRAINT chk_subagent_tools_status CHECK (status IN ('pending','complete','failed'))
 );
 CREATE INDEX IF NOT EXISTS idx_subagent_tools_job ON subagent_tool_executions (job_id, status);
+
+-- Privacy-only evidence for proposal calls rejected before raw assistant
+-- blocks are durable. Keep this mirror in sync with schema.sql and PGLite.
+CREATE TABLE IF NOT EXISTS agent_job_proposal_call_rejections (
+  id                     BIGSERIAL PRIMARY KEY CHECK (id >= 1 AND id <= 9007199254740991),
+  job_id                 BIGINT NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+  sequence               BIGINT NOT NULL CHECK (sequence >= 1 AND sequence <= 9007199254740991),
+  attempt_generation     BIGINT NOT NULL DEFAULT 0 CHECK (attempt_generation >= 0 AND attempt_generation <= 9007199254740991),
+  attempt_no             BIGINT NOT NULL CHECK (attempt_no >= 1 AND attempt_no <= 9007199254740991),
+  turn_index             BIGINT NOT NULL CHECK (turn_index >= 0 AND turn_index <= 9007199254740991),
+  feedback_message_index BIGINT NOT NULL CHECK (feedback_message_index >= 0 AND feedback_message_index <= 9007199254740991),
+  error_code             TEXT NOT NULL CHECK (error_code ~ '^[a-z][a-z0-9_]{0,63}\$'),
+  calls                  JSONB NOT NULL CHECK (jsonb_typeof(calls) = 'array' AND jsonb_array_length(calls) <= 8 AND octet_length(calls::text) <= 16384),
+  omitted_call_count     INTEGER NOT NULL DEFAULT 0 CHECK (omitted_call_count >= 0 AND omitted_call_count <= 999),
+  omitted_call_count_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_agent_job_proposal_call_rejections_sequence UNIQUE (job_id, sequence),
+  CONSTRAINT uq_agent_job_proposal_call_rejections_feedback UNIQUE (job_id, feedback_message_index)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_call_rejections_job
+  ON agent_job_proposal_call_rejections (job_id, sequence);
 
 -- Exact ingestion proposal bodies live outside the bounded agent receipt.
 -- These rows are job-owned evidence only; they never mutate corpus state.
@@ -1696,6 +1719,7 @@ BEGIN
     ALTER TABLE minion_attachments ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_messages ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE agent_job_proposal_call_rejections ENABLE ROW LEVEL SECURITY;
     ALTER TABLE agent_job_proposal_fragments ENABLE ROW LEVEL SECURITY;
     ALTER TABLE agent_job_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE ingestion_proposal_authorities ENABLE ROW LEVEL SECURITY;

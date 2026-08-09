@@ -59,9 +59,12 @@ import { randomUUIDv7 } from 'bun';
 import { isContextLimitMessage } from '../error-classify.ts';
 import { ToolLoopContextProjectionError } from '../../ai/tool-loop-context.ts';
 import {
+  AgentJobProposalError,
   assertProposalToolTurnPersistable,
   assertProposalToolTurnPersistableForJob,
 } from '../agent-job-proposals.ts';
+import { recordRejectedProposalToolTurn } from '../agent-job-proposal-rejections.ts';
+import type { IngestionProposalToolBinding } from '../ingestion-proposal-tool-binding.ts';
 import { resolveSubagentMaxOutputTokens } from '../subagent-limits.ts';
 export { resolveSubagentMaxOutputTokens as resolveMaxOutputTokens } from '../subagent-limits.ts';
 
@@ -648,11 +651,15 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
       // Enforce proposal page count and byte limits before the assistant turn
       // makes its raw tool inputs durable in subagent_messages.
-      await assertProposalToolTurnPersistableForJob(
+      await guardProposalTurnBeforePersistence(
         engine,
-        ctx.id,
-        blocks,
-        proposalBinding,
+        {
+          jobId: ctx.id,
+          turnIndex: turnIdx,
+          feedbackMessageIndex: nextMessageIdx,
+          blocks,
+          proposalBinding,
+        },
       );
 
       // 3. Persist the assistant message BEFORE tool dispatch so replay
@@ -1013,12 +1020,25 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       nextTurnIdx: priorChatMessages.filter(m => m.role === 'assistant').length,
       nextMessageIdx,
     },
-    onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {
-      await assertProposalToolTurnPersistableForJob(
-        engine,
-        ctx.id,
+    onProposalTurnRejected: async (turnIdx, messageIdx, blocks, error) => {
+      await recordRejectedProposalToolTurn(engine, {
+        jobId: ctx.id,
+        turnIndex: turnIdx,
+        feedbackMessageIndex: messageIdx,
         blocks,
-        proposalBinding,
+        error,
+      });
+    },
+    onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {
+      await guardProposalTurnBeforePersistence(
+        engine,
+        {
+          jobId: ctx.id,
+          turnIndex: turnIdx,
+          feedbackMessageIndex: messageIdx,
+          blocks,
+          proposalBinding,
+        },
       );
       // Convert ChatBlock[] back to ContentBlock-shaped JSONB for persistence.
       // Storing the gateway's provider-neutral shape is the v2 content_blocks
@@ -1487,6 +1507,37 @@ async function persistMessage(engine: BrainEngine, jobId: number, msg: Persisted
       msg.model,
     ],
   );
+}
+
+/**
+ * Reject malformed proposal calls before their raw assistant turn is durable.
+ *
+ * The rejection ledger and retry guidance are the only durable record of the
+ * rejected turn; every other error still follows the ordinary worker path.
+ */
+async function guardProposalTurnBeforePersistence(
+  engine: BrainEngine,
+  input: {
+    jobId: number;
+    turnIndex: number;
+    feedbackMessageIndex: number;
+    blocks: readonly { type?: unknown; name?: unknown; toolName?: unknown; input?: unknown }[];
+    proposalBinding?: IngestionProposalToolBinding;
+  },
+): Promise<void> {
+  try {
+    await assertProposalToolTurnPersistableForJob(
+      engine,
+      input.jobId,
+      input.blocks,
+      input.proposalBinding,
+    );
+  } catch (error) {
+    if (error instanceof AgentJobProposalError) {
+      await recordRejectedProposalToolTurn(engine, { ...input, error });
+    }
+    throw error;
+  }
 }
 
 async function persistToolExecPending(

@@ -158,6 +158,35 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(events[4]).toBe('onAssistantTurn(1)'); // final assistant turn
   });
 
+  it('keeps the proposal guard before assistant persistence and exposes its typed rejection seam', async () => {
+    __setChatTransportForTests(async () => ({
+      text: '',
+      blocks: [{
+        type: 'tool-call',
+        toolCallId: 'oversized-stage',
+        toolName: 'brain_stage_ingestion_proposal_page',
+        input: { page: { bodyMarkdown: 'x'.repeat(196_608) } },
+      }] as ChatBlock[],
+      stopReason: 'tool_calls',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6',
+      providerId: 'anthropic',
+    }));
+    const events: string[] = [];
+
+    await expect(toolLoop({
+      initialMessages: [{ role: 'user', content: 'stage' }],
+      tools: [{ name: 'brain_stage_ingestion_proposal_page', description: 'stage', inputSchema: { type: 'object' } }],
+      toolHandlers: new Map(),
+      onAssistantTurn: async () => { events.push('assistant'); },
+      onProposalTurnRejected: async (_turn, _message, _blocks, error) => {
+        events.push(`rejected:${error.code}`);
+      },
+    })).rejects.toThrow(/maximum/i);
+
+    expect(events).toEqual(['rejected:stage_input_too_large']);
+  });
+
   it('persists the tool-result user turn via onToolResultTurn before the next chat', async () => {
     let turn = 0;
     __setChatTransportForTests(async () => {

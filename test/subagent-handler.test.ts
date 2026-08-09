@@ -148,7 +148,7 @@ describe('subagent handler happy path', () => {
       `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
       [ctx.id],
     );
-    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(tools).toHaveLength(0);
   });
 
@@ -173,7 +173,7 @@ describe('subagent handler happy path', () => {
       `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
       [ctx.id],
     );
-    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(tools).toHaveLength(0);
   });
 
