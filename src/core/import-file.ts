@@ -316,7 +316,7 @@ export async function importFromContent(
     withinTransaction?: boolean;
     /** Internal reviewed-body seam: do not derive graph edges from page text. */
     skipLinkExtraction?: boolean;
-    /** Internal source-artifact seam: preserve these reviewed body bytes verbatim. */
+    /** Internal approved-proposal seam: preserve these reviewed body bytes verbatim. */
     verbatimBodyMarkdown?: string;
   } = {},
 ): Promise<ImportResult> {
