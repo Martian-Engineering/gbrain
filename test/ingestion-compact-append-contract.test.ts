@@ -73,6 +73,35 @@ async function finalizeSingleAppend(appendMarkdown: string) {
   return { proposalJobId, staged, manifest };
 }
 
+/** Freeze one exact full-page rewrite against the current source page. */
+async function finalizeSingleRewrite(bodyMarkdown: string) {
+  const proposalJobId = await seedUpdateProposalJob();
+  const staged = await stageAgentJobProposalPage(engine, proposalJobId, {
+    artifact_id: 'artifact-1',
+    source_id: 'company',
+    admission_scope: 'Include source-grounded delivery notes.',
+    sequence: 1,
+    total_pages: 1,
+    page_inventory: [{ slug: 'sources/example', effect: 'update' }],
+    page: {
+      slug: 'sources/example',
+      effect: 'update',
+      title: 'Synthesized source',
+      bodyMarkdown,
+      baseMarkdown: '# Existing',
+      expectedContentHash: 'b'.repeat(64),
+    },
+  });
+  const manifest = await finalizeAgentJobProposal(engine, proposalJobId, {
+    artifact_id: 'artifact-1',
+    source_id: 'company',
+    admission_scope: 'Include source-grounded delivery notes.',
+    total_pages: 1,
+    summary: 'One full rewrite is ready for review.',
+  });
+  return { proposalJobId, staged, manifest };
+}
+
 async function seedApprovedApplyJob(
   frozen: Awaited<ReturnType<typeof finalizeSingleAppend>>,
   overrides: Record<string, unknown> = {},
@@ -88,8 +117,8 @@ async function seedApprovedApplyJob(
   });
 }
 
-describe('compact ingestion update contract', () => {
-  it('accepts only the exact append intent keys for updates', () => {
+describe('staged ingestion update contract', () => {
+  it('accepts exact append and full-rewrite update variants', () => {
     expect(parseProposalPage({
       slug: 'sources/example',
       effect: 'update',
@@ -106,14 +135,26 @@ describe('compact ingestion update contract', () => {
       appendMarkdown: 'New material.',
       expectedContentHash: 'a'.repeat(64),
     })).toThrow(AgentJobProposalError);
+    expect(parseProposalPage({
+      slug: 'sources/example',
+      effect: 'update',
+      title: 'Synthesized source',
+      bodyMarkdown: '# Synthesized source\n\nIntegrated durable truth.',
+      baseMarkdown: '# Existing',
+      expectedContentHash: 'a'.repeat(64),
+    })).toEqual({
+      slug: 'sources/example',
+      effect: 'update',
+      title: 'Synthesized source',
+      bodyMarkdown: '# Synthesized source\n\nIntegrated durable truth.',
+      baseMarkdown: '# Existing',
+      expectedContentHash: 'a'.repeat(64),
+    });
     expect(() => parseProposalPage({
       slug: 'sources/example',
       effect: 'update',
-      title: 'Private title',
-      bodyMarkdown: 'Private full body',
-      baseMarkdown: 'Private baseline',
-      expectedContentHash: 'a'.repeat(64),
-    })).toThrow(/exactly: slug, effect, appendMarkdown/i);
+      bodyMarkdown: 'Missing reviewed baseline.',
+    })).toThrow(/exactly: slug, effect, title, bodyMarkdown, baseMarkdown, expectedContentHash/i);
     expect(() => parseProposalPage({
       slug: 'sources/example',
       effect: 'update',
@@ -124,6 +165,33 @@ describe('compact ingestion update contract', () => {
       effect: 'update',
       appendMarkdown: '---\n## Timeline\n- 2026-08-08: hidden side effect',
     })).toThrow(/timeline or history sentinel/i);
+  });
+
+  it('rejects a rewrite whose reviewed baseline differs from the server page', async () => {
+    await seedUpdateProposalJob();
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, content_hash)
+       VALUES ('company', 'sources/example', 'note', 'Existing', '# Existing', $1)`,
+      ['b'.repeat(64)],
+    );
+    const jobId = await seedUpdateProposalJob();
+
+    await expect(stageAgentJobProposalPage(engine, jobId, {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include source-grounded delivery notes.',
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: [{ slug: 'sources/example', effect: 'update' }],
+      page: {
+        slug: 'sources/example',
+        effect: 'update',
+        title: 'Synthesized source',
+        bodyMarkdown: '# Synthesized source',
+        baseMarkdown: '# Stale baseline',
+        expectedContentHash: 'b'.repeat(64),
+      },
+    })).rejects.toMatchObject({ code: 'baseline_mismatch' });
   });
 
   it('keeps a large baseline private while returning a bounded frozen append plan', async () => {
@@ -537,5 +605,73 @@ describe('deterministic compact append application', () => {
     }
     const page = await engine.getPage('sources/example', { sourceId: 'company' });
     expect(page?.compiled_truth).toBe('# Existing');
+  });
+});
+
+describe('deterministic full rewrite application', () => {
+  it('applies and idempotently replays the exact reviewed full body', async () => {
+    await seedUpdateProposalJob();
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, content_hash)
+       VALUES ('company', 'sources/example', 'note', 'Existing', '# Existing', $1)`,
+      ['b'.repeat(64)],
+    );
+    const desired = '# Synthesized source\n\nOne coherent account of the durable facts.';
+    const frozen = await finalizeSingleRewrite(desired);
+    const applyJobId = await seedApprovedApplyJob(frozen);
+    const input = {
+      proposal_job_id: frozen.proposalJobId,
+      proposal_digest: frozen.manifest.proposalDigest,
+      sequence: 1,
+      page_digest: frozen.staged.digest,
+      source_id: 'company',
+    };
+
+    const applied = await applyAgentJobProposalPage(engine, applyJobId, input);
+    await engine.executeRaw(
+      `UPDATE ingestion_proposal_authority_pages
+          SET applied_write_through = '{"written":true}'::jsonb
+        WHERE proposal_id = $1 AND sequence = 1`,
+      [frozen.proposalJobId],
+    );
+    const replay = await applyAgentJobProposalPage(engine, applyJobId, input);
+    const page = await engine.getPage('sources/example', { sourceId: 'company' });
+
+    expect(applied).toMatchObject({ status: 'applied', effect: 'update', rebased: false });
+    expect(replay).toEqual({
+      ...applied,
+      status: 'already_applied',
+      write_through: { written: true },
+    });
+    expect(page).toMatchObject({
+      title: 'Synthesized source',
+      compiled_truth: desired,
+    });
+  });
+
+  it('rejects a stale rewrite without rebasing or mutation', async () => {
+    await seedUpdateProposalJob();
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, content_hash)
+       VALUES ('company', 'sources/example', 'note', 'Existing', '# Existing', $1)`,
+      ['b'.repeat(64)],
+    );
+    const frozen = await finalizeSingleRewrite('# Synthesized source');
+    await engine.executeRaw(
+      `UPDATE pages SET compiled_truth = '# Concurrent edit', content_hash = $1
+        WHERE source_id = 'company' AND slug = 'sources/example'`,
+      ['c'.repeat(64)],
+    );
+    const applyJobId = await seedApprovedApplyJob(frozen);
+
+    await expect(applyAgentJobProposalPage(engine, applyJobId, {
+      proposal_job_id: frozen.proposalJobId,
+      proposal_digest: frozen.manifest.proposalDigest,
+      sequence: 1,
+      page_digest: frozen.staged.digest,
+      source_id: 'company',
+    })).rejects.toMatchObject({ code: 'stale_page' });
+    expect(await engine.getPage('sources/example', { sourceId: 'company' }))
+      .toMatchObject({ title: 'Existing', compiled_truth: '# Concurrent edit' });
   });
 });

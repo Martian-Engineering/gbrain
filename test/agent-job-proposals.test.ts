@@ -910,6 +910,38 @@ describe('durable agent-job proposal staging', () => {
     });
   });
 
+  it('freezes the exact server-bound Markdown as a capture page rewrite', async () => {
+    await seedStoredPage('sources/example');
+    const baseline = await engine.getPage('sources/example', { sourceId: 'company' });
+    const verbatimMarkdown = '# Transcript\n\nSpeaker: Replacement source text.\n';
+    const jobId = await seedJob({
+      proposal_capture_page_verbatim_markdown: verbatimMarkdown,
+    });
+    await stage(jobId, 1, 1, {
+      slug: 'sources/example',
+      effect: 'update',
+      title: 'Verbatim transcript',
+      bodyMarkdown: '# Model summary',
+      baseMarkdown: baseline!.compiled_truth,
+      expectedContentHash: baseline!.content_hash!,
+    });
+    const manifest = await finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
+      total_pages: 1, summary: 'Ready.',
+    });
+    const owned = await getOwnedAgentJobProposal(
+      engine, jobId, 'lore-client', manifest.proposalDigest,
+    );
+    expect(owned.plan.proposedPages[0]).toEqual({
+      slug: 'sources/example',
+      effect: 'update',
+      title: 'Verbatim transcript',
+      bodyMarkdown: verbatimMarkdown,
+      baseMarkdown: baseline!.compiled_truth,
+      expectedContentHash: baseline!.content_hash!,
+    });
+  });
+
   it('rejects oversized server-bound verbatim capture Markdown', async () => {
     const jobId = await seedJob({
       proposal_capture_page_verbatim_markdown: 'x'.repeat(PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES + 1),

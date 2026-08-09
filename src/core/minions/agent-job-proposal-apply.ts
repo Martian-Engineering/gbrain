@@ -213,10 +213,39 @@ export async function applyAgentJobProposalPage(
     }
     const baseline = baselineFromFragment(proposal, applyBinding.capturePageSlug);
     if (!baseline || digestFrozenProposalPage(page, baseline) !== input.page_digest) {
-      throw new AgentJobProposalError('digest_mismatch', 'The selected append does not match its frozen private baseline.');
+      throw new AgentJobProposalError('digest_mismatch', 'The selected update does not match its frozen baseline.');
     }
 
     const firstPage = await readApplicablePage(tx, page.slug, input.source_id);
+    if (!('appendMarkdown' in page)) {
+      const rewrite = rewriteAttempt(firstPage, baseline, page);
+      if (rewrite.alreadyApplied) {
+        return recordAppliedPage(tx, input, page.slug, 'update', {
+          previousContentHash: firstPage.content_hash,
+          contentHash: firstPage.content_hash,
+          rebased: false,
+          status: 'already_applied',
+        });
+      }
+      let contentHash: string;
+      try {
+        contentHash = await persistRewrite(tx, applyBinding, applyJobId, firstPage, page);
+      } catch (error) {
+        if (error instanceof StalePageError) {
+          throw new AgentJobProposalError(
+            'stale_page',
+            'Page changed after review; no full rewrite was applied.',
+          );
+        }
+        throw error;
+      }
+      return recordAppliedPage(tx, input, page.slug, 'update', {
+        previousContentHash: firstPage.content_hash,
+        contentHash,
+        rebased: false,
+        status: 'applied',
+      });
+    }
     const firstAttempt = appendAttempt(firstPage.compiled_truth, baseline, page.appendMarkdown);
     if (firstAttempt.alreadyApplied) {
       return recordAppliedPage(tx, input, page.slug, 'update', {
@@ -567,6 +596,28 @@ export function appendAttempt(
   };
 }
 
+/** Require a full rewrite to match either its reviewed baseline or exact result. */
+export function rewriteAttempt(
+  current: Page & { content_hash: string },
+  baseline: PrivateUpdateBaseline,
+  rewrite: Extract<ScopedProposalPage, { effect: 'update'; bodyMarkdown: string }>,
+): { alreadyApplied: boolean } {
+  if (current.title === rewrite.title && current.compiled_truth === rewrite.bodyMarkdown) {
+    return { alreadyApplied: true };
+  }
+  if (
+    current.content_hash !== baseline.contentHash
+    || current.compiled_truth !== baseline.markdown
+    || current.title !== baseline.title
+  ) {
+    throw new AgentJobProposalError(
+      'stale_page',
+      'Page changed after review; no full rewrite was applied.',
+    );
+  }
+  return { alreadyApplied: false };
+}
+
 /** Create one frozen page from server-owned title/body data and record it atomically. */
 async function applyFrozenCreate(
   engine: BrainEngine,
@@ -679,6 +730,46 @@ async function persistAppend(
   return current.content_hash;
 }
 
+/** Persist one exact reviewed full-page rewrite with a conditional hash. */
+async function persistRewrite(
+  engine: BrainEngine,
+  binding: ApplyJobBinding,
+  applyJobId: number,
+  current: Page & { content_hash: string },
+  rewrite: Extract<ScopedProposalPage, { effect: 'update'; bodyMarkdown: string }>,
+): Promise<string> {
+  const tags = await engine.getTags(current.slug, { sourceId: current.source_id });
+  const content = serializeMarkdown(current.frontmatter, rewrite.bodyMarkdown, '', {
+    type: current.type,
+    title: rewrite.title,
+    tags,
+  });
+  const { isAvailable } = await import('../ai/gateway.ts');
+  const result = await importFromContent(engine, current.slug, content, {
+    sourceId: current.source_id,
+    expectedContentHash: current.content_hash,
+    noEmbed: !isAvailable('embedding'),
+    remote: true,
+    withinTransaction: true,
+    skipLinkExtraction: true,
+    verbatimBodyMarkdown: rewrite.bodyMarkdown,
+    writeContext: {
+      actor: binding.actor,
+      writeIntent: 'live_ingest',
+      batchId: `job:${applyJobId}`,
+      reason: 'approved ingestion proposal rewrite',
+    },
+  });
+  if (result.status !== 'imported') {
+    throw new AgentJobProposalError('apply_failed', `Rewrite import returned ${result.status}.`);
+  }
+  const applied = await readApplicablePage(engine, current.slug, current.source_id);
+  if (applied.title !== rewrite.title || applied.compiled_truth !== rewrite.bodyMarkdown) {
+    throw new AgentJobProposalError('apply_failed', 'Rewritten page does not match the frozen proposal.');
+  }
+  return applied.content_hash;
+}
+
 async function recordAppliedPage(
   engine: BrainEngine,
   input: ApplyProposalPageInput,
@@ -750,6 +841,15 @@ async function appliedReplayResult(
         'Previously applied update changed after its frozen receipt was recorded.',
       );
     }
+    if (
+      !('appendMarkdown' in page)
+      && (current.title !== page.title || current.compiled_truth !== page.bodyMarkdown)
+    ) {
+      throw new AgentJobProposalError(
+        'stale_page',
+        'Previously applied rewrite no longer matches its frozen body.',
+      );
+    }
   }
   return {
     status: 'already_applied',
@@ -804,8 +904,9 @@ export function digestFrozenProposalPage(
 ): string {
   if (page.effect === 'create') return digestProposalValue(page);
   if (!baseline) {
-    throw new AgentJobProposalError('baseline_unavailable', 'A compact update requires a private baseline.');
+    throw new AgentJobProposalError('baseline_unavailable', 'An update requires a private baseline.');
   }
+  if (!('appendMarkdown' in page)) return digestProposalValue(page);
   return digestProposalValue({
     page,
     baselineTitle: baseline.title,

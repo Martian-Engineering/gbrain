@@ -17,6 +17,7 @@ import {
   digestFrozenProposalPage,
   getOwnedApprovedProposalAuthority,
   readApplyJobBinding,
+  rewriteAttempt,
   type ApplyJobBinding,
   type ApprovedProposalAuthority,
   type StoredProposalFragment,
@@ -441,13 +442,17 @@ async function preflightFrozenInventory(
       }
       continue;
     }
-    if (!current || current.deleted_at || !baseline) {
+    if (!current || current.deleted_at || !current.content_hash || !baseline) {
       throw new AgentJobProposalError('page_unavailable', `Approved update target ${page.slug} is missing or deleted.`);
     }
-    if (current.title !== baseline.title) {
-      throw new AgentJobProposalError('stale_page', `Approved update target ${page.slug} changed title.`);
+    if ('appendMarkdown' in page) {
+      if (current.title !== baseline.title) {
+        throw new AgentJobProposalError('stale_page', `Approved update target ${page.slug} changed title.`);
+      }
+      appendAttempt(current.compiled_truth, baseline, page.appendMarkdown);
+    } else {
+      rewriteAttempt(current as typeof current & { content_hash: string }, baseline, page);
     }
-    appendAttempt(current.compiled_truth, baseline, page.appendMarkdown);
   }
   for (const entry of authority.plan.proposedTimelineEntries) {
     await assertVirtualPageExists(engine, authority.sourceId, planned, entry.pageSlug);

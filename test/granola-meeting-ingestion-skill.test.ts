@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { operations } from '../src/core/operations.ts';
 import { getSkillAgentBindings } from '../src/core/skill-catalog.ts';
@@ -8,6 +9,10 @@ import { BRAIN_TOOL_ALLOWLIST } from '../src/core/minions/tools/brain-allowlist.
 const skillsDir = join(import.meta.dir, '..', 'skills');
 const skill = readFileSync(
   join(skillsDir, 'granola-meeting-ingestion', 'SKILL.md'),
+  'utf8',
+);
+const meetingSkill = readFileSync(
+  join(skillsDir, 'meeting-ingestion', 'SKILL.md'),
   'utf8',
 );
 
@@ -44,7 +49,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.3.1');
+    expect(skill).toContain('version: 1.4.0');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -73,7 +78,7 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).not.toContain('exact `resolver` slug');
     expect(skill).not.toContain("source's `resolver` page");
     expect(skill).toContain("Lore's transcript Markdown as immutable source authority");
-    expect(skill).toContain('exact bound transcript before digesting the page');
+    expect(skill).toMatch(/exact\s+bound transcript before digesting the page/);
     expect(skill).toContain('artifact source-record read-back');
     expect(skill).not.toContain('local-mirror provenance statement');
     expect(skill).toContain('complete `transcript.md` is also frozen into');
@@ -93,7 +98,7 @@ describe('granola-meeting-ingestion skill', () => {
       /Derived pages\s+remain subject to the resolver's exclusions and privacy limits/,
     );
     expect(skill).toMatch(
-      /derived analyzed meeting page must follow the resolver-selected taxonomy/,
+      /derived analyzed meeting page must follow (?:the resolver-selected|that) taxonomy/i,
     );
     expect(skill).toContain('`partners/<partner>/meetings/`');
     expect(skill).not.toContain('Create or update a `meetings/` page containing:');
@@ -129,8 +134,12 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('{slug,effect:"create",title,bodyMarkdown}');
     expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
-    expect(skill).toMatch(/Never send a full update body, title, baseline, or content hash/);
-    expect(skill).toMatch(/server freezes the current private baseline/);
+    expect(skill).toContain(
+      '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
+    );
+    expect(skill).toContain('Append is an additive operation, not the only update operation');
+    expect(skill).toMatch(/Apply never rebases a full rewrite/);
+    expect(skill).toMatch(/server freezes the (?:current )?private\s+baseline/i);
     expect(skill).toContain('"status": "staged_proposal"');
     expect(skill).toContain('"proposalDigest": "64 lowercase hex characters"');
   });
@@ -199,8 +208,9 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"proposal_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"page_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"source_id": "verified source id"');
-    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected\s+content hash/);
-    expect(skill).toMatch(/Do not pre-read or reimplement its compare-and-swap\s+logic with `get_page` or `put_page`/);
+    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected\s+content hash/i);
+    expect(skill).toContain('Do not pre-read or reimplement its compare-and-swap logic');
+    expect(skill).toContain('`get_page` or `put_page`');
     expect(skill).toContain('"proposalSequence": 1');
     expect(skill).toContain('"status": "pending | applied | already_applied | failed"');
     expect(skill).toContain('"previousContentHash":');
@@ -245,13 +255,17 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toMatch(/Reject a non-canonical slug\s+before returning a proposal/);
   });
 
-  test('requires rich meeting enrichment before reporting success', () => {
-    expect(skill).toContain('Every unambiguous attendee must have a substantive `people/` dossier');
-    expect(skill).toContain('Every substantive organization, project, concept, and durable decision');
-    expect(skill).toContain('The meeting is not complete until every resolved entity dossier');
+  test('inherits meeting semantics without maintaining a second policy copy', () => {
+    expect(createHash('sha256').update(meetingSkill).digest('hex')).toBe(
+      '7767334c63ff3bd8e60cd4d7cd1d1b44f0d6b0a7e0ac411529a1d59cc0a7781b',
+    );
+    expect(skill).toContain('Read all of `skills/meeting-ingestion/SKILL.md`');
+    expect(skill).toContain('canonical meeting-ingestion skill controls');
+    expect(skill).toContain('does not define a second meeting-synthesis policy');
+    expect(skill).not.toContain('Every unambiguous attendee must have');
+    expect(skill).not.toContain('Add a dated timeline entry only when');
     expect(skill).toContain('Every page created or updated during enrichment must appear');
     expect(skill).toContain('Check `get_links`');
     expect(skill).toContain('Check `get_backlinks`');
-    expect(skill).not.toContain('For each notable, unambiguous attendee');
   });
 });

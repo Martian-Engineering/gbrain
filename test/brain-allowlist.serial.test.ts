@@ -22,9 +22,10 @@ import type { GBrainConfig } from '../src/core/config.ts';
 import type { ToolCtx } from '../src/core/minions/types.ts';
 import { assertProposalToolTurnPersistableForJob } from '../src/core/minions/agent-job-proposals.ts';
 import {
+  PROPOSAL_APPEND_PAGE_JSON_SCHEMA,
   PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
   PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
-  PROPOSAL_UPDATE_PAGE_JSON_SCHEMA,
+  PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
 } from '../src/core/ingestion-proposal-contract.ts';
 
 let engine: PGLiteEngine;
@@ -189,9 +190,10 @@ describe('buildBrainTools', () => {
       enum: ['create', 'update'],
     });
 
-    const [createPage, updatePage] = schema.properties.page.anyOf;
+    const [createPage, appendPage, rewritePage] = schema.properties.page.anyOf;
     expect(createPage).toEqual(PROPOSAL_CREATE_PAGE_JSON_SCHEMA);
-    expect(updatePage).toEqual(PROPOSAL_UPDATE_PAGE_JSON_SCHEMA);
+    expect(appendPage).toEqual(PROPOSAL_APPEND_PAGE_JSON_SCHEMA);
+    expect(rewritePage).toEqual(PROPOSAL_REWRITE_PAGE_JSON_SCHEMA);
     expect(createPage.additionalProperties).toBe(false);
     expect(createPage.required).toEqual(['slug', 'effect', 'title', 'bodyMarkdown']);
     expect(createPage.properties.effect).toEqual({ type: 'string', enum: ['create'] });
@@ -202,13 +204,21 @@ describe('buildBrainTools', () => {
       bodyMarkdown: { type: 'string' },
     });
 
-    expect(updatePage.additionalProperties).toBe(false);
-    expect(updatePage.required).toEqual(['slug', 'effect', 'appendMarkdown']);
-    expect(updatePage.properties.effect).toEqual({ type: 'string', enum: ['update'] });
-    expect(updatePage.properties).toEqual({
+    expect(appendPage.additionalProperties).toBe(false);
+    expect(appendPage.required).toEqual(['slug', 'effect', 'appendMarkdown']);
+    expect(appendPage.properties.effect).toEqual({ type: 'string', enum: ['update'] });
+    expect(appendPage.properties).toEqual({
       slug: { type: 'string' },
       effect: { type: 'string', enum: ['update'] },
       appendMarkdown: { type: 'string' },
+    });
+    expect(rewritePage.additionalProperties).toBe(false);
+    expect(rewritePage.required).toEqual([
+      'slug', 'effect', 'title', 'bodyMarkdown', 'baseMarkdown', 'expectedContentHash',
+    ]);
+    expect(rewritePage.properties.expectedContentHash).toEqual({
+      type: 'string',
+      pattern: '^[a-f0-9]{64}$',
     });
   });
 

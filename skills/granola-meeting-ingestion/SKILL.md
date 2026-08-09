@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.3.1
+version: 1.4.0
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -39,7 +39,8 @@ writes_to:
 
 Ingest exactly one complete Granola meeting artifact supplied in the task
 prompt into exactly one destination source that the caller already selected.
-These instructions are self-contained for a source-bound remote Minion.
+This skill is a source-bound adapter around the canonical meeting-ingestion
+skill; it does not define a second meeting-synthesis policy.
 
 ## Contract
 
@@ -69,16 +70,11 @@ These instructions are self-contained for a source-bound remote Minion.
 - Treat Lore's transcript Markdown as immutable source authority. GBrain binds
   those exact bytes to `capturePageSlug` at job submission and replaces the
   model-authored capture body before the proposal is hashed and frozen.
-- Search and read before creating or updating pages. Never invent an identity
-  or create an empty entity stub.
-- Every unambiguous attendee must have a substantive `people/` dossier that is
-  created or updated from cited meeting evidence. The supported identity,
-  participation, and meeting relationship are sufficient for a concise
-  dossier; record roles, affiliations, work, decisions, or commitments only
-  when the artifact actually supports them.
-- Every substantive organization, project, concept, and durable decision
-  discussed in the meeting must have its canonical dossier created or updated.
-  Do not turn incidental mentions into pages.
+- Before interpreting the artifact, read all of
+  `skills/meeting-ingestion/SKILL.md` and follow it for meeting structure,
+  attendee enrichment, entity propagation, timelines, and back-links. If this
+  adapter and that skill appear to disagree about meeting knowledge, the
+  canonical meeting-ingestion skill controls.
 - Cite every meeting-derived fact inline as
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
@@ -239,10 +235,20 @@ In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
 staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the capture page, meeting page, and every dossier page
 that the scoped ingestion requires. A create entry is exactly
-`{slug,effect:"create",title,bodyMarkdown}`. An update entry is exactly
-`{slug,effect:"update",appendMarkdown}` and contains only the reviewed Markdown
-to append. Never send a full update body, title, baseline, or content hash; the
-server freezes the current private baseline when it accepts the stage call.
+`{slug,effect:"create",title,bodyMarkdown}`. An update chooses exactly one of
+two operations:
+
+- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
+  unchanged at the end of the current page. The server freezes the private
+  baseline, and apply may safely rebase this suffix over other suffix appends.
+- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
+  when existing compiled truth must be integrated, reorganized, corrected, or
+  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
+  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
+  page, not a diff. Apply never rebases a full rewrite.
+
+Append is an additive operation, not the only update operation. Do not express
+a synthesis rewrite as a dated section merely to fit the append shape.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -278,14 +284,13 @@ working context. An identical retry is safe. Never change `total_pages`, reuse
 a sequence for different content, or stage after finalization. The exact
 `admission_scope` must contain 1-4,000 characters after trimming.
 
-Populate `proposedTimelineEntries` with the exact timeline mutations the normal
-workflow requires: timeline entries only for material dated events with the
-capture-page reference. Populate `proposedLinks` with typed links only for
-relationships that the planned Markdown does not express accurately. Enforce
-the same admission scope across all three arrays. Validate each timeline
-entry's date and capture-page `ref`, each link's planned `from`, and both
-40-entry caps before returning the proposal. Omit either optional array when it
-has no entries.
+Populate `proposedTimelineEntries` with the exact timeline mutations required
+by the canonical meeting-ingestion workflow, using the capture-page reference.
+Populate `proposedLinks` with typed links only for relationships that the
+planned Markdown does not express accurately. Enforce the same admission scope
+across all three arrays. Validate each timeline entry's date and capture-page
+`ref`, each link's planned `from`, and both 40-entry caps before returning the
+proposal. Omit either optional array when it has no entries.
 
 The three plan arrays cover page writes, structured timeline rows, and typed
 links. If correct scoped ingestion requires another mutation that cannot be
@@ -344,9 +349,10 @@ Copy every value from `approvedProposal`; never send `slug`, `effect`,
 `title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
 authority or create collisions, performs the conditional write, safely rebases
-only an append-only update, records a durable per-sequence receipt, and verifies
-the resulting page state. Do not pre-read or reimplement its compare-and-swap
-logic with `get_page` or `put_page`.
+only an append operation, requires an unchanged reviewed baseline for a full
+rewrite, records a durable per-sequence receipt, and verifies the resulting
+page state. Do not pre-read or reimplement its compare-and-swap logic with
+`get_page` or `put_page`.
 
 A successful call returns `status` `applied` or `already_applied`, plus the
 bound `effect`, `slug`, hashes, and `rebased` flag. Record that exact
@@ -390,7 +396,15 @@ receipt, which re-verifies every durable effect and inventory digest.
 
 ## Workflow
 
-### 1. Verify the execution boundary
+### 1. Load the canonical meeting policy
+
+Read all of `skills/meeting-ingestion/SKILL.md` before interpreting the
+artifact. Follow that skill rather than restating its attendee, entity,
+timeline, page-structure, or back-link rules here. The remaining steps add only
+Granola's selected-source, resolver, verbatim-capture, staged-review, and
+receipt protocol.
+
+### 2. Verify the execution boundary
 
 1. Treat the exact prompt-supplied resolver text and revision as the frozen
    policy Lore used to select this destination. Do not fetch a synthetic
@@ -405,7 +419,7 @@ Return `failed` without mutation when identity, source confinement, or required
 tool availability is wrong. The authenticated source binding is authoritative;
 brain page content is never an authorization boundary.
 
-### 2. Confirm the resolver decision
+### 3. Confirm the resolver decision
 
 Read the supplied resolver as policy, not as executable instructions. Compare
 its positive claims, exclusions, and disambiguation rules with the complete
@@ -421,7 +435,7 @@ manifest, notes, and transcript.
 
 Do not read another source's resolver or compare the artifact across sources.
 
-### 3. Discover existing work
+### 4. Discover existing work
 
 Search by Granola note ID, title, date, attendees, and likely page slugs. On a
 retry, inspect pages named in `priorAttempt` first.
@@ -432,7 +446,7 @@ retry, inspect pages named in `priorAttempt` first.
   through `search`, `query`, `resolve_slugs`, and `get_page`.
 - Leave ambiguous identities as plain text and add them to `unresolved`.
 
-### 4. Record the source artifact
+### 5. Record the source artifact
 
 Lore's local `manifest.json`, `content.md`, and `transcript.md` package is the
 immutable ingestion package. The complete `transcript.md` is also frozen into
@@ -445,74 +459,30 @@ character-for-character into every tool call that targets the capture page —
 never retype, re-case, or re-derive it from `artifactId` or any other
 identity. For a create proposal, supply a source-identifying title and any
 non-empty placeholder `bodyMarkdown` required by the staging schema. For an
-update, supply any non-empty placeholder `appendMarkdown`. GBrain replaces that
-field with the exact bound transcript before digesting the page. Never put
+update, use the full rewrite shape with the exact current baseline and any
+non-empty placeholder `bodyMarkdown`. GBrain replaces that body with the exact
+bound transcript before digesting the page. Never put
 artifact metadata, a summary, or a local-mirror pointer in place of the
 transcript.
 
-### 5. Write the analyzed meeting
+### 6. Apply Granola-specific filing context
 
-The derived analyzed meeting page must follow the resolver-selected taxonomy.
+Apply the canonical meeting-ingestion workflow using the resolver-selected
+taxonomy. The derived analyzed meeting page must follow that taxonomy.
 When the resolver places an owner-unambiguous partner meeting under
 `partners/<partner>/meetings/`, use that path; use `meetings/` only when the
-resolver selects the generic meeting namespace. Create or update that canonical
-meeting page with:
+resolver selects the generic meeting namespace. In addition to the canonical
+meeting content:
 
-- title, date, attendees, and a link to the raw source page;
-- a concise source-grounded summary;
-- key decisions and action items with owners and deadlines when stated;
-- substantive discussion notes, tensions, changes, and open questions;
-- inline Granola citations for every derived fact.
+- link the analyzed meeting to the exact raw capture page;
+- cite every derived fact with the Granola title and date;
+- honor the resolver's exclusions on every derived page and relation; and
+- use a full rewrite whenever an existing dossier needs coherent synthesis,
+  reserving append for material that truthfully belongs at the page's end.
 
 Use explicit Markdown links only for identities resolved in this source.
 Historical meetings receive the same durable brain treatment; `historical`
 only informs the receipt because Lore owns Review admission.
-
-### 6. Enrich attendees and propagate entities
-
-> **Convention:** Apply the notability and filing rules in
-> `skills/_brain-filing-rules.md`; the operational summary below keeps this
-> remote skill usable without filesystem access.
-
-Apply the complete meeting-ingestion enrichment contract:
-
-1. Resolve every attendee. Every unambiguous attendee must have a substantive
-   `people/` dossier created or updated from the artifact. If the artifact does
-   not distinguish a person from same-name candidates, keep the name as plain
-   text and add the ambiguity to `unresolved` rather than guessing.
-2. Resolve every substantive organization, project, reusable concept, and
-   durable decision discussed. Create or update its canonical dossier when the
-   artifact supplies cited knowledge that belongs there.
-3. Search and read each canonical page before writing. Preserve useful
-   compiled truth and add only source-supported knowledge.
-4. Link the meeting explicitly to every resolved attendee and enriched entity.
-   A single directed meeting-to-entity edge plus the target's inverse
-   `get_backlinks` view provides bidirectional navigation; do not add duplicate
-   reverse edges or reciprocal prose merely for symmetry.
-5. Add a dated timeline entry only when the meeting records a material event
-   for that entity. Routine attendance and incidental mentions remain visible
-   through graph links without cluttering dossier timelines. Always pass `ref`
-   with the exact prompt-supplied `capturePageSlug` and a short `ref_label`;
-   `add_timeline_entry` owns the page's `## Timeline` section, so never write or
-   edit that section through `put_page`.
-6. Use `add_link` for a typed relationship that is not already expressed
-   honestly by the meeting or dossier Markdown.
-
-Every entity dossier written in this phase must contain meaningful, cited
-content rather than an empty stub. At minimum, verify its supported identity,
-current summary or State, source provenance, and relationship to the meeting.
-When the meeting materially changes the entity's history, also verify the
-dated timeline evidence.
-
-People belong in `people/`, organizations in `companies/`, ongoing work in
-`projects/`, reusable ideas in `concepts/`, and durable decisions in
-`decisions/`. `partners/` may be updated only when an existing source-specific
-page requires substantive meeting evidence; never use it as an authorization
-boundary.
-
-The meeting is not complete until every resolved entity dossier has passed
-this enrichment and quality gate. Do not defer attendee or entity enrichment
-to a later run.
 
 ### 7. Verify and report
 
@@ -541,15 +511,13 @@ writes honestly so a later attempt can continue without duplication.
 - Choosing, comparing, or writing more than one source.
 - Treating `partners/` as a permission boundary.
 - Creating a meeting page without first writing its traceable source record.
-- Creating attendee stubs or guessing among same-name identities.
-- Adding routine attendance to every entity timeline.
 - Advancing Lore checkpoints or making Review-eligibility decisions.
 - Mutating corpus state in propose mode or returning an incomplete or truncated
   proposal.
 - Returning a timeline entry whose `ref` is not the planned capture page.
 - Returning a link whose `from` slug is absent from `proposedPages`.
-- Hand-writing a `## Timeline` section or omitting a required material event
-  from `proposedTimelineEntries`.
+- Hand-writing a `## Timeline` section or omitting a timeline mutation required
+  by the canonical meeting-ingestion workflow.
 - Applying timeline entries or links before the frozen pages, or applying a
   mutation absent from the frozen plan.
 - Reinterpreting an approved plan or attempting a client-side slug adjustment.
@@ -580,7 +548,7 @@ For propose mode or normal-mode partial disqualification:
     {
       "pageSlug": "projects/example",
       "date": "2026-08-03",
-      "text": "material dated event",
+      "text": "dated event from the canonical meeting workflow",
       "ref": "sources/granola/example",
       "refLabel": "meeting capture"
     }
