@@ -950,90 +950,18 @@ describe('durable agent-job proposal staging', () => {
     expect(PROPOSAL_MANIFEST_MAX_BYTES).toBe(256 * 1024);
   });
 
-  it('accepts an escaped canonical plan exactly at the shared ceiling', async () => {
-    const jobId = await seedJob();
-    const pageCount = 9;
-    const pages = Array.from({ length: pageCount }, (_, index) =>
-      createPage(index === 0 ? 'sources/example' : `sources/boundary-${index + 1}`, 'x'));
-    const basePlan = {
-      artifactId: 'artifact-1',
-      sourceId: 'company',
-      admissionScope: 'Include project delivery notes.',
-      summary: 'Boundary.',
-      proposedPages: pages,
-      proposedTimelineEntries: [],
-      proposedLinks: [],
-      unresolved: [],
-    };
-    let remaining = PROPOSAL_ESCAPED_PLAN_MAX_BYTES -
-      Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8');
-    if (remaining % 2 === 1) {
-      const boundaryPage = pages[pageCount - 1]!;
-      if (boundaryPage.effect !== 'create') throw new Error('Expected create boundary page');
-      boundaryPage.bodyMarkdown += 'y';
-      remaining -= 1;
-    }
-    const newlinesPerPage = Math.floor(remaining / 2 / pageCount);
-    let leftoverNewlines = remaining / 2;
-    for (const page of pages) {
-      if (page.effect !== 'create') throw new Error('Expected create boundary page');
-      const count = Math.min(newlinesPerPage, leftoverNewlines);
-      page.bodyMarkdown += '\n'.repeat(count);
-      leftoverNewlines -= count;
-    }
-    const finalPage = pages[pageCount - 1]!;
-    if (finalPage.effect !== 'create') throw new Error('Expected create boundary page');
-    finalPage.bodyMarkdown += '\n'.repeat(leftoverNewlines);
-    const inventory = pageInventory(...pages);
-    for (let sequence = 1; sequence <= pageCount; sequence++) {
-      await stage(jobId, sequence, pageCount, pages[sequence - 1]!, undefined, inventory);
-    }
-
-    const manifest = await finalizeAgentJobProposal(engine, jobId, {
-      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
-      total_pages: pageCount,
-      summary: 'Boundary.',
-    });
-    const owned = await getOwnedAgentJobProposal(
-      engine,
-      jobId,
-      'lore-client',
-      manifest.proposalDigest,
-    );
-    expect(Buffer.byteLength(JSON.stringify(canonicalProposalJson(owned.plan)), 'utf8'))
+  it('accepts an escaped canonical plan exactly at the shared ceiling', () => {
+    const canonical = JSON.stringify('\\'.repeat(393_214) + 'yy');
+    expect(() => proposalTesting.assertCanonicalProposalJsonWithinLimits(canonical)).not.toThrow();
+    expect(Buffer.byteLength(JSON.stringify(canonical), 'utf8'))
       .toBe(PROPOSAL_ESCAPED_PLAN_MAX_BYTES);
-    expect(Buffer.byteLength(canonicalProposalJson(owned.plan), 'utf8'))
-      .toBeLessThan(PROPOSAL_AGGREGATE_MAX_BYTES);
-  }, 15_000);
+    expect(Buffer.byteLength(canonical, 'utf8')).toBe(PROPOSAL_AGGREGATE_MAX_BYTES);
+  });
 
-  it('rejects a raw plan whose JSON-string escaped representation exceeds the escaped ceiling', async () => {
-    const jobId = await seedJob();
-    const pageCount = 9;
-    const pages = Array.from({ length: pageCount }, (_, index) =>
-      createPage(index === 0 ? 'sources/example' : `sources/escaped-${index + 1}`, 'x'));
-    const inventory = pageInventory(...pages);
-    const basePlan = {
-      artifactId: 'artifact-1', sourceId: 'company',
-      admissionScope: 'Include project delivery notes.', summary: 'Escaped boundary.',
-      proposedPages: pages, proposedTimelineEntries: [], proposedLinks: [], unresolved: [],
-    };
-    const neededNewlines = Math.floor((PROPOSAL_ESCAPED_PLAN_MAX_BYTES
-      - Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8')) / 2) + 1;
-    let remaining = neededNewlines;
-    for (const page of pages) {
-      if (page.effect !== 'create') throw new Error('Expected create boundary page');
-      const count = Math.min(Math.ceil(neededNewlines / pageCount), remaining);
-      page.bodyMarkdown += '\n'.repeat(count);
-      remaining -= count;
-    }
-    for (let sequence = 1; sequence <= pageCount; sequence++) {
-      await stage(jobId, sequence, pageCount, pages[sequence - 1]!, undefined, inventory);
-    }
-
-    await expect(finalizeAgentJobProposal(engine, jobId, {
-      artifact_id: 'artifact-1', source_id: 'company',
-      admission_scope: 'Include project delivery notes.',
-      total_pages: pageCount, summary: 'Escaped boundary.',
-    })).rejects.toMatchObject({ code: 'proposal_too_large' });
-  }, 15_000);
+  it('rejects a raw plan whose JSON-string escaped representation exceeds the escaped ceiling', () => {
+    const canonical = JSON.stringify('\\'.repeat(393_215));
+    expect(Buffer.byteLength(canonical, 'utf8')).toBe(PROPOSAL_AGGREGATE_MAX_BYTES);
+    expect(() => proposalTesting.assertCanonicalProposalJsonWithinLimits(canonical))
+      .toThrow(/Escaped finalized proposal/);
+  });
 });

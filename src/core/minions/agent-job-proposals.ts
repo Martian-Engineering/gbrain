@@ -220,8 +220,37 @@ function parseStageProposalPageCoreForPersistence(
   }
 }
 
-/** Test seams for the fail-closed pre-persistence parser boundary. */
-export const __testing = { parseStageProposalPageCoreForPersistence };
+/** Test seams for fail-closed proposal persistence boundaries. */
+export const __testing = {
+  parseStageProposalPageCoreForPersistence,
+  assertProposalPlanWithinLimits,
+  assertCanonicalProposalJsonWithinLimits,
+};
+
+/** Enforce both canonical and transport-escaped finalized plan ceilings. */
+function assertProposalPlanWithinLimits(plan: ScopedAdmissionProposalPlan): string {
+  const planJson = canonicalProposalJson(plan);
+  assertCanonicalProposalJsonWithinLimits(planJson);
+  return planJson;
+}
+
+/** Enforce finalized-plan ceilings on an already canonicalized value. */
+function assertCanonicalProposalJsonWithinLimits(planJson: string): void {
+  const planBytes = Buffer.byteLength(planJson, 'utf8');
+  if (planBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'proposal_too_large',
+      `Finalized proposal is ${planBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
+    );
+  }
+  const escapedPlanBytes = Buffer.byteLength(JSON.stringify(planJson), 'utf8');
+  if (escapedPlanBytes > PROPOSAL_ESCAPED_PLAN_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'proposal_too_large',
+      `Escaped finalized proposal is ${escapedPlanBytes} UTF-8 bytes; maximum is ${PROPOSAL_ESCAPED_PLAN_MAX_BYTES}.`,
+    );
+  }
+}
 
 /**
  * Validate page-staging calls before an assistant turn is persisted.
@@ -485,21 +514,7 @@ export async function finalizeAgentJobProposal(
       proposedLinks: links,
       unresolved,
     };
-    const planJson = canonicalProposalJson(plan);
-    const planBytes = Buffer.byteLength(planJson, 'utf8');
-    if (planBytes > PROPOSAL_AGGREGATE_MAX_BYTES) {
-      throw new AgentJobProposalError(
-        'proposal_too_large',
-        `Finalized proposal is ${planBytes} UTF-8 bytes; maximum is ${PROPOSAL_AGGREGATE_MAX_BYTES}.`,
-      );
-    }
-    const escapedPlanBytes = Buffer.byteLength(JSON.stringify(planJson), 'utf8');
-    if (escapedPlanBytes > PROPOSAL_ESCAPED_PLAN_MAX_BYTES) {
-      throw new AgentJobProposalError(
-        'proposal_too_large',
-        `Escaped finalized proposal is ${escapedPlanBytes} UTF-8 bytes; maximum is ${PROPOSAL_ESCAPED_PLAN_MAX_BYTES}.`,
-      );
-    }
+    const planJson = assertProposalPlanWithinLimits(plan);
     const proposalDigest = digestProposalValue(plan);
     const applicationInventory = buildProposalApplicationDigestInventory(
       pageDigests,
