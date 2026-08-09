@@ -15,7 +15,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
 import { writePageThrough } from '../src/core/write-through.ts';
-import { importFromContent } from '../src/core/import-file.ts';
+import { importFile, importFromContent } from '../src/core/import-file.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from '../src/core/markdown.ts';
 
 let engine: PGLiteEngine;
@@ -67,6 +67,29 @@ function walkFiles(dir: string): string[] {
 }
 
 describe('writePageThrough', () => {
+  test('reimporting the canonical write-through preserves exact body bytes', async () => {
+    await engine.setConfig('sync.repo_path', brainDir);
+    const slug = 'sources/granola/exact-transcript';
+    const body = 'Speaker: Keep this final newline exact.\n';
+    const content = `---\ntitle: Exact transcript\ntype: source\n---\n\n${body}`;
+    await importFromContent(engine, slug, content, {
+      noEmbed: true,
+      sourceId: 'default',
+      sourcePath: `${slug}.md`,
+      verbatimBodyMarkdown: body,
+    });
+
+    const writeThrough = await writePageThrough(engine, slug, { sourceId: 'default' });
+    expect(writeThrough.written).toBe(true);
+
+    const reimported = await importFile(engine, writeThrough.path!, `${slug}.md`, {
+      noEmbed: true,
+      sourceId: 'default',
+    });
+    expect(reimported.status).toBe('skipped');
+    expect((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth).toBe(body);
+  });
+
   test('writes the file rendered from the saved row; no .tmp leftover', async () => {
     await engine.setConfig('sync.repo_path', brainDir);
     const slug = 'wiki/ideas/2026-01-01-lsd-foo-abc123';

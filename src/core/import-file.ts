@@ -8,7 +8,7 @@ import type {
   PageWriteContext,
 } from './engine.ts';
 import { StalePageError } from './engine.ts';
-import { parseMarkdown, stripTimelineSection } from './markdown.ts';
+import { parseMarkdown, serializePageToMarkdown, stripTimelineSection } from './markdown.ts';
 import {
   importTimelineSection,
   type TimelineImportResult,
@@ -1114,6 +1114,29 @@ export async function importFromFile(
   // short-circuit, so we don't log noise for failed imports.
   if (usedFrontmatterFallback) {
     logSlugFallback(resolvedSlug, relativePath);
+  }
+
+  // A file rendered by writePageThrough is already the canonical projection
+  // of this row. Re-parsing it would normalize body-edge whitespace and can
+  // mutate exact approved content on GBrain's next filesystem sync.
+  const current = await engine.getPage(resolvedSlug, { sourceId: opts.sourceId });
+  if (current) {
+    const tags = await engine.getTags(resolvedSlug, { sourceId: opts.sourceId });
+    if (!opts.forceRechunk && serializePageToMarkdown(current, tags) === content) {
+      return {
+        slug: resolvedSlug,
+        status: 'skipped',
+        chunks: 0,
+        parsedPage: {
+          type: current.type,
+          title: current.title,
+          compiled_truth: current.compiled_truth,
+          timeline: current.timeline,
+          frontmatter: current.frontmatter,
+          tags,
+        },
+      };
+    }
   }
 
   // Pass the resolved slug explicitly so that any future change to
