@@ -6471,6 +6471,76 @@ export const MIGRATIONS: Migration[] = [
       `,
     },
   },
+  {
+    version: 140,
+    name: 'agent_job_proposal_call_rejections',
+    // This ledger deliberately stores only the shape of rejected proposal
+    // calls. Proposal values, source/artifact identifiers, and raw provider
+    // errors remain outside the rejection record.
+    idempotent: true,
+    sql: `
+      ALTER TABLE minion_jobs
+        ADD COLUMN IF NOT EXISTS proposal_rejection_generation BIGINT NOT NULL DEFAULT 0
+        CHECK (proposal_rejection_generation >= 0 AND proposal_rejection_generation <= 9007199254740991);
+      CREATE TABLE IF NOT EXISTS agent_job_proposal_call_rejections (
+        id BIGSERIAL PRIMARY KEY CHECK (id >= 1 AND id <= 9007199254740991),
+        job_id BIGINT NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+        sequence BIGINT NOT NULL CHECK (sequence >= 1 AND sequence <= 9007199254740991),
+        attempt_generation BIGINT NOT NULL DEFAULT 0 CHECK (attempt_generation >= 0 AND attempt_generation <= 9007199254740991),
+        attempt_no BIGINT NOT NULL CHECK (attempt_no >= 1 AND attempt_no <= 9007199254740991),
+        turn_index BIGINT NOT NULL CHECK (turn_index >= 0 AND turn_index <= 9007199254740991),
+        feedback_message_index BIGINT NOT NULL CHECK (feedback_message_index >= 0 AND feedback_message_index <= 9007199254740991),
+        error_code TEXT NOT NULL CHECK (error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
+        calls JSONB NOT NULL CHECK (jsonb_typeof(calls) = 'array' AND jsonb_array_length(calls) <= 8 AND octet_length(calls::text) <= 16384),
+        omitted_call_count INTEGER NOT NULL DEFAULT 0 CHECK (omitted_call_count >= 0 AND omitted_call_count <= 999),
+        omitted_call_count_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT uq_agent_job_proposal_call_rejections_sequence UNIQUE (job_id, sequence),
+        CONSTRAINT uq_agent_job_proposal_call_rejections_feedback UNIQUE (job_id, feedback_message_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_call_rejections_job
+        ON agent_job_proposal_call_rejections (job_id, sequence);
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT EXISTS (
+          SELECT 1 FROM pg_roles pr
+           WHERE pg_has_role(current_user, pr.oid, 'USAGE')
+             AND (pr.rolbypassrls OR pr.rolsuper)
+        ) INTO has_bypass;
+        IF NOT has_bypass THEN
+          RAISE EXCEPTION 'v140 agent_job_proposal_call_rejections: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role).', current_user;
+        END IF;
+        ALTER TABLE agent_job_proposal_call_rejections ENABLE ROW LEVEL SECURITY;
+      END $$;
+    `,
+    sqlFor: {
+      pglite: `
+        ALTER TABLE minion_jobs
+          ADD COLUMN IF NOT EXISTS proposal_rejection_generation BIGINT NOT NULL DEFAULT 0
+          CHECK (proposal_rejection_generation >= 0 AND proposal_rejection_generation <= 9007199254740991);
+        CREATE TABLE IF NOT EXISTS agent_job_proposal_call_rejections (
+          id BIGSERIAL PRIMARY KEY CHECK (id >= 1 AND id <= 9007199254740991),
+          job_id BIGINT NOT NULL REFERENCES minion_jobs(id) ON DELETE CASCADE,
+          sequence BIGINT NOT NULL CHECK (sequence >= 1 AND sequence <= 9007199254740991),
+          attempt_generation BIGINT NOT NULL DEFAULT 0 CHECK (attempt_generation >= 0 AND attempt_generation <= 9007199254740991),
+          attempt_no BIGINT NOT NULL CHECK (attempt_no >= 1 AND attempt_no <= 9007199254740991),
+          turn_index BIGINT NOT NULL CHECK (turn_index >= 0 AND turn_index <= 9007199254740991),
+          feedback_message_index BIGINT NOT NULL CHECK (feedback_message_index >= 0 AND feedback_message_index <= 9007199254740991),
+          error_code TEXT NOT NULL CHECK (error_code ~ '^[a-z][a-z0-9_]{0,63}$'),
+          calls JSONB NOT NULL CHECK (jsonb_typeof(calls) = 'array' AND jsonb_array_length(calls) <= 8 AND octet_length(calls::text) <= 16384),
+          omitted_call_count INTEGER NOT NULL DEFAULT 0 CHECK (omitted_call_count >= 0 AND omitted_call_count <= 999),
+          omitted_call_count_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          CONSTRAINT uq_agent_job_proposal_call_rejections_sequence UNIQUE (job_id, sequence),
+          CONSTRAINT uq_agent_job_proposal_call_rejections_feedback UNIQUE (job_id, feedback_message_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_job_proposal_call_rejections_job
+          ON agent_job_proposal_call_rejections (job_id, sequence);
+      `,
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

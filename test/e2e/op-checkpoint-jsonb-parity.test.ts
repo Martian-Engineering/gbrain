@@ -27,10 +27,10 @@ const describeE2E = hasDatabase() ? describe : describe.skip;
 describeE2E('E2E: op_checkpoints completed_keys jsonb parity (#2339)', () => {
   beforeAll(async () => {
     await setupDB();
-  });
+  }, 30_000);
   afterAll(async () => {
     await teardownDB();
-  });
+  }, 30_000);
 
   const key = { op: 'sync-target', fingerprint: 'jsonb-parity-2339' };
 

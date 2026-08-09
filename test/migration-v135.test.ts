@@ -90,8 +90,9 @@ describe('migration v135 — timeline reference columns', () => {
     await engine.executeRaw(`ALTER TABLE timeline_entries DROP COLUMN IF EXISTS ref_label`);
     await engine.setConfig('version', '134');
 
+    const pendingFromV134 = MIGRATIONS.filter(entry => entry.version > 134).length;
     const first = await runMigrations(engine);
-    expect(first).toEqual({ applied: 5, current: 139 });
+    expect(first).toEqual({ applied: pendingFromV134, current: LATEST_VERSION });
     const columns = await engine.executeRaw<{ column_name: string; is_nullable: string }>(
       `SELECT column_name, is_nullable
          FROM information_schema.columns
@@ -130,6 +131,6 @@ describe('migration v135 — timeline reference columns', () => {
 
     await engine.setConfig('version', '134');
     const second = await runMigrations(engine);
-    expect(second).toEqual({ applied: 5, current: 139 });
+    expect(second).toEqual({ applied: pendingFromV134, current: LATEST_VERSION });
   }, 30_000);
 });

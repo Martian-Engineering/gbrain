@@ -293,8 +293,27 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
       `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
       [jobId],
     );
-    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(executions).toHaveLength(0);
+    const rejections = await engine.executeRaw<{ error_code: string; calls: unknown }>(
+      `SELECT error_code, calls FROM agent_job_proposal_call_rejections WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(rejections).toEqual([{
+      error_code: 'stage_input_too_large',
+      calls: [{
+        call_ordinal: 0,
+        tool_name: 'brain_stage_ingestion_proposal_page',
+        proposal_page_sequence: null,
+        fields: [
+          { path: 'page', kind: 'object' },
+          { path: 'page.bodyMarkdown', kind: 'string' },
+        ],
+        fields_truncated: false,
+        unknown_key_count: 0,
+        unknown_key_count_truncated: false,
+      }],
+    }]);
   });
 
   it('rejects two staged pages before gateway assistant or tool persistence', async () => {
@@ -339,7 +358,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
       `SELECT id FROM subagent_tool_executions WHERE job_id = $1`,
       [jobId],
     );
-    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(executions).toHaveLength(0);
   });
 
@@ -400,7 +419,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
       `SELECT sequence FROM agent_job_proposal_fragments WHERE job_id = $1 ORDER BY sequence`, [jobId],
     );
     expect(executed).toBe(false);
-    expect(messages.map((row) => row.role)).toEqual(['user']);
+    expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(executions).toHaveLength(0);
     expect(fragments.map((row) => Number(row.sequence))).toEqual([1]);
   });

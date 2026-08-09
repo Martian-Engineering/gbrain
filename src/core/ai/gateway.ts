@@ -63,7 +63,10 @@ import {
 } from './tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../ingestion-proposal-context-policy.ts';
 import { pageReadVerificationContextPolicy } from '../page-read-verification-context-policy.ts';
-import { assertProposalToolTurnPersistable } from '../minions/agent-job-proposals.ts';
+import {
+  AgentJobProposalError,
+  assertProposalToolTurnPersistable,
+} from '../minions/agent-job-proposals.ts';
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
@@ -3306,6 +3309,18 @@ export interface ToolLoopOpts {
    */
   onAssistantTurn?: (turnIdx: number, messageIdx: number, blocks: ChatBlock[], usage: ChatResult['usage'], model: string) => Promise<void>;
   /**
+   * Handle a proposal guard rejection before the assistant turn can be
+   * persisted. Callers that own durable job state use this for private,
+   * sanitized retry guidance; callers without one still retain the generic
+   * gateway guard below.
+   */
+  onProposalTurnRejected?: (
+    turnIdx: number,
+    messageIdx: number,
+    blocks: ChatBlock[],
+    error: AgentJobProposalError,
+  ) => Promise<void>;
+  /**
    * Persist a pending tool execution. The caller assigns ordinal + uuid v7 and
    * returns them so the loop can key replay by gbrainToolUseId. The provider
    * supplies its own `providerToolCallId` (kept as a debug-only side channel).
@@ -3451,17 +3466,31 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
       throw err;
     }
 
-    // Proposal stage calls carry exact page bodies. Reject over-limit or
-    // multi-stage turns before onAssistantTurn persists the raw tool inputs.
-    assertProposalToolTurnPersistable(chatResult.blocks);
-
     totalUsage.input_tokens += chatResult.usage.input_tokens;
     totalUsage.output_tokens += chatResult.usage.output_tokens;
     totalUsage.cache_read_tokens += chatResult.usage.cache_read_tokens;
     totalUsage.cache_creation_tokens += chatResult.usage.cache_creation_tokens;
 
-    // D11 step 1: persist assistant turn BEFORE any tool dispatch.
+    // Proposal stage calls carry exact page bodies. Keep the generic guard in
+    // the gateway so callers without a persistence callback cannot bypass it.
+    // Job-owned callers receive the typed rejection before raw blocks reach
+    // their onAssistantTurn persistence callback.
     const assistantMessageIdx = messageIdx++;
+    try {
+      assertProposalToolTurnPersistable(chatResult.blocks);
+    } catch (error) {
+      if (error instanceof AgentJobProposalError) {
+        await opts.onProposalTurnRejected?.(
+          turnIdx,
+          assistantMessageIdx,
+          chatResult.blocks,
+          error,
+        );
+      }
+      throw error;
+    }
+
+    // D11 step 1: persist assistant turn BEFORE any tool dispatch.
     await opts.onAssistantTurn?.(turnIdx, assistantMessageIdx, chatResult.blocks, chatResult.usage, chatResult.model);
     messages.push({ role: 'assistant', content: chatResult.blocks });
 
