@@ -72,25 +72,25 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('exact prompt-supplied resolver text and revision');
     expect(skill).not.toContain('exact `resolver` slug');
     expect(skill).not.toContain("source's `resolver` page");
-    expect(skill).toContain("Lore's local Markdown mirror");
-    expect(skill).toContain('Read the source page back with `get_page`');
+    expect(skill).toContain("Lore's transcript Markdown as immutable source authority");
+    expect(skill).toContain('exact bound transcript before digesting the page');
     expect(skill).toContain('artifact source-record read-back');
-    expect(skill).toContain('local-mirror provenance statement');
-    expect(skill).not.toContain('the complete transcript Markdown');
+    expect(skill).not.toContain('local-mirror provenance statement');
+    expect(skill).toContain('complete `transcript.md` is also frozen into');
     expect(skill).not.toContain('raw-data retrieval');
   });
 
   test('separates the fixed capture anchor from resolver-selected meeting taxonomy', () => {
     expect(skill).toMatch(
-      /exact prompt-supplied `capturePageSlug` is a pre-authorized operational\s+provenance page/,
+      /exact prompt-supplied `capturePageSlug` is a pre-authorized verbatim\s+source page/,
     );
-    expect(skill).toMatch(/It is not a raw import/);
+    expect(skill).toMatch(/It is not a derived page/);
     expect(skill).toMatch(/exempt from resolver taxonomy\s+and path-selection rules/);
     expect(skill).toMatch(
       /Only that exact capture anchor is exempt; every\s+derived page path follows\s+the resolver-selected taxonomy/,
     );
     expect(skill).toMatch(
-      /capture page\s+body and every derived page remain subject to the resolver's exclusions and\s+privacy limits/,
+      /Derived pages\s+remain subject to the resolver's exclusions and privacy limits/,
     );
     expect(skill).toMatch(
       /derived analyzed meeting page must follow the resolver-selected taxonomy/,
@@ -125,6 +125,8 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('at most 32 pages');
     expect(skill).toContain('262,144 UTF-8 bytes');
+    expect(skill).toContain('786,432 UTF-8 bytes');
+    expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('{slug,effect:"create",title,bodyMarkdown}');
     expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toMatch(/Never send a full update body, title, baseline, or content hash/);

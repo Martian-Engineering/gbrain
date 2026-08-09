@@ -54,23 +54,21 @@ These instructions are self-contained for a source-bound remote Minion.
   resolver text and revision before writing. Resolver ambiguity returns a
   classed `needs_attention` receipt without mutation. Partial disqualification
   returns a complete `staged_proposal` manifest without corpus mutation.
-- The exact prompt-supplied `capturePageSlug` is a pre-authorized operational
-  provenance page. It is not a raw import and is exempt from resolver taxonomy
+- The exact prompt-supplied `capturePageSlug` is a pre-authorized verbatim
+  source page. It is not a derived page and is exempt from resolver taxonomy
   and path-selection rules. Only that exact capture anchor is exempt; every
-  derived page path follows the resolver-selected taxonomy. The capture page
-  body and every derived page remain subject to the resolver's exclusions and
-  privacy limits.
+  derived page path follows the resolver-selected taxonomy. Derived pages
+  remain subject to the resolver's exclusions and privacy limits.
 - An omitted `mode` preserves the normal write path. `mode: propose` performs
   the normal analysis, search, and deduplication but performs zero mutations.
   `mode: apply` executes only the prompt-supplied frozen plan.
-- No proposed page, timeline entry, or link may derive from excluded material.
-  The capture page retains its local-mirror provenance statement but must not
-  name or describe the excluded material. The scope appears only in the
-  receipt because Lore owns scope provenance.
-- Treat Lore's local Markdown mirror as the complete source of record. Write a
-  durable GBrain source record that identifies that artifact before relying on
-  derived analysis; do not attempt to duplicate an arbitrarily large transcript
-  into one page.
+- No derived page, timeline entry, or link may derive from excluded material.
+  The capture page is the verbatim source artifact and is not filtered by the
+  resolver's analytical admission scope. The scope appears only in the receipt
+  because Lore owns scope provenance.
+- Treat Lore's transcript Markdown as immutable source authority. GBrain binds
+  those exact bytes to `capturePageSlug` at job submission and replaces the
+  model-authored capture body before the proposal is hashed and frozen.
 - Search and read before creating or updating pages. Never invent an identity
   or create an empty entity stub.
 - Every unambiguous attendee must have a substantive `people/` dossier that is
@@ -297,10 +295,10 @@ representability gate is only a backstop for a required mutation the extended
 plan cannot express, and it also applies to normal-mode
 partial-disqualification proposals.
 
-The capture page still states that Lore's local Markdown artifact is the
-complete verbatim record. Its title and body must not name or describe the
-excluded material or the admission scope. Scope provenance exists only in the
-top-level proposal receipt.
+The capture page body is replaced server-side with the exact bound transcript
+Markdown before staging. Do not summarize, truncate, quote, fence, normalize,
+or reproduce that transcript in the tool call. Its title must not describe the
+admission scope. Scope provenance exists only in the top-level proposal receipt.
 
 After every page is staged, call `brain_finalize_ingestion_proposal` in a
 separate turn with the stable page count, summary,
@@ -309,7 +307,8 @@ page-digest manifest from the job's durable fragments, so finalization does not
 depend on old stage outputs remaining in model context. The server rejects
 gaps, duplicate or changed fragments, cross-job evidence, a capture page that
 does not match the exact job binding, mutations outside the job slug fence, a full
-raw or JSON-escaped plan representation over 98,304 UTF-8 bytes, more than 32
+raw plan representation over 786,432 UTF-8 bytes, JSON-escaped plan over
+1,572,864 UTF-8 bytes, more than 32
 pages, a timeline `refLabel` over
 500 characters, or a compact manifest over 262,144 UTF-8 bytes.
 Return the finalizer's compact manifest as `staged_proposal`; never reproduce
@@ -436,26 +435,20 @@ retry, inspect pages named in `priorAttempt` first.
 ### 4. Record the source artifact
 
 Lore's local `manifest.json`, `content.md`, and `transcript.md` package is the
-complete immutable source of record. The prompt supplies its complete contents
-so this Minion can analyze them, but GBrain page writes are not a second blob
-store and may not be able to round-trip an arbitrarily large transcript.
+immutable ingestion package. The complete `transcript.md` is also frozen into
+GBrain as the capture page body from server-bound bytes; it is never generated
+or copied by the model.
 
 Create or update the one traceable capture page for the prompt-supplied
 artifact at exactly the prompt-supplied `capturePageSlug`. Copy that slug
 character-for-character into every tool call that targets the capture page —
 never retype, re-case, or re-derive it from `artifactId` or any other
-identity. The page must include:
-
-- provider, artifact ID, Granola external ID, title, occurrence date, source
-  URL, participants, resolver revision, and historical flag;
-- the manifest metadata needed to identify and audit the local artifact;
-- a concise source-grounded account of the notes and transcript;
-- an explicit statement that Lore's local Markdown artifact is the complete
-  verbatim record and this page is its brain-facing provenance record.
-
-Read the source page back with `get_page` and verify its artifact ID, Granola
-external ID, occurrence date, local-mirror provenance statement, and resolver
-revision before continuing.
+identity. For a create proposal, supply a source-identifying title and any
+non-empty placeholder `bodyMarkdown` required by the staging schema. For an
+update, supply any non-empty placeholder `appendMarkdown`. GBrain replaces that
+field with the exact bound transcript before digesting the page. Never put
+artifact metadata, a summary, or a local-mirror pointer in place of the
+transcript.
 
 ### 5. Write the analyzed meeting
 
@@ -531,8 +524,8 @@ to a later run.
    reverse navigation to the meeting.
 5. Run `validate_links` on the meeting page and repair every missing canonical
    reference. Keep ambiguous identities as plain text.
-6. Confirm the source record still contains the exact artifact ID, external ID,
-   occurrence date, resolver revision, and local-mirror provenance statement.
+6. Confirm the source record contains the complete verbatim transcript rather
+   than a summary, pointer, or provenance-only substitute.
 7. Every page created or updated during enrichment must appear in the matching
    `createdPages` or `updatedPages` receipt array and in `verifiedPages`.
 

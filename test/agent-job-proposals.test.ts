@@ -5,6 +5,7 @@ import {
   PROPOSAL_AGGREGATE_MAX_BYTES,
   PROPOSAL_ESCAPED_PLAN_MAX_BYTES,
   PROPOSAL_MANIFEST_MAX_BYTES,
+  PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES,
   PROPOSAL_MAX_PAGES,
   PROPOSAL_STAGE_INPUT_MAX_BYTES,
   AgentJobProposalError,
@@ -858,11 +859,62 @@ describe('durable agent-job proposal staging', () => {
       .rejects.toMatchObject({ code: 'proposal_authority_unavailable' });
   });
 
+  it('freezes the exact server-bound Markdown as the capture page body', async () => {
+    const verbatimMarkdown = '# Transcript\n\nSpeaker: Exact source text.\n';
+    const jobId = await seedJob({
+      proposal_capture_page_verbatim_markdown: verbatimMarkdown,
+    });
+    await stage(jobId, 1, 1, createPage('sources/example', '# Model summary'));
+    const manifest = await finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
+      total_pages: 1, summary: 'Ready.',
+    });
+    const owned = await getOwnedAgentJobProposal(
+      engine,
+      jobId,
+      'lore-client',
+      manifest.proposalDigest,
+    );
+    expect(owned.plan.proposedPages).toEqual([{
+      slug: 'sources/example',
+      effect: 'create',
+      title: 'Page',
+      bodyMarkdown: verbatimMarkdown,
+    }]);
+  });
+
+  it('freezes the exact server-bound Markdown as the capture page append', async () => {
+    await seedStoredPage('sources/example');
+    const verbatimMarkdown = '# Transcript\n\nSpeaker: Exact source text.\n';
+    const jobId = await seedJob({
+      proposal_capture_page_verbatim_markdown: verbatimMarkdown,
+    });
+    await stage(jobId, 1, 1, updatePage('sources/example'));
+    const manifest = await finalizeAgentJobProposal(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
+      total_pages: 1, summary: 'Ready.',
+    });
+    const owned = await getOwnedAgentJobProposal(
+      engine, jobId, 'lore-client', manifest.proposalDigest,
+    );
+    expect(owned.plan.proposedPages[0]).toMatchObject({
+      slug: 'sources/example', effect: 'update', appendMarkdown: verbatimMarkdown,
+    });
+  });
+
+  it('rejects oversized server-bound verbatim capture Markdown', async () => {
+    const jobId = await seedJob({
+      proposal_capture_page_verbatim_markdown: 'x'.repeat(PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES + 1),
+    });
+    await expect(stage(jobId, 1, 1, createPage('sources/example', '# Model summary')))
+      .rejects.toMatchObject({ code: 'verbatim_capture_too_large' });
+  });
+
   it('rejects cumulative staged pages over the aggregate ceiling without persisting the crossing fragment', async () => {
     const jobId = await seedJob({ proposal_capture_page_slug: 'sources/large-1' });
-    const pageCount = 2;
+    const pageCount = 5;
     const pages = Array.from({ length: pageCount }, (_, index) => (
-      createPage(`sources/large-${index + 1}`, 'x'.repeat(80_000))
+      createPage(`sources/large-${index + 1}`, 'x'.repeat(180_000))
     ));
     const inventory = pageInventory(...pages);
     for (let sequence = 1; sequence < pageCount; sequence++) {
@@ -893,14 +945,14 @@ describe('durable agent-job proposal staging', () => {
       [jobId],
     );
     expect(Number(rows[0]!.count)).toBe(pageCount - 1);
-    expect(PROPOSAL_AGGREGATE_MAX_BYTES).toBe(96 * 1024);
-    expect(PROPOSAL_ESCAPED_PLAN_MAX_BYTES).toBe(96 * 1024);
+    expect(PROPOSAL_AGGREGATE_MAX_BYTES).toBe(768 * 1024);
+    expect(PROPOSAL_ESCAPED_PLAN_MAX_BYTES).toBe(1536 * 1024);
     expect(PROPOSAL_MANIFEST_MAX_BYTES).toBe(256 * 1024);
   });
 
   it('accepts an escaped canonical plan exactly at the shared ceiling', async () => {
     const jobId = await seedJob();
-    const pageCount = 1;
+    const pageCount = 9;
     const pages = Array.from({ length: pageCount }, (_, index) =>
       createPage(index === 0 ? 'sources/example' : `sources/boundary-${index + 1}`, 'x'));
     const basePlan = {
@@ -913,13 +965,28 @@ describe('durable agent-job proposal staging', () => {
       proposedLinks: [],
       unresolved: [],
     };
-    const remaining = PROPOSAL_ESCAPED_PLAN_MAX_BYTES -
+    let remaining = PROPOSAL_ESCAPED_PLAN_MAX_BYTES -
       Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8');
-    const boundaryPage = pages[pageCount - 1]!;
-    if (boundaryPage.effect !== 'create') throw new Error('Expected create boundary page');
-    boundaryPage.bodyMarkdown += 'y'.repeat(remaining);
+    if (remaining % 2 === 1) {
+      const boundaryPage = pages[pageCount - 1]!;
+      if (boundaryPage.effect !== 'create') throw new Error('Expected create boundary page');
+      boundaryPage.bodyMarkdown += 'y';
+      remaining -= 1;
+    }
+    const newlinesPerPage = Math.floor(remaining / 2 / pageCount);
+    let leftoverNewlines = remaining / 2;
+    for (const page of pages) {
+      if (page.effect !== 'create') throw new Error('Expected create boundary page');
+      const count = Math.min(newlinesPerPage, leftoverNewlines);
+      page.bodyMarkdown += '\n'.repeat(count);
+      leftoverNewlines -= count;
+    }
+    const finalPage = pages[pageCount - 1]!;
+    if (finalPage.effect !== 'create') throw new Error('Expected create boundary page');
+    finalPage.bodyMarkdown += '\n'.repeat(leftoverNewlines);
+    const inventory = pageInventory(...pages);
     for (let sequence = 1; sequence <= pageCount; sequence++) {
-      await stage(jobId, sequence, pageCount, pages[sequence - 1]!);
+      await stage(jobId, sequence, pageCount, pages[sequence - 1]!, undefined, inventory);
     }
 
     const manifest = await finalizeAgentJobProposal(engine, jobId, {
@@ -937,16 +1004,36 @@ describe('durable agent-job proposal staging', () => {
       .toBe(PROPOSAL_ESCAPED_PLAN_MAX_BYTES);
     expect(Buffer.byteLength(canonicalProposalJson(owned.plan), 'utf8'))
       .toBeLessThan(PROPOSAL_AGGREGATE_MAX_BYTES);
-  });
+  }, 15_000);
 
-  it('rejects a raw plan whose JSON-string escaped representation exceeds 96 KiB', async () => {
+  it('rejects a raw plan whose JSON-string escaped representation exceeds the escaped ceiling', async () => {
     const jobId = await seedJob();
-    await stage(jobId, 1, 1, createPage('sources/example', `x${'\n'.repeat(40_000)}`));
+    const pageCount = 9;
+    const pages = Array.from({ length: pageCount }, (_, index) =>
+      createPage(index === 0 ? 'sources/example' : `sources/escaped-${index + 1}`, 'x'));
+    const inventory = pageInventory(...pages);
+    const basePlan = {
+      artifactId: 'artifact-1', sourceId: 'company',
+      admissionScope: 'Include project delivery notes.', summary: 'Escaped boundary.',
+      proposedPages: pages, proposedTimelineEntries: [], proposedLinks: [], unresolved: [],
+    };
+    const neededNewlines = Math.floor((PROPOSAL_ESCAPED_PLAN_MAX_BYTES
+      - Buffer.byteLength(JSON.stringify(canonicalProposalJson(basePlan)), 'utf8')) / 2) + 1;
+    let remaining = neededNewlines;
+    for (const page of pages) {
+      if (page.effect !== 'create') throw new Error('Expected create boundary page');
+      const count = Math.min(Math.ceil(neededNewlines / pageCount), remaining);
+      page.bodyMarkdown += '\n'.repeat(count);
+      remaining -= count;
+    }
+    for (let sequence = 1; sequence <= pageCount; sequence++) {
+      await stage(jobId, sequence, pageCount, pages[sequence - 1]!, undefined, inventory);
+    }
 
     await expect(finalizeAgentJobProposal(engine, jobId, {
       artifact_id: 'artifact-1', source_id: 'company',
       admission_scope: 'Include project delivery notes.',
-      total_pages: 1, summary: 'Escaped boundary.',
+      total_pages: pageCount, summary: 'Escaped boundary.',
     })).rejects.toMatchObject({ code: 'proposal_too_large' });
-  });
+  }, 15_000);
 });

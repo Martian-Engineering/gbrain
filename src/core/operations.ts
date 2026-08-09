@@ -50,7 +50,10 @@ import { stampEvidence } from './search/evidence.ts';
 import type { SearchResult } from './types.ts';
 import { CJK_SLUG_CHARS } from './cjk.ts';
 import { matchesSlugAllowList, slugFenceContains } from './slug-allow-list.ts';
-import { PROPOSAL_ADMISSION_SCOPE_MAX_CHARS } from './minions/agent-job-proposals.ts';
+import {
+  PROPOSAL_ADMISSION_SCOPE_MAX_CHARS,
+  PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES,
+} from './minions/agent-job-proposals.ts';
 import {
   isValidSubagentMaxOutputTokens,
   MAX_SUBAGENT_MAX_OUTPUT_TOKENS,
@@ -5336,6 +5339,10 @@ const submit_agent: Operation = {
       type: 'string',
       description: 'Exact capture page slug bound to staged proposal provenance for this job',
     },
+    proposal_capture_page_verbatim_markdown: {
+      type: 'string',
+      description: 'Exact source Markdown frozen server-side as the capture page body',
+    },
     proposal_admission_scope: {
       type: 'string',
       description: 'Exact resolver admission scope, or omit so the first staged page freezes it',
@@ -5437,6 +5444,9 @@ const submit_agent: Operation = {
     const proposalCapturePageSlug = typeof p.proposal_capture_page_slug === 'string'
       ? p.proposal_capture_page_slug.trim()
       : '';
+    const proposalCapturePageVerbatimMarkdown = typeof p.proposal_capture_page_verbatim_markdown === 'string'
+      ? p.proposal_capture_page_verbatim_markdown
+      : null;
     const proposalAdmissionScope = typeof p.proposal_admission_scope === 'string'
       ? p.proposal_admission_scope.trim()
       : '';
@@ -5517,6 +5527,21 @@ const submit_agent: Operation = {
         'invalid_params',
         'submit_agent: proposal admission scope requires a proposal artifact and capture page binding.',
       );
+    }
+    if (proposalCapturePageVerbatimMarkdown !== null && !proposalCapturePageSlug) {
+      throw new OperationError(
+        'invalid_params',
+        'submit_agent: verbatim capture Markdown requires a proposal artifact and capture page binding.',
+      );
+    }
+    if (proposalCapturePageVerbatimMarkdown !== null) {
+      const verbatimBytes = Buffer.byteLength(proposalCapturePageVerbatimMarkdown, 'utf8');
+      if (verbatimBytes === 0 || verbatimBytes > PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES) {
+        throw new OperationError(
+          'invalid_params',
+          `submit_agent: verbatim capture Markdown must contain 1-${PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES} UTF-8 bytes.`,
+        );
+      }
     }
     if (usesProposalTools && (!proposalArtifactId || !proposalCapturePageSlug)) {
       throw new OperationError(
@@ -5609,6 +5634,15 @@ const submit_agent: Operation = {
       `;
       if (existing.length > 0) {
         const data = existing[0]!.data as Record<string, unknown>;
+        if (
+          proposalCapturePageVerbatimMarkdown !== null
+          && data.proposal_capture_page_verbatim_markdown !== proposalCapturePageVerbatimMarkdown
+        ) {
+          throw new OperationError(
+            'invalid_params',
+            'submit_agent: idempotency key is already bound to different verbatim capture Markdown.',
+          );
+        }
         if (
           hasApprovedProposalAuthority
           && (
@@ -5756,6 +5790,9 @@ const submit_agent: Operation = {
         skill_name: typeof p.skill_name === 'string' ? p.skill_name : null,
         proposal_artifact_id: proposalArtifactId || null,
         proposal_capture_page_slug: proposalCapturePageSlug || null,
+        proposal_capture_page_verbatim_bytes: proposalCapturePageVerbatimMarkdown === null
+          ? null
+          : Buffer.byteLength(proposalCapturePageVerbatimMarkdown, 'utf8'),
         proposal_admission_scope: proposalAdmissionScope || null,
         approved_proposal_job_id: approvedAuthority?.proposalJobId ?? null,
         approved_proposal_digest: approvedAuthority?.proposalDigest ?? null,
@@ -5789,6 +5826,9 @@ const submit_agent: Operation = {
     if (proposalArtifactId) {
       jobData.proposal_artifact_id = proposalArtifactId;
       jobData.proposal_capture_page_slug = proposalCapturePageSlug;
+      if (proposalCapturePageVerbatimMarkdown !== null) {
+        jobData.proposal_capture_page_verbatim_markdown = proposalCapturePageVerbatimMarkdown;
+      }
       if (proposalAdmissionScope) jobData.proposal_admission_scope = proposalAdmissionScope;
     }
     if (approvedAuthority) {

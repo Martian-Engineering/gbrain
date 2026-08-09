@@ -149,6 +149,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
     it('publishes non-corpus-mutating staged proposal operations', () => {
       expect(submit_agent.params.proposal_artifact_id).toBeDefined();
       expect(submit_agent.params.proposal_capture_page_slug).toBeDefined();
+      expect(submit_agent.params.proposal_capture_page_verbatim_markdown).toBeDefined();
       expect(submit_agent.params.proposal_admission_scope).toBeDefined();
       expect(submit_agent.params.approved_proposal_job_id).toBeDefined();
       expect(submit_agent.params.approved_proposal_digest).toBeDefined();
@@ -438,6 +439,45 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(row.data.proposal_capture_page_slug).toBe('sources/example');
       expect(row.data.proposal_admission_scope).toBeUndefined();
       expect(row.data.source_id).toBe('company');
+    });
+
+    it('freezes verbatim capture Markdown on proposal jobs', async () => {
+      await seedClient('verbatim-capture', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const verbatimMarkdown = '# Transcript\n\nSpeaker: Exact source text.\n';
+      const result = await callSubmitAgent(makeCtx({ clientId: 'verbatim-capture' }), {
+        prompt: 'propose',
+        proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+        proposal_capture_page_verbatim_markdown: verbatimMarkdown,
+      });
+      const [row] = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        'SELECT data FROM minion_jobs WHERE id = $1',
+        [result.id],
+      );
+      expect(row.data.proposal_capture_page_verbatim_markdown).toBe(verbatimMarkdown);
+    });
+
+    it('rejects empty or oversized verbatim capture Markdown', async () => {
+      await seedClient('verbatim-limit', {
+        bound_tools: ['stage_ingestion_proposal_page', 'finalize_ingestion_proposal'],
+        bound_source_id: 'company',
+        bound_slug_prefixes: ['sources/'],
+      });
+      const ctx = makeCtx({ clientId: 'verbatim-limit' });
+      const common = {
+        prompt: 'propose', proposal_artifact_id: 'artifact-1',
+        proposal_capture_page_slug: 'sources/example',
+      };
+      await expect(callSubmitAgent(ctx, {
+        ...common, proposal_capture_page_verbatim_markdown: '',
+      })).rejects.toThrow(/must contain 1-/i);
+      await expect(callSubmitAgent(ctx, {
+        ...common, proposal_capture_page_verbatim_markdown: 'x'.repeat(512 * 1024 + 1),
+      })).rejects.toThrow(/must contain 1-/i);
     });
 
     it('rejects proposal-tool jobs without a bound source, slug fence, or capture inside the fence', async () => {

@@ -63,11 +63,14 @@ export type {
   StageProposalPageInput,
   StageProposalPageResult,
 } from '../ingestion-proposal-contract.ts';
+/** Maximum UTF-8 size of server-bound verbatim capture Markdown. */
+export const PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES = 512 * 1024;
+
 /** Maximum UTF-8 size of one finalized, canonical proposal plan. */
-export const PROPOSAL_AGGREGATE_MAX_BYTES = 98_304;
+export const PROPOSAL_AGGREGATE_MAX_BYTES = 768 * 1024;
 
 /** Maximum UTF-8 size after the canonical plan is embedded as a JSON string. */
-export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 98_304;
+export const PROPOSAL_ESCAPED_PLAN_MAX_BYTES = 1536 * 1024;
 
 /** Maximum UTF-8 size of the compact receipt manifest. */
 export const PROPOSAL_MANIFEST_MAX_BYTES = 262_144;
@@ -144,6 +147,7 @@ interface JobBinding {
   artifactId: string;
   admissionScope: string | null;
   capturePageSlug: string;
+  capturePageVerbatimMarkdown: string | null;
   allowedSlugPrefixes: string[];
   pageInventory: unknown;
 }
@@ -298,11 +302,12 @@ export async function assertProposalToolTurnPersistableForJob(
 
   await engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
-    assertBindingMatches(binding, candidate);
-    assertSlugAllowed(binding, candidate.page.slug, 'Proposed page');
+    const boundCandidate = bindVerbatimCapturePage(binding, candidate);
+    assertBindingMatches(binding, boundCandidate);
+    assertSlugAllowed(binding, boundCandidate.page.slug, 'Proposed page');
     const fragments = await readStoredFragments(tx, jobId);
-    const replay = assertCumulativeStageFits(binding, candidate, fragments);
-    if (!replay) await freezeProposalCandidate(tx, binding, candidate);
+    const replay = assertCumulativeStageFits(binding, boundCandidate, fragments);
+    if (!replay) await freezeProposalCandidate(tx, binding, boundCandidate);
   });
 }
 
@@ -327,10 +332,11 @@ export async function stageAgentJobProposalPage(
   input: StageProposalPageInput,
 ): Promise<StageProposalPageResult> {
   assertSafeJobId(jobId);
-  const candidate = parseStageProposalPageInput(input);
+  const parsedCandidate = parseStageProposalPageInput(input);
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
+    const candidate = bindVerbatimCapturePage(binding, parsedCandidate);
     assertBindingMatches(binding, candidate);
     assertPageInventoryForBinding(binding, candidate.pageInventory);
     const frozenInventory = parseFrozenPageInventory(binding, candidate.totalPages);
@@ -835,6 +841,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
     artifact_id: string | null;
     admission_scope: string | null;
     capture_page_slug: string | null;
+    capture_page_verbatim_markdown: string | null;
     allowed_slug_prefixes: unknown;
     page_inventory: unknown;
   }>(
@@ -844,6 +851,7 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
             data->>'proposal_artifact_id' AS artifact_id,
             data->>'proposal_admission_scope' AS admission_scope,
             data->>'proposal_capture_page_slug' AS capture_page_slug,
+            data->>'proposal_capture_page_verbatim_markdown' AS capture_page_verbatim_markdown,
             data->'allowed_slug_prefixes' AS allowed_slug_prefixes,
             data->'proposal_page_inventory' AS page_inventory
        FROM minion_jobs
@@ -873,15 +881,41 @@ async function readJobBinding(engine: BrainEngine, jobId: number, lock: boolean)
       'Agent job capture page is outside its bound slug fence.',
     );
   }
+  const capturePageVerbatimMarkdown = row.capture_page_verbatim_markdown;
+  if (capturePageVerbatimMarkdown !== null) {
+    const bytes = Buffer.byteLength(capturePageVerbatimMarkdown, 'utf8');
+    if (bytes === 0 || bytes > PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES) {
+      throw new AgentJobProposalError(
+        'verbatim_capture_too_large',
+        `Verbatim capture Markdown must contain 1-${PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES} UTF-8 bytes.`,
+      );
+    }
+  }
   return {
     ownerClientId: row.owner_client_id,
     sourceId,
     artifactId: row.artifact_id,
     admissionScope: row.admission_scope,
     capturePageSlug,
+    capturePageVerbatimMarkdown,
     allowedSlugPrefixes,
     pageInventory: row.page_inventory,
   };
+}
+
+/** Replace model-authored capture prose with exact server-bound source bytes. */
+function bindVerbatimCapturePage<T extends ParsedStageProposalPageCore>(
+  binding: JobBinding,
+  candidate: T,
+): T {
+  if (
+    candidate.page.slug !== binding.capturePageSlug
+    || binding.capturePageVerbatimMarkdown === null
+  ) return candidate;
+  const page = candidate.page.effect === 'create'
+    ? { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown }
+    : { ...candidate.page, appendMarkdown: binding.capturePageVerbatimMarkdown };
+  return { ...candidate, page };
 }
 
 function assertBindingMatches(
