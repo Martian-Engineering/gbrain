@@ -13,7 +13,7 @@ import { hardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', env: process.env,
   }).trim();
 }
 function originHead(bare: string): string {

@@ -4,7 +4,7 @@
  * redirected to a tmp dir; installCron:false so the suite never touches launchd.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
@@ -161,6 +161,44 @@ describe('hardenBrainRepo', () => {
     expect(r.needs_attention.length).toBeGreaterThan(0);
     // No scaffolding commit when we can't confirm a push.
     expect(r.steps.find(s => s.step === 'commit')).toBeUndefined();
+  });
+
+  test('scaffolding commit does not fire the newly installed post-commit hook', async () => {
+    const shimDir = join(root, 'git-shim');
+    const hookSentinel = join(root, 'post-commit-hook-fired');
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
+    mkdirSync(shimDir);
+    writeFileSync(join(shimDir, 'git'), `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "rev-parse" && "\${2:-}" == "--abbrev-ref" ]]; then
+  : > "$GBRAIN_TEST_HOOK_SENTINEL"
+fi
+exec "$GBRAIN_TEST_REAL_GIT" "$@"
+`, { mode: 0o755 });
+
+    const durabilityModule = join(import.meta.dir, '..', 'src', 'core', 'brain-repo-durability.ts');
+    const childScript = `
+      const { hardenBrainRepo } = await import(${JSON.stringify(durabilityModule)});
+      const report = await hardenBrainRepo({
+        repoPath: ${JSON.stringify(work)},
+        sourceId: 'wiki',
+        pat: ${JSON.stringify(PAT)},
+        installCron: false,
+      });
+      console.log(JSON.stringify(report));
+    `;
+    const report = JSON.parse(execFileSync(process.execPath, ['--eval', childScript], {
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+        GBRAIN_TEST_HOOK_SENTINEL: hookSentinel,
+        GBRAIN_TEST_REAL_GIT: realGit,
+      },
+    }));
+
+    expect(report.needs_attention).toEqual([]);
+    expect(existsSync(hookSentinel)).toBe(false);
   });
 
   test('dry-run makes no commit and writes no files', async () => {

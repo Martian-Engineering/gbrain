@@ -51,21 +51,21 @@ OUTPUT="$("$OUT_BIN" 2>&1)"
 # - calculateScore by name: specific function that MUST appear as a
 #   top-level semantic node. If it's missing, the chunker either fell
 #   through to recursive or the TypeScript grammar didn't load.
-if ! echo "$OUTPUT" | grep -q '"has_symbol_names": true'; then
+if ! grep -q '"has_symbol_names": true' <<<"$OUTPUT"; then
   echo "[check-wasm-embedded] FAIL: compiled binary returned no symbol names (fallback chunks)." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"has_typescript_header": true'; then
+if ! grep -q '"has_typescript_header": true' <<<"$OUTPUT"; then
   echo "[check-wasm-embedded] FAIL: chunk header missing TypeScript language tag." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q '"calculateScore"'; then
+if ! grep -q '"calculateScore"' <<<"$OUTPUT"; then
   echo "[check-wasm-embedded] FAIL: tree-sitter did not extract the calculateScore function symbol." >&2
   echo "[check-wasm-embedded] Output was:" >&2
   echo "$OUTPUT" >&2
