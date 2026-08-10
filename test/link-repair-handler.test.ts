@@ -52,6 +52,7 @@ function makeDependencies(
       calls.push('timeline');
       return {
         meetings_scanned: 1,
+        meetings_skipped_by_policy: 3,
         entries_created: 2,
         entities_touched: 2,
         batch_errors: 0,
@@ -132,7 +133,7 @@ describe('link_repair handler', () => {
         mentions: { created: 2 },
         ner: { created: 1 },
         links: { created: 4 },
-        timeline: { entries_created: 2 },
+        timeline: { entries_created: 2, meetings_skipped_by_policy: 3 },
         backlinks: { mode: 'graph' },
       },
     });

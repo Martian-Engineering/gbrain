@@ -991,6 +991,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // consent reads this key, and enabling it is the documented path to
   // `gbrain takes extract --from-pages` — same unregistered-key class.
   'takes.bootstrap_enabled',
+  // Meeting-page timeline fan-out defaults on. Per-source overrides use the
+  // registered extract.timeline_from_meetings.enabled.source.<source-id> prefix.
+  'extract.timeline_from_meetings.enabled',
   'sync.cost_gate_min_usd',
   'sync.federated_v2',
   'embed.backfill_cooldown_min',
@@ -1013,6 +1016,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'provider_base_urls.', // per-provider base URL overrides
   'provider_chat_options.', // per-provider / per-model chat providerOptions
   'content_sanity.',    // v0.41 content-sanity tunables
+  'extract.timeline_from_meetings.enabled.source.', // per-source meeting timeline propagation
   'mcp.',               // mcp.publish_skills, mcp.skills_dir (PR1 skill catalog)
   'autopilot.',         // autopilot.nightly_quality_probe.*, autopilot.auto_drain.* (#1685)
   'chronicle.',         // chronicle.tz + future Life Chronicle knobs (#2390)

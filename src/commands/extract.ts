@@ -204,6 +204,8 @@ interface ExtractResult {
   links_created: number;
   timeline_entries_created: number;
   pages_processed: number;
+  /** Present for `--from-meetings` so machine callers can observe policy skips. */
+  meetings_skipped_by_policy?: number;
 }
 
 // --- Shared walker ---
@@ -924,11 +926,13 @@ Status (v0.42):
         const r = await extractTimelineFromMeetings(engine, { dryRun, sourceIdFilter });
         result.timeline_entries_created = r.entries_created;
         result.pages_processed = r.meetings_scanned;
+        result.meetings_skipped_by_policy = r.meetings_skipped_by_policy;
         if (!jsonMode) {
           console.log(
             `Timeline from meeting/event pages: ${r.entries_created} entries on ` +
             `${r.entities_touched} entity pages from ${r.meetings_scanned} source pages; ` +
-            `${r.materialized_backlinks_written} materialized backlink(s)`,
+            `${r.materialized_backlinks_written} materialized backlink(s); ` +
+            `${r.meetings_skipped_by_policy} meeting page(s) skipped by policy`,
           );
         }
         // #2057 (codex): batch failures are no longer swallowed silently — make

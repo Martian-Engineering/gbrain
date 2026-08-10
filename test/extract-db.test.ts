@@ -247,6 +247,21 @@ describe('gbrain extract timeline --source db', () => {
     const entries = await engine.getTimeline('people/alice');
     expect(entries.length).toBe(0);
   });
+
+  test('--from-meetings --json includes the policy skip count', async () => {
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...values: unknown[]) => { lines.push(values.join(' ')); };
+    try {
+      await runExtract(engine, ['timeline', '--from-meetings', '--source', 'db', '--json']);
+    } finally {
+      console.log = originalLog;
+    }
+
+    const parsed = JSON.parse(lines.find(line => line.trim().startsWith('{'))!);
+    expect(parsed.meetings_skipped_by_policy).toBe(0);
+    expect(parsed.timeline_entries_created).toBe(0);
+  });
 });
 
 describe('gbrain extract all --source db', () => {
