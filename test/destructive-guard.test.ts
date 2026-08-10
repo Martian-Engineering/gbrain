@@ -278,6 +278,136 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     expect(remainingPages[0].n).toBe(0);
   });
 
+  test('purgeExpiredSources reconciles revoked and read-only OAuth references', async () => {
+    const expiredId = 'pe-oauth-expired';
+    const liveId = 'pe-oauth-live';
+    await seedSource(engine, expiredId, { withPages: 2 });
+    await seedSource(engine, liveId);
+    await softDeleteSource(engine, expiredId);
+    await engine.executeRaw(
+      `UPDATE sources SET archive_expires_at = now() - INTERVAL '1 hour' WHERE id = $1`,
+      [expiredId],
+    );
+    await engine.executeRaw(
+      `INSERT INTO oauth_clients
+         (client_id, client_name, source_id, federated_read, bound_source_id, deleted_at)
+       VALUES
+         ($1, $2, $3, ARRAY[$3]::text[], $3, now()),
+         ($4, $5, $6, ARRAY[$3, $6]::text[], NULL, NULL)`,
+      [
+        'pe-oauth-revoked',
+        'Revoked source client',
+        expiredId,
+        'pe-oauth-reader',
+        'Active federated reader',
+        liveId,
+      ],
+    );
+
+    const purged = await purgeExpiredSources(engine);
+
+    expect(purged).toContain(expiredId);
+    const sources = await engine.executeRaw<{ id: string }>(
+      'SELECT id FROM sources WHERE id = $1',
+      [expiredId],
+    );
+    expect(sources).toEqual([]);
+    const clients = await engine.executeRaw<{
+      client_id: string;
+      source_id: string | null;
+      bound_source_id: string | null;
+      federated_read: string[];
+      deleted_at: string | null;
+    }>(
+      `SELECT client_id, source_id, bound_source_id, federated_read, deleted_at
+         FROM oauth_clients
+        WHERE client_id IN ($1, $2)
+        ORDER BY client_id`,
+      ['pe-oauth-reader', 'pe-oauth-revoked'],
+    );
+    expect(clients).toHaveLength(2);
+    expect(clients[0]).toMatchObject({
+      client_id: 'pe-oauth-reader',
+      source_id: liveId,
+      federated_read: [liveId],
+      deleted_at: null,
+    });
+    expect(clients[1]).toMatchObject({
+      client_id: 'pe-oauth-revoked',
+      source_id: null,
+      bound_source_id: null,
+      federated_read: [],
+    });
+  });
+
+  test('purgeExpiredSources preserves sources used by active OAuth writers', async () => {
+    const expiredId = 'pe-oauth-active';
+    await seedSource(engine, expiredId, { withPages: 1 });
+    await softDeleteSource(engine, expiredId);
+    await engine.executeRaw(
+      `UPDATE sources SET archive_expires_at = now() - INTERVAL '1 hour' WHERE id = $1`,
+      [expiredId],
+    );
+    await engine.executeRaw(
+      `INSERT INTO oauth_clients
+         (client_id, client_name, source_id, federated_read)
+       VALUES ($1, $2, $3, ARRAY[$3]::text[])`,
+      ['pe-oauth-active-writer', 'Active source writer', expiredId],
+    );
+
+    const purged = await purgeExpiredSources(engine);
+
+    expect(purged).not.toContain(expiredId);
+    const sources = await engine.executeRaw<{ id: string }>(
+      'SELECT id FROM sources WHERE id = $1',
+      [expiredId],
+    );
+    expect(sources).toEqual([{ id: expiredId }]);
+    const clients = await engine.executeRaw<{
+      source_id: string | null;
+      federated_read: string[];
+    }>(
+      'SELECT source_id, federated_read FROM oauth_clients WHERE client_id = $1',
+      ['pe-oauth-active-writer'],
+    );
+    expect(clients).toEqual([{
+      source_id: expiredId,
+      federated_read: [expiredId],
+    }]);
+  });
+
+  test('purgeExpiredSources preserves sources used by active agent bindings', async () => {
+    const expiredId = 'pe-oauth-bound-active';
+    const liveId = 'pe-oauth-bound-live';
+    await seedSource(engine, expiredId, { withPages: 1 });
+    await seedSource(engine, liveId);
+    await softDeleteSource(engine, expiredId);
+    await engine.executeRaw(
+      `UPDATE sources SET archive_expires_at = now() - INTERVAL '1 hour' WHERE id = $1`,
+      [expiredId],
+    );
+    await engine.executeRaw(
+      `INSERT INTO oauth_clients
+         (client_id, client_name, source_id, federated_read, bound_source_id)
+       VALUES ($1, $2, $3, ARRAY[$3]::text[], $4)`,
+      ['pe-oauth-bound-client', 'Active bound agent', liveId, expiredId],
+    );
+
+    const purged = await purgeExpiredSources(engine);
+
+    expect(purged).not.toContain(expiredId);
+    const sources = await engine.executeRaw<{ id: string }>(
+      'SELECT id FROM sources WHERE id = $1',
+      [expiredId],
+    );
+    expect(sources).toEqual([{ id: expiredId }]);
+    const clients = await engine.executeRaw<{ bound_source_id: string | null }>(
+      'SELECT bound_source_id FROM oauth_clients WHERE client_id = $1',
+      ['pe-oauth-bound-client'],
+    );
+    expect(clients).toEqual([{ bound_source_id: expiredId }]);
+  });
+
   test('purgeExpiredSources is no-op when nothing is past TTL', async () => {
     // After all earlier tests, there may still be archived rows whose
     // archive_expires_at is in the future. Force-update any leftover-past
