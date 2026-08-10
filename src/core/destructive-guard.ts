@@ -304,7 +304,8 @@ export async function purgeExpiredSources(
     const purged: string[] = [];
     for (const { id } of candidates) {
       // Soft-revoked rows remain as audit history, but dead authority fields
-      // and every client's stale read grant must leave with the source.
+      // leave with the source. Read grants shrink unless doing so would widen
+      // an active client through the empty-array fallback.
       await tx.executeRaw(
         `UPDATE oauth_clients
             SET source_id = CASE
@@ -315,7 +316,12 @@ export async function purgeExpiredSources(
                   WHEN deleted_at IS NOT NULL AND bound_source_id = $1 THEN NULL
                   ELSE bound_source_id
                 END,
-                federated_read = array_remove(federated_read, $1)
+                federated_read = CASE
+                  WHEN deleted_at IS NULL
+                    AND cardinality(array_remove(federated_read, $1)) = 0
+                    THEN federated_read
+                  ELSE array_remove(federated_read, $1)
+                END
           WHERE $1 = ANY(federated_read)
              OR (deleted_at IS NOT NULL AND source_id = $1)
              OR (deleted_at IS NOT NULL AND bound_source_id = $1)`,

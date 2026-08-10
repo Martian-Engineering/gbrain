@@ -376,6 +376,39 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     }]);
   });
 
+  test('purgeExpiredSources does not widen an active client with one read grant', async () => {
+    const expiredId = 'pe-oauth-only-read';
+    const liveId = 'pe-oauth-write-only';
+    await seedSource(engine, expiredId, { withPages: 1 });
+    await seedSource(engine, liveId);
+    await softDeleteSource(engine, expiredId);
+    await engine.executeRaw(
+      `UPDATE sources SET archive_expires_at = now() - INTERVAL '1 hour' WHERE id = $1`,
+      [expiredId],
+    );
+    await engine.executeRaw(
+      `INSERT INTO oauth_clients
+         (client_id, client_name, source_id, federated_read)
+       VALUES ($1, $2, $3, ARRAY[$4]::text[])`,
+      ['pe-oauth-only-reader', 'Active constrained reader', liveId, expiredId],
+    );
+
+    const purged = await purgeExpiredSources(engine);
+
+    expect(purged).toContain(expiredId);
+    const clients = await engine.executeRaw<{
+      source_id: string | null;
+      federated_read: string[];
+    }>(
+      'SELECT source_id, federated_read FROM oauth_clients WHERE client_id = $1',
+      ['pe-oauth-only-reader'],
+    );
+    expect(clients).toEqual([{
+      source_id: liveId,
+      federated_read: [expiredId],
+    }]);
+  });
+
   test('purgeExpiredSources preserves sources used by active agent bindings', async () => {
     const expiredId = 'pe-oauth-bound-active';
     const liveId = 'pe-oauth-bound-live';
