@@ -99,6 +99,10 @@ Every read + write path consults the active pack at runtime:
   (including declared aliases). A type with `materialized_backlinks: true`
   also persists entity-page Timeline wikilinks through trusted `put_page`,
   so the auto-link hook reconciles reverse graph edges.
+  `extract.timeline_from_meetings.enabled` defaults to `true`; set
+  `extract.timeline_from_meetings.enabled.source.<source-id>` to `false` to
+  suppress only that source's meeting-page propagation while retaining event
+  projections. The extractor reports skipped meeting pages explicitly.
 - **`enrichment-service`** routes person/company enrichment based on the
   pack's primitive declarations.
 - **Search hybrid cache** (`knobsHash`) folds in pack name + version

@@ -123,6 +123,7 @@ describe('extractTimelineFromMeetings event widening', () => {
     });
 
     expect(result.entries_created).toBe(1);
+    expect(result.meetings_skipped_by_policy).toBe(0);
     expect(result.materialized_backlinks_written).toBe(0);
     expect(await engine.getTimeline('people/casey-example', { sourceId: 'default' })).toHaveLength(1);
     const page = await engine.getPage('people/casey-example', { sourceId: 'default' });
@@ -225,9 +226,112 @@ describe('extractTimelineFromMeetings event widening', () => {
     });
 
     expect(result.entries_created).toBe(1);
+    expect(result.meetings_skipped_by_policy).toBe(0);
     expect(result.materialized_backlinks_written).toBe(0);
     const bob = await engine.getPage('people/bob-example', { sourceId: 'default' });
     expect(bob?.timeline).not.toContain('meetings/2026-07-25-review');
+  });
+
+  test('global meeting opt-out preserves event projections and a source override', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
+      ['client-a'],
+    );
+    await engine.setConfig('extract.timeline_from_meetings.enabled', 'off');
+    await engine.setConfig('extract.timeline_from_meetings.enabled.source.client-a', 'true');
+
+    const pack: Pick<SchemaPackManifest, 'page_types'> = {
+      page_types: [
+        activePack.page_types[0]!,
+        {
+          name: 'meeting',
+          primitive: 'temporal',
+          path_prefixes: ['meetings/'],
+          aliases: [],
+          extractable: false,
+          expert_routing: false,
+          materialized_backlinks: false,
+        },
+        activePack.page_types[1]!,
+      ],
+    };
+
+    for (const sourceId of ['default', 'client-a']) {
+      const suffix = sourceId === 'default' ? 'host' : 'client';
+      await engine.putPage(`people/${suffix}-example`, {
+        type: 'person', title: `${suffix} Example`,
+        compiled_truth: `# ${suffix} Example`, timeline: '', frontmatter: {},
+      }, { sourceId });
+      await engine.putPage(`meetings/2026-07-25-${suffix}`, {
+        type: 'meeting', title: `${suffix} Meeting`,
+        compiled_truth: `${suffix} Example attended.`, timeline: '', frontmatter: {},
+        effective_date: new Date('2026-07-25T10:00:00.000Z'), effective_date_source: 'event_date',
+      }, { sourceId });
+      await engine.putPage(`life/events/2026-07-25-${suffix}`, {
+        type: 'event', title: `${suffix} Event`,
+        compiled_truth: `${suffix} Example attended.`, timeline: '', frontmatter: {},
+        effective_date: new Date('2026-07-25T12:00:00.000Z'), effective_date_source: 'event_date',
+      }, { sourceId });
+    }
+
+    const result = await extractTimelineFromMeetings(engine, {
+      activePack: pack,
+      materializeBacklinks: false,
+    });
+
+    expect(result.entries_created).toBe(3);
+    expect(result.meetings_scanned).toBe(3);
+    expect(result.meetings_skipped_by_policy).toBe(1);
+    const hostTimeline = await engine.getTimeline('people/host-example', { sourceId: 'default' });
+    expect(hostTimeline).toHaveLength(1);
+    expect(hostTimeline[0]?.summary).toBe('Discussed in host Event');
+    const clientTimeline = await engine.getTimeline('people/client-example', { sourceId: 'client-a' });
+    expect(clientTimeline).toHaveLength(2);
+    expect(clientTimeline.map(row => row.summary).sort()).toEqual([
+      'Discussed in client Event',
+      'Discussed in client Meeting',
+    ]);
+  });
+
+  test('source opt-out suppresses an aliased meeting while the global default remains on', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING`,
+      ['client-a'],
+    );
+    await engine.setConfig('extract.timeline_from_meetings.enabled.source.client-a', 'false');
+    const pack: Pick<SchemaPackManifest, 'page_types'> = {
+      page_types: [
+        activePack.page_types[0]!,
+        {
+          name: 'working-session', primitive: 'temporal', path_prefixes: ['sessions/'],
+          aliases: ['meeting'], extractable: false, expert_routing: false, materialized_backlinks: false,
+        },
+        activePack.page_types[1]!,
+      ],
+    };
+    await engine.putPage('people/alice-example', {
+      type: 'person', title: 'Alice Example', compiled_truth: '# Alice Example', timeline: '', frontmatter: {},
+    }, { sourceId: 'client-a' });
+    await engine.putPage('sessions/2026-07-25-review', {
+      type: 'working-session', title: 'Review', compiled_truth: 'Alice Example attended.', timeline: '', frontmatter: {},
+      effective_date: new Date('2026-07-25T10:00:00.000Z'), effective_date_source: 'event_date',
+    }, { sourceId: 'client-a' });
+    await engine.putPage('life/events/2026-07-25-launch', {
+      type: 'event', title: 'Launch', compiled_truth: 'Alice Example attended.', timeline: '', frontmatter: {},
+      effective_date: new Date('2026-07-25T12:00:00.000Z'), effective_date_source: 'event_date',
+    }, { sourceId: 'client-a' });
+
+    const result = await extractTimelineFromMeetings(engine, {
+      activePack: pack, sourceIdFilter: 'client-a', materializeBacklinks: false,
+    });
+
+    expect(result).toMatchObject({
+      entries_created: 1,
+      meetings_scanned: 1,
+      meetings_skipped_by_policy: 1,
+    });
+    const timeline = await engine.getTimeline('people/alice-example', { sourceId: 'client-a' });
+    expect(timeline).toMatchObject([{ summary: 'Discussed in Launch' }]);
   });
 
   test('unscoped extraction reuses each source pack for events and entity mentions', async () => {

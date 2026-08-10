@@ -40,6 +40,13 @@ describe('KNOWN_CONFIG_KEYS', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('cycle.calibration_profile.holder');
   });
 
+  test('registers the source-scoped meeting timeline propagation control', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('extract.timeline_from_meetings.enabled');
+    expect(KNOWN_CONFIG_KEY_PREFIXES).toContain(
+      'extract.timeline_from_meetings.enabled.source.',
+    );
+  });
+
   test('contains the spend-control keys (v0.42.42.0, #2139) — no --force archaeology', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('spend.posture');
     expect(KNOWN_CONFIG_KEYS).toContain('sync.cost_gate_min_usd');

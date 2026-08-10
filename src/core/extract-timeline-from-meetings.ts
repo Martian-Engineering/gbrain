@@ -28,7 +28,12 @@ interface TimelinePack {
 
 interface TimelineSourcePolicy {
   pack: TimelinePack | null;
-  types: Map<string, boolean>;
+  types: Map<string, TimelineTypePolicy>;
+}
+
+interface TimelineTypePolicy {
+  materializeBacklinks: boolean;
+  propagate: boolean;
 }
 
 export interface ExtractTimelineFromMeetingsOpts {
@@ -51,6 +56,8 @@ export interface ExtractTimelineFromMeetingsOpts {
 
 export interface ExtractTimelineFromMeetingsResult {
   meetings_scanned: number;
+  /** Meeting source pages skipped by a source-scoped propagation policy. */
+  meetings_skipped_by_policy: number;
   entries_created: number;
   /** Distinct entity pages that received at least one new timeline entry. */
   entities_touched: number;
@@ -88,6 +95,7 @@ interface AttendedEdgeRow {
 }
 
 const BATCH_SIZE = 200;
+const MEETING_PROPAGATION_CONFIG_KEY = 'extract.timeline_from_meetings.enabled';
 
 interface BacklinkTarget {
   slug: string;
@@ -119,16 +127,41 @@ async function resolveTimelinePack(
   }
 }
 
-function timelineTypePolicy(pack: TimelinePack | null): Map<string, boolean> {
-  if (!pack) return new Map([['meeting', false], ['event', false]]);
-  const policy = new Map<string, boolean>();
+async function resolveMeetingPropagation(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<boolean> {
+  const [global, sourceOverride] = await Promise.all([
+    engine.getConfig(MEETING_PROPAGATION_CONFIG_KEY),
+    engine.getConfig(`${MEETING_PROPAGATION_CONFIG_KEY}.source.${sourceId}`),
+  ]);
+  const configured = sourceOverride ?? global;
+  return !['false', '0', 'off', 'no'].includes(configured?.trim().toLowerCase() ?? '');
+}
+
+function timelineTypePolicy(
+  pack: TimelinePack | null,
+  meetingPropagationEnabled: boolean,
+): Map<string, TimelineTypePolicy> {
+  if (!pack) {
+    return new Map([
+      ['meeting', { materializeBacklinks: false, propagate: meetingPropagationEnabled }],
+      ['event', { materializeBacklinks: false, propagate: true }],
+    ]);
+  }
+  const policy = new Map<string, TimelineTypePolicy>();
   for (const pageType of pack.page_types) {
     if (pageType.name !== 'meeting' && pageType.name !== 'event'
       && !pageType.aliases.includes('meeting') && !pageType.aliases.includes('event')
       && pageType.materialized_backlinks !== true) continue;
-    policy.set(pageType.name, pageType.materialized_backlinks === true);
+    const isMeeting = pageType.name === 'meeting' || pageType.aliases.includes('meeting');
+    const typePolicy = {
+      materializeBacklinks: pageType.materialized_backlinks === true,
+      propagate: !isMeeting || meetingPropagationEnabled,
+    };
+    policy.set(pageType.name, typePolicy);
     for (const alias of pageType.aliases) {
-      policy.set(alias, pageType.materialized_backlinks === true);
+      policy.set(alias, typePolicy);
     }
   }
   return policy;
@@ -235,16 +268,23 @@ export async function extractTimelineFromMeetings(
     ? [opts.sourceIdFilter]
     : [...new Set(allRefs.map(ref => ref.source_id))];
   const policyEntries = await Promise.all(sourceIds.map(async sourceId => {
-    const pack = opts.activePack === undefined
-      ? await resolveTimelinePack(engine, sourceId)
-      : opts.activePack;
-    return [sourceId, { pack, types: timelineTypePolicy(pack) }] as const;
+    const [pack, meetingPropagationEnabled] = await Promise.all([
+      opts.activePack === undefined
+        ? resolveTimelinePack(engine, sourceId)
+        : Promise.resolve(opts.activePack),
+      resolveMeetingPropagation(engine, sourceId),
+    ]);
+    return [sourceId, {
+      pack,
+      types: timelineTypePolicy(pack, meetingPropagationEnabled),
+    }] as const;
   }));
   const policies = new Map<string, TimelineSourcePolicy>(policyEntries);
   const eventPredicate = timelinePolicyPredicate(policies);
   if (!eventPredicate.sql) {
     return {
       meetings_scanned: 0,
+      meetings_skipped_by_policy: 0,
       entries_created: 0,
       entities_touched: 0,
       batch_errors: 0,
@@ -277,6 +317,7 @@ export async function extractTimelineFromMeetings(
   if (meetings.length === 0) {
     return {
       meetings_scanned: 0,
+      meetings_skipped_by_policy: 0,
       entries_created: 0,
       entities_touched: 0,
       batch_errors: 0,
@@ -326,6 +367,7 @@ export async function extractTimelineFromMeetings(
   let entriesCreated = 0;
   const entitiesTouched = new Set<string>();
   let meetingsScanned = 0;
+  let meetingsSkippedByPolicy = 0;
   let batchErrors = 0;
   let firstBatchError: string | undefined;
   const materializedTargets = new Map<string, BacklinkTarget>();
@@ -357,6 +399,11 @@ export async function extractTimelineFromMeetings(
       if (Number.isFinite(updatedMs) && updatedMs <= sinceMs) continue;
     }
     if (!meeting.effective_date) continue; // can't write a timeline entry without a date
+
+    if (policies.get(meeting.source_id)?.types.get(meeting.type)?.propagate === false) {
+      meetingsSkippedByPolicy++;
+      continue;
+    }
 
     meetingsScanned++;
     opts.onProgress?.(meetingsScanned, meetings.length, entriesCreated);
@@ -406,7 +453,7 @@ export async function extractTimelineFromMeetings(
         summary,
       });
       entitiesTouched.add(`${t.source_id}::${t.slug}`);
-      if (policies.get(meeting.source_id)?.types.get(meeting.type) === true
+      if (policies.get(meeting.source_id)?.types.get(meeting.type)?.materializeBacklinks === true
         && t.source_id === meeting.source_id) {
         // put_page reconciles links within its target source. Cross-source
         // attendees still receive the canonical DB timeline row, but their
@@ -429,6 +476,7 @@ export async function extractTimelineFromMeetings(
     : await materializeBacklinks(engine, materializedTargets, dryRun);
   return {
     meetings_scanned: meetingsScanned,
+    meetings_skipped_by_policy: meetingsSkippedByPolicy,
     entries_created: entriesCreated,
     entities_touched: entitiesTouched.size,
     batch_errors: batchErrors,
