@@ -9,6 +9,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operations, OperationError } from '../src/core/operations.ts';
 import {
@@ -63,7 +64,7 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     // lore-cd8 added replace_page_text (write, fenced like put_page and
     // CAS-guarded by expected_content_hash).
     // Durable ingestion proposals add two non-corpus-mutating staging tools.
-    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(33);
+    expect(BRAIN_TOOL_ALLOWLIST.size).toBe(34);
     expect(BRAIN_TOOL_ALLOWLIST.has('apply_ingestion_proposal_page')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('apply_ingestion_proposal_relation')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('finalize_ingestion_proposal_application')).toBe(true);
@@ -71,6 +72,7 @@ describe('BRAIN_TOOL_ALLOWLIST', () => {
     expect(BRAIN_TOOL_ALLOWLIST.has('query')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('search')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_page')).toBe(true);
+    expect(BRAIN_TOOL_ALLOWLIST.has('get_skill')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('list_pages')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('get_links')).toBe(true);
     expect(BRAIN_TOOL_ALLOWLIST.has('put_page')).toBe(true);
@@ -139,6 +141,19 @@ describe('buildBrainTools', () => {
     const getPage = tools.find(t => t.name === 'brain_get_page');
     const op = operations.find(o => o.name === 'get_page');
     expect(getPage?.description).toBe(op!.description);
+  });
+
+  test('get_skill returns canonical published skill prose to a Minion', async () => {
+    await engine.setConfig('mcp.publish_skills', 'true');
+    await engine.setConfig('mcp.skills_dir', join(import.meta.dir, '..', 'skills'));
+    const tools = buildBrainTools({ subagentId: 1, engine, config });
+    const getSkill = tools.find(tool => tool.name === 'brain_get_skill');
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+
+    await expect(getSkill!.execute({ name: 'meeting-ingestion' }, ctx)).resolves.toMatchObject({
+      name: 'meeting-ingestion',
+      body: expect.stringContaining('# Meeting Ingestion'),
+    });
   });
 
   test('put_page schema is namespace-wrapped per subagent', () => {
