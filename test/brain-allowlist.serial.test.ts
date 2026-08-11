@@ -166,6 +166,38 @@ describe('buildBrainTools', () => {
     });
   });
 
+  test('get_skill shows Minions exactly one host-catalog selector', () => {
+    const getSkill = buildBrainTools({ subagentId: 1, engine, config })
+      .find(tool => tool.name === 'brain_get_skill')!;
+    const schema = getSkill.input_schema as any;
+
+    expect(Object.keys(schema.properties).sort()).toEqual(['name', 'path']);
+    expect(schema.properties.source_id).toBeUndefined();
+    expect(schema.required).toEqual([]);
+    expect(schema.oneOf).toEqual([{ required: ['name'] }, { required: ['path'] }]);
+    expect(schema.additionalProperties).toBe(false);
+    expect(getSkill.usage_hint).toContain('support-file references');
+  });
+
+  test('get_skill lets a Minion follow meeting-ingestion policy references', async () => {
+    await engine.setConfig('mcp.publish_skills', 'true');
+    await engine.setConfig('mcp.skills_dir', join(import.meta.dir, '..', 'skills'));
+    const getSkill = filterAllowedTools(
+      buildBrainTools({ subagentId: 1, engine, config }),
+      ['get_skill'],
+    )[0];
+    const ctx: ToolCtx = { engine, jobId: 1, remote: true };
+
+    const canonical = await getSkill.execute({ name: 'meeting-ingestion' }, ctx) as any;
+    expect(canonical.body).toContain('skills/_brain-filing-rules.md');
+    expect(canonical.body).toContain('skills/conventions/quality.md');
+
+    const filingRules = await getSkill.execute({ path: 'skills/_brain-filing-rules.md' }, ctx) as any;
+    const quality = await getSkill.execute({ path: 'skills/conventions/quality.md' }, ctx) as any;
+    expect(filingRules.body).toContain('# Brain Filing Rules');
+    expect(quality.body).toContain('# Quality Convention');
+  });
+
   test('put_page schema is namespace-wrapped per subagent', () => {
     const tools42 = buildBrainTools({ subagentId: 42, engine, config });
     const putPage42 = tools42.find(t => t.name === 'brain_put_page');

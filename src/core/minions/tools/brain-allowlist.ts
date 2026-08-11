@@ -150,7 +150,7 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
   validate_links: 'Validate explicit references on one page after a repair. Read-only.',
   get_active_schema_pack: 'Read the active source schema-pack identity before a schema-sensitive repair.',
-  get_skill: 'Read the complete prose for a published GBrain skill by name. Use when the active skill explicitly delegates policy to another packaged skill.',
+  get_skill: 'Read a published GBrain skill by name, or follow one of its support-file references with path. These are published skill files, not general filesystem access.',
   stage_ingestion_proposal_page: 'In ingestion propose mode, stage exactly one complete page proposal per agent turn before finalizing the compact manifest.',
   finalize_ingestion_proposal: 'After every proposed page is staged, validate and freeze the ordered manifest before returning the staged_proposal receipt.',
   apply_ingestion_proposal_page: 'In approved ingestion apply mode, apply one exact frozen create or compact update slot by proposal job, proposal digest, page sequence, and private-bound page digest.',
@@ -190,6 +190,20 @@ function sanitizeToolName(opName: string): string {
  */
 function paramsToInputSchema(op: Operation): Record<string, unknown> {
   return operationParamsToInputSchema(op);
+}
+
+/** Show Minions only the host-catalog modes, with an exact-one-of contract. */
+function minionGetSkillSchema(op: Operation): Record<string, unknown> {
+  const base = paramsToInputSchema(op);
+  const properties = base.properties as Record<string, Record<string, unknown>>;
+  const { source_id: _sourceId, ...visibleProperties } = properties;
+  return {
+    ...base,
+    properties: visibleProperties,
+    required: [],
+    oneOf: [{ required: ['name'] }, { required: ['path'] }],
+    additionalProperties: false,
+  };
 }
 
 /**
@@ -355,6 +369,8 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   return picked.map<ToolDef>(op => {
     const baseSchema = op.name === 'put_page'
       ? namespacedPutPageSchema(op, opts.subagentId, opts.allowedSlugPrefixes)
+      : op.name === 'get_skill'
+        ? minionGetSkillSchema(op)
       : op.name === 'stage_ingestion_proposal_page'
         ? stageIngestionProposalPageSchema(op)
       : paramsToInputSchema(op);
@@ -440,6 +456,7 @@ export const __testing = {
   sanitizeToolName,
   paramsToInputSchema,
   namespacedPutPageSchema,
+  minionGetSkillSchema,
   stageIngestionProposalPageSchema,
   bindProposalToolInput,
   ANTHROPIC_NAME_RE,
