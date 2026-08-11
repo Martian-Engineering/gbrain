@@ -4341,8 +4341,11 @@ const get_skill: Operation = {
   params: {
     name: {
       type: 'string',
-      required: true,
-      description: 'Skill name exactly as returned by list_skills (or the brain-pack skill slug when source_id is set).',
+      description: 'Skill name exactly as returned by list_skills (or the brain-pack skill slug when source_id is set). Mutually exclusive with path.',
+    },
+    path: {
+      type: 'string',
+      description: 'Published support-file path under the skills root, such as skills/conventions/quality.md. Mutually exclusive with name and source_id.',
     },
     source_id: {
       type: 'string',
@@ -4355,15 +4358,33 @@ const get_skill: Operation = {
     const sc = await import('./skill-catalog.ts');
     const publish = await sc.readMcpPublishSkills(ctx);
     sc.assertPublishEnabled(ctx, publish);
-    // Brain-resident path: when source_id is supplied, fetch the per-source pack
-    // skill (confined to that source's pack root) rather than the host catalog.
-    if (typeof p.source_id === 'string' && p.source_id.length > 0) {
+    const sourceId = typeof p.source_id === 'string' && p.source_id.length > 0
+      ? p.source_id
+      : undefined;
+    const hasSource = sourceId !== undefined;
+    const hasName = p.name !== undefined;
+    const hasPath = p.path !== undefined;
+
+    // Brain-resident mode retains its MCP contract, but never accepts a host
+    // support-file path. Minions hide source_id in their specialized schema.
+    if (hasSource) {
+      if (!hasName || hasPath) {
+        throw new OperationError(
+          'invalid_params',
+          'source_id requires name and cannot be combined with path',
+        );
+      }
       const brl = await import('./skillpack/brain-resident-locate.ts');
       const slug = typeof p.name === 'string' ? p.name : '';
-      return brl.getResidentSkillDetail(ctx, p.source_id, slug);
+      return brl.getResidentSkillDetail(ctx, sourceId, slug);
     }
+    if (hasName === hasPath) {
+      throw new OperationError('invalid_params', 'Provide exactly one of name or path');
+    }
+
     const override = await sc.readMcpSkillsDir(ctx);
     const { dir } = sc.resolveSkillsDir(ctx, override);
+    if (hasPath) return sc.getSkillFileDetail(dir, p.path);
     const name = typeof p.name === 'string' ? p.name : '';
     return sc.getSkillDetail(ctx, dir, name);
   },

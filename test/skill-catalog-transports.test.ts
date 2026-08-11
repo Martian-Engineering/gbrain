@@ -130,6 +130,37 @@ describe('get_skill over dispatch', () => {
     });
   });
 
+  test('path mode returns a confined published support file', async () => {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const r = await call('get_skill', { path: 'skills/_conventions/rules.md' }, {
+        remote: true,
+        auth: { token: 't', clientId: 'c', scopes: ['read'] },
+      });
+      expect(r.isError).toBe(false);
+      expect(r.body.path).toBe('skills/_conventions/rules.md');
+      expect(r.body.body.length).toBeGreaterThan(0);
+    });
+  });
+
+  test('path mode obeys the publish gate and exact-one runtime contract', async () => {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      const denied = await call('get_skill', { path: '_conventions/rules.md' }, {
+        remote: true,
+        auth: { token: 't', clientId: 'c', scopes: ['read'] },
+      });
+      expect(denied.body.error).toBe('permission_denied');
+
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const ambiguous = await call('get_skill', {
+        name: 'brain-ops',
+        path: '_conventions/rules.md',
+      }, { remote: false });
+      expect(ambiguous.body.error).toBe('invalid_params');
+      expect(ambiguous.body.message).toContain('exactly one');
+    });
+  });
+
   test('unknown skill → page_not_found', async () => {
     await withEnv({ GBRAIN_HOME: home }, async () => {
       await engine.setConfig('mcp.publish_skills', 'true');

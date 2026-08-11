@@ -1,9 +1,13 @@
 import { describe, test, expect } from 'bun:test';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 import type { OperationContext } from '../src/core/operations.ts';
 import {
   buildSkillCatalog,
+  getSkillFileDetail,
   getSkillDetail,
+  MAX_SKILL_MD_BYTES,
   crossReferenceTools,
   oneLineDescription,
   resolveSkillMdPath,
@@ -129,6 +133,55 @@ describe('getSkillDetail', () => {
     expect(res.unavailable_tools.sort()).toEqual(['put_page', 'web_search']);
     expect(res.client_guidance.mutating).toBe(true);
     expect(res.client_guidance.protocol.length).toBeGreaterThan(0);
+  });
+});
+
+describe('getSkillFileDetail', () => {
+  test('reads support prose by root-relative or repository-style path', () => {
+    const rootRelative = getSkillFileDetail(FIXTURE, '_conventions/rules.md');
+    const repositoryStyle = getSkillFileDetail(FIXTURE, 'skills/_conventions/rules.md');
+
+    expect(rootRelative).toEqual(repositoryStyle);
+    expect(rootRelative.path).toBe('skills/_conventions/rules.md');
+    expect(rootRelative.body.length).toBeGreaterThan(0);
+  });
+
+  test('rejects traversal, absolute paths, empty segments, and unsupported files', () => {
+    expect(() => getSkillFileDetail(FIXTURE, '../outside.md')).toThrow('Invalid skill file path');
+    expect(() => getSkillFileDetail(FIXTURE, '/etc/passwd')).toThrow('Invalid skill file path');
+    expect(() => getSkillFileDetail(FIXTURE, 'brain-ops//SKILL.md')).toThrow('Invalid skill file path');
+    expect(() => getSkillFileDetail(FIXTURE, 'brain-ops/tool.ts')).toThrow('Unsupported skill file type');
+  });
+
+  test('rejects symlink escapes, directories, missing files, and binary content', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'skill-files-'));
+    const skills = join(parent, 'skills');
+    mkdirSync(skills);
+    try {
+      writeFileSync(join(parent, 'outside.md'), 'private');
+      symlinkSync(join(parent, 'outside.md'), join(skills, 'escape.md'));
+      mkdirSync(join(skills, 'directory.md'));
+      writeFileSync(join(skills, 'invalid.md'), Buffer.from([0xff]));
+      writeFileSync(join(skills, 'nul.md'), Buffer.from('text\0binary'));
+
+      expect(() => getSkillFileDetail(skills, 'escape.md')).toThrow('escapes skills dir');
+      expect(() => getSkillFileDetail(skills, 'directory.md')).toThrow('not a regular file');
+      expect(() => getSkillFileDetail(skills, 'missing.md')).toThrow('not found');
+      expect(() => getSkillFileDetail(skills, 'invalid.md')).toThrow('not valid UTF-8');
+      expect(() => getSkillFileDetail(skills, 'nul.md')).toThrow('binary content');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects support files larger than the skill-content cap', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'skill-files-large-'));
+    try {
+      writeFileSync(join(parent, 'large.md'), Buffer.alloc(MAX_SKILL_MD_BYTES + 1, 65));
+      expect(() => getSkillFileDetail(parent, 'large.md')).toThrow('bytes (cap');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 });
 

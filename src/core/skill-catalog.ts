@@ -17,15 +17,15 @@
  *      OFF at runtime; new installs turn it on at `gbrain init`, existing installs
  *      via a consenting migration. Unlike `file_list`, this is content the owner
  *      deliberately published.
- *   2. Confinement — only the resolved skills dir is reachable. The client `name`
- *      is a manifest LOOKUP KEY, never a raw path segment; the manifest-derived
- *      path is realpath + relative-contained on every call (defeats symlink/`..`
- *      escape, including a poisoned manifest.json `path`); resolved path must be a
- *      regular file named `SKILL.md`.
+ *   2. Confinement — only the resolved skills dir is reachable. Skill names are
+ *      manifest lookup keys. Support-file paths are relative virtual paths. Both
+ *      modes realpath + relative-contain every target on every call (defeats
+ *      symlink/`..` escape); resolved targets must be regular allowlisted files.
  *   3. Field allowlist — frontmatter is projected to a safe subset; `writes_to`
  *      (private brain taxonomy) and `sources` (absolute paths) are dropped.
- *   4. Prose-only + size-capped — no source code (PR2 ships tarballs); `get_skill`
- *      caps the file size so a huge/binary file can't OOM the server.
+ *   4. Prose-only + size-capped — support files use a text/declarative extension
+ *      allowlist and strict UTF-8 decoding; every read is capped so a huge/binary
+ *      file cannot OOM the server.
  *   5. No install_path serve for remote — a hosted gbrain with no agent repo
  *      returns `storage_error`, never gbrain's own bundled dev skills.
  *   6. Bounded — the MCP rate limiter caps call rate; per-call memory is bounded
@@ -37,7 +37,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from 'fs';
-import { basename, join, relative, resolve } from 'path';
+import { basename, extname, isAbsolute, join, relative, resolve } from 'path';
 import {
   autoDetectSkillsDir,
   autoDetectSkillsDirReadOnly,
@@ -73,6 +73,12 @@ export const MAX_SKILL_MD_BYTES = (() => {
 
 /** Max client-supplied skill name length before we even hit the manifest. */
 const MAX_SKILL_NAME_LEN = 128;
+
+/** Max client-supplied support-file path length before filesystem access. */
+const MAX_SKILL_FILE_PATH_LEN = 512;
+
+/** Published support files are prose or declarative data, never source code. */
+const SKILL_FILE_EXTENSIONS = new Set(['.md', '.txt', '.json', '.yaml', '.yml']);
 
 /** Where auto-detect found the dir, plus the explicit-config variant. */
 export type ResolvedSkillsDirSource = SkillsDirSource | 'config';
@@ -129,6 +135,13 @@ export interface GetSkillResult {
     available_brain_tools: string[];
     mutating: boolean;
   };
+}
+
+export interface GetSkillFileResult {
+  schema_version: 1;
+  /** Canonical virtual path rooted at the published `skills/` directory. */
+  path: string;
+  body: string;
 }
 
 /** Private capability metadata used to bind a remote agent to one skill. */
@@ -291,6 +304,67 @@ export function confineManifestPath(skillsDir: string, entry: ManifestEntry): st
     );
   }
   return realCandidate;
+}
+
+/**
+ * Resolve a client-supplied support-file path beneath the published skills
+ * root. An optional leading `skills/` mirrors paths written in skill prose.
+ */
+export function resolveSkillFilePath(
+  skillsDir: string,
+  requestedPath: unknown,
+): { realPath: string; virtualPath: string } {
+  if (typeof requestedPath !== 'string' || requestedPath.length === 0) {
+    throw new OperationError('invalid_params', 'skill file path must be a non-empty string');
+  }
+  if (requestedPath.length > MAX_SKILL_FILE_PATH_LEN) {
+    throw new OperationError(
+      'invalid_params',
+      `skill file path exceeds ${MAX_SKILL_FILE_PATH_LEN} characters`,
+    );
+  }
+  if (requestedPath.includes('\0') || requestedPath.includes('\\') || isAbsolute(requestedPath)) {
+    throw new OperationError('invalid_params', `Invalid skill file path: ${requestedPath}`);
+  }
+
+  const rootRelative = requestedPath.startsWith('skills/')
+    ? requestedPath.slice('skills/'.length)
+    : requestedPath;
+  const segments = rootRelative.split('/');
+  if (segments.some(segment => segment.length === 0 || segment === '.' || segment === '..')) {
+    throw new OperationError('invalid_params', `Invalid skill file path: ${requestedPath}`);
+  }
+  if (!SKILL_FILE_EXTENSIONS.has(extname(rootRelative).toLowerCase())) {
+    throw new OperationError('invalid_params', `Unsupported skill file type: ${requestedPath}`);
+  }
+
+  let realRoot: string;
+  let realPath: string;
+  try {
+    realRoot = realpathSync(skillsDir);
+  } catch {
+    throw new OperationError('storage_error', `Cannot resolve skills dir: ${skillsDir}`);
+  }
+  try {
+    realPath = realpathSync(join(realRoot, rootRelative));
+  } catch {
+    throw new OperationError('page_not_found', `Skill file not found: ${requestedPath}`);
+  }
+
+  const rel = relative(realRoot, realPath);
+  if (rel.startsWith('..') || resolve(realRoot, rel) !== realPath) {
+    throw new OperationError('invalid_params', `Skill file path escapes skills dir: ${requestedPath}`);
+  }
+  let isFile = false;
+  try {
+    isFile = statSync(realPath).isFile();
+  } catch {
+    throw new OperationError('page_not_found', `Skill file not found: ${requestedPath}`);
+  }
+  if (!isFile) {
+    throw new OperationError('invalid_params', `Skill file is not a regular file: ${requestedPath}`);
+  }
+  return { realPath, virtualPath: `skills/${rel}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +633,34 @@ export function getSkillDetail(
       mutating,
     },
   };
+}
+
+/** Fetch one confined, size-capped UTF-8 support file from the skills root. */
+export function getSkillFileDetail(
+  skillsDir: string,
+  requestedPath: unknown,
+): GetSkillFileResult {
+  const { realPath, virtualPath } = resolveSkillFilePath(skillsDir, requestedPath);
+  const size = statSync(realPath).size;
+  if (size > MAX_SKILL_MD_BYTES) {
+    throw new OperationError(
+      'payload_too_large',
+      `Skill file ${virtualPath} is ${size} bytes (cap ${MAX_SKILL_MD_BYTES}).`,
+      'Raise GBRAIN_MAX_SKILL_MD_BYTES if this is a legitimately large skill file.',
+    );
+  }
+
+  const bytes = readFileSync(realPath);
+  let body: string;
+  try {
+    body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new OperationError('invalid_params', `Skill file is not valid UTF-8 text: ${virtualPath}`);
+  }
+  if (body.includes('\0')) {
+    throw new OperationError('invalid_params', `Skill file contains binary content: ${virtualPath}`);
+  }
+  return { schema_version: 1, path: virtualPath, body };
 }
 
 /** Read the private tool and write-namespace declarations for agent binding. */

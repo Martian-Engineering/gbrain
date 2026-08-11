@@ -175,15 +175,18 @@ export const LIST_SKILLS_DESCRIPTION =
   "when the brain owner enabled mcp.publish_skills.";
 
 export const GET_SKILL_DESCRIPTION =
-  "Fetch one skill's full instructions by name. Returns `{name, frontmatter " +
-  "(sanitized), body, usable_tools, unavailable_tools, client_guidance}`. The " +
+  "Fetch one published skill by `name`, or one support file beneath the skills " +
+  "root by `path` when skill prose references it. Name mode returns `{name, frontmatter " +
+  "(sanitized), body, usable_tools, unavailable_tools, client_guidance}`; path " +
+  "mode returns `{path, body}`. The " +
   "`body` is prose — read it as your operating instructions for this task, and " +
   "when it says to search / store / look something up, call the same-named MCP " +
   "tool on THIS server. There is nothing to 'execute' — the value is the " +
   "instructions plus your tool calls back to this server. Tools listed in " +
   "`unavailable_tools` won't work for you (not exposed here, or beyond your " +
   "access) — adapt accordingly. Size-capped; read-scope; requires the owner to " +
-  "have enabled mcp.publish_skills.";
+  "have enabled mcp.publish_skills. Path mode is confined to allowlisted text " +
+  "files under the published skills root; it is not general filesystem access.";
 
 /**
  * The load-bearing `instructions` envelope for list_skills. Pinned so the
