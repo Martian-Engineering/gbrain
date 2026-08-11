@@ -651,6 +651,9 @@ export function getSkillFileDetail(
   }
 
   const bytes = readFileSync(realPath);
+  if (bytes.byteLength > MAX_SKILL_MD_BYTES) {
+    throw new OperationError('payload_too_large', `Skill file ${virtualPath} exceeds the size cap.`);
+  }
   let body: string;
   try {
     body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);

@@ -173,6 +173,7 @@ describe('buildBrainTools', () => {
 
     expect(Object.keys(schema.properties).sort()).toEqual(['name', 'path']);
     expect(schema.properties.source_id).toBeUndefined();
+    expect(schema.properties.name.description).not.toContain('source_id');
     expect(schema.required).toEqual([]);
     expect(schema.oneOf).toEqual([{ required: ['name'] }, { required: ['path'] }]);
     expect(schema.additionalProperties).toBe(false);

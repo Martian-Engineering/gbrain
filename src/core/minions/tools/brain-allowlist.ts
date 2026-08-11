@@ -196,10 +196,18 @@ function paramsToInputSchema(op: Operation): Record<string, unknown> {
 function minionGetSkillSchema(op: Operation): Record<string, unknown> {
   const base = paramsToInputSchema(op);
   const properties = base.properties as Record<string, Record<string, unknown>>;
-  const { source_id: _sourceId, ...visibleProperties } = properties;
   return {
     ...base,
-    properties: visibleProperties,
+    properties: {
+      name: {
+        ...properties.name,
+        description: 'Published skill name exactly as returned by list_skills. Mutually exclusive with path.',
+      },
+      path: {
+        ...properties.path,
+        description: 'Support-file path referenced by published skill prose, such as skills/conventions/quality.md. Mutually exclusive with name.',
+      },
+    },
     required: [],
     oneOf: [{ required: ['name'] }, { required: ['path'] }],
     additionalProperties: false,
