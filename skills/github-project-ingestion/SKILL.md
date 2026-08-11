@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.3.2
+version: 1.4.0
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -265,10 +265,20 @@ In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
 staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the exact capture and every feature, initiative, or
 entity page that the scoped ingestion requires. A create entry is exactly
-`{slug,effect:"create",title,bodyMarkdown}`. An update entry is exactly
-`{slug,effect:"update",appendMarkdown}` and contains only the reviewed Markdown
-to append. Never send a full update body, title, baseline, or content hash; the
-server freezes the current private baseline when it accepts the stage call.
+`{slug,effect:"create",title,bodyMarkdown}`. An update chooses exactly one of
+two operations:
+
+- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
+  unchanged at the end of the current page. The server freezes the private
+  baseline, and apply may safely rebase this suffix over other suffix appends.
+- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
+  when existing compiled truth must be integrated, reorganized, corrected, or
+  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
+  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
+  page, not a diff. Apply never rebases a full rewrite.
+
+Append is an additive operation, not the only update operation. Do not express
+a synthesis rewrite as a dated section merely to fit the append shape.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -284,7 +294,11 @@ entry before staging; never reserve a second inventory slot for the same slug. O
 inventory is frozen, use `search`, `query`, `list_pages`, and `resolve_slugs`
 results to work through it without preloading full page bodies. Never request
 more than one `get_page` in the same assistant turn or tool batch. For an update,
-call exactly one `get_page` only when ready to construct and stage that entry. After an update
+call exactly one `get_page` only when ready to construct and stage that entry.
+For an append, draft only the exact new `appendMarkdown`; the stage operation
+freezes the title, body, and content hash privately. For a full rewrite,
+preserve the exact title, body, and content hash from that read as the reviewed
+baseline and draft the complete intended `bodyMarkdown`. After an update
 target's `get_page` returns, the very next assistant turn must call
 `brain_stage_ingestion_proposal_page` for that same update, as the only tool call
 in that turn. Do not call `get_page` for another target, or make any other large
@@ -333,9 +347,9 @@ timeline entries, links, and unresolved items. The server derives the ordered
 page-digest manifest from the job's durable fragments, so finalization does not
 depend on old stage outputs remaining in model context. The server rejects
 gaps, duplicate or changed fragments, cross-job evidence, a capture page that
-does not match the exact job binding, mutations outside the job slug fence, a full
-raw or JSON-escaped plan representation over 98,304 UTF-8 bytes, more than 32
-pages, a timeline `refLabel` over
+does not match the exact job binding, mutations outside the job slug fence, a
+raw plan representation over 786,432 UTF-8 bytes, JSON-escaped plan over
+1,572,864 UTF-8 bytes, more than 32 pages, a timeline `refLabel` over
 500 characters, or a compact manifest over 262,144 UTF-8 bytes.
 Return the finalizer's compact manifest as `staged_proposal`; never reproduce
 page bodies or baselines in the final receipt. Never truncate or split a
@@ -370,8 +384,9 @@ Copy every value from `approvedProposal`; never send `slug`, `effect`,
 `title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
 authority or create collisions, performs the conditional write, safely rebases
-only an append-only update, records a durable per-sequence receipt, and verifies
-the resulting page state. Do not pre-read or reimplement its compare-and-swap
+only an append operation, requires an unchanged reviewed baseline for a full
+rewrite, records a durable per-sequence receipt, and verifies the resulting
+page state. Do not pre-read or reimplement its compare-and-swap
 logic with `get_page` or `put_page`.
 
 A successful call returns `status` `applied` or `already_applied`, plus the
@@ -509,6 +524,11 @@ URL, the direct GitHub attribution, the concise body anatomy, and the absence of
 self-citations. After writing, use the server-authoritative page verification
 rule above to prove that this exact validated body landed before continuing.
 
+When the exact immutable capture page already exists, stage its update as a
+full rewrite with the exact current baseline. The server replaces the proposed
+body with the bound capture bytes before hashing; never stage those bytes as an
+append to an earlier capture body.
+
 ### 5. Update durable feature or initiative knowledge
 
 When phase 3 resolved a durable feature or initiative, use its stable page under
@@ -542,6 +562,12 @@ Link the feature or initiative page to the exact `sources/` capture page. A
 newer capture updates current understanding and adds only material dated
 changes to the page timeline.
 
+Use a full rewrite whenever the feature or initiative's current understanding
+must be integrated, reorganized, corrected, or otherwise synthesized
+coherently. Reserve append for material that truthfully belongs unchanged at
+the page's end. A dated capture section never qualifies; represent that history
+with `proposedTimelineEntries`.
+
 When `historical: true`:
 
 - Still write dated, cited timeline entries for material feature or initiative
@@ -571,6 +597,10 @@ For each unambiguous, material entity or decision:
 3. Update only current understanding that materially changed.
 4. Add a dated timeline entry only for a material feature or initiative event.
 5. Use explicit links only for identities resolved within this source.
+
+Use the same update rule for entity and decision dossiers: rewrite compiled
+truth coherently, append only genuine end material, and keep dated events in
+`proposedTimelineEntries`.
 
 People belong in `people/`, organizations in `companies/`, ongoing work in
 `projects/`, reusable ideas in `concepts/`, and durable decisions in

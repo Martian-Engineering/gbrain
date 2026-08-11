@@ -44,7 +44,7 @@ const expectedPrefixes = [
 
 describe('gmail-thread-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.1.1');
+    expect(skill).toContain('version: 1.2.0');
     expect(getSkillAgentBindings(skillsDir, 'gmail-thread-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -153,10 +153,18 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).not.toMatch(/newer thread version updates the same source page/i);
   });
 
-  test('supports compact staging and body-free server-bound apply', () => {
+  test('supports append and full-rewrite staging with body-free server-bound apply', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
     expect(skill).toContain('{slug,effect}');
-    expect(skill).toContain('"appendMarkdown": "exact reviewed Markdown to append"');
+    expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
+    expect(skill).toContain(
+      '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
+    );
+    expect(skill).toContain('Append is an additive operation, not the only update operation');
+    expect(skill).toMatch(/Apply never rebases a full rewrite/);
+    expect(skill).toMatch(/requires an unchanged reviewed baseline for a full\s+rewrite/);
+    expect(skill).toContain('786,432 UTF-8 bytes');
+    expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('approvedProposal: # required in apply mode');
@@ -206,6 +214,16 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('add_timeline_entry');
     expect(skill).toContain('get_backlinks');
     expect(skill).toContain('both directions');
+    expect(skill).toMatch(/Use a full rewrite whenever an existing dossier's current understanding needs\s+coherent synthesis/);
+    expect(skill).toMatch(/Reserve append for material that truthfully belongs\s+unchanged at the page's end/);
+    expect(skill).toMatch(/Never append a dated capture section to a dossier\s+body/);
+    expect(skill).toContain('proposedTimelineEntries');
+  });
+
+  test('rewrites an existing immutable capture instead of appending bound bytes', () => {
+    expect(skill).toMatch(/exact immutable capture page already exists[\s\S]*stage its update as a\s+full rewrite/);
+    expect(skill).toMatch(/server replaces the proposed\s+body with the bound capture bytes before hashing/);
+    expect(skill).toMatch(/never stage those bytes as an\s+append to an earlier capture body/);
   });
 
   test('enforces the resolver-scoped privacy boundary', () => {
