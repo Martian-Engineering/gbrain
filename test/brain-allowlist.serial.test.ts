@@ -146,13 +146,23 @@ describe('buildBrainTools', () => {
   test('get_skill returns canonical published skill prose to a Minion', async () => {
     await engine.setConfig('mcp.publish_skills', 'true');
     await engine.setConfig('mcp.skills_dir', join(import.meta.dir, '..', 'skills'));
-    const tools = buildBrainTools({ subagentId: 1, engine, config });
+    const tools = filterAllowedTools(
+      buildBrainTools({ subagentId: 1, engine, config }),
+      ['get_skill', 'search', 'get_page'],
+    );
     const getSkill = tools.find(tool => tool.name === 'brain_get_skill');
     const ctx: ToolCtx = { engine, jobId: 1, remote: true };
 
     await expect(getSkill!.execute({ name: 'meeting-ingestion' }, ctx)).resolves.toMatchObject({
       name: 'meeting-ingestion',
       body: expect.stringContaining('# Meeting Ingestion'),
+      usable_tools: ['search', 'get_page'],
+      unavailable_tools: expect.arrayContaining([
+        'query',
+        'put_page',
+        'add_link',
+        'add_timeline_entry',
+      ]),
     });
   });
 

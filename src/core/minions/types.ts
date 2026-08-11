@@ -543,6 +543,8 @@ export interface ToolCtx {
   jobId: number;
   /** Always true for LLM-invoked tools — matches MCP trust boundary. */
   remote: true;
+  /** Operation names available in the current, possibly filtered registry. */
+  availableToolNames?: readonly string[];
   /** Fired on cooperative abort (timeout, lock loss, cancel, SIGTERM). */
   signal?: AbortSignal;
 }

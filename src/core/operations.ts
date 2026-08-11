@@ -433,6 +433,8 @@ export interface OperationContext {
   jobId?: number;
   subagentId?: number;
   viaSubagent?: boolean;
+  /** Server-owned operation names present in this Minion's filtered registry. */
+  availableToolNames?: readonly string[];
   /**
    * Trusted-workspace allow-list (v0.23 dream cycle). When the cycle's
    * synthesize/patterns phases dispatch a subagent, they thread an

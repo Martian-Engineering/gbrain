@@ -304,6 +304,7 @@ interface OpContextDeps {
   jobId: number;
   signal?: AbortSignal;
   brainId?: string;
+  availableToolNames?: readonly string[];
   allowedSlugPrefixes?: readonly string[];
   sourceId?: string;
 }
@@ -324,6 +325,7 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace
+    availableToolNames: deps.availableToolNames,
     brainId: deps.brainId,
     allowedSlugPrefixes: deps.allowedSlugPrefixes
       ? [...deps.allowedSlugPrefixes]
@@ -343,6 +345,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   const picked: Operation[] = operations.filter(
     op => BRAIN_TOOL_ALLOWLIST.has(op.name) && filter.has(op.name),
   );
+  const pickedNames = picked.map(op => op.name);
 
   // #1586: fail fast on a malformed source id before any tool executes
   // (defense-in-depth — the seam is trusted, but the value round-trips
@@ -379,6 +382,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           jobId: ctx.jobId,
           signal: ctx.signal,
           brainId: opts.brainId,
+          availableToolNames: ctx.availableToolNames ?? pickedNames,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
           sourceId: opts.sourceId,
         });
@@ -424,7 +428,11 @@ export function filterAllowedTools(registry: ToolDef[], allowedToolNames: string
     seen.add(match.name);
     picked.push(match);
   }
-  return picked;
+  const availableToolNames = picked.map(tool => tool.name.replace(/^brain_/, ''));
+  return picked.map(tool => ({
+    ...tool,
+    execute: (input, ctx) => tool.execute(input, { ...ctx, availableToolNames }),
+  }));
 }
 
 /** Exported for unit tests (stable surface). */
