@@ -1,6 +1,6 @@
 ---
 name: gmail-thread-ingestion
-version: 1.1.1
+version: 1.2.0
 description: Ingest one complete prompt-supplied Gmail thread capture into one already-selected source.
 triggers:
   - "ingest this Gmail thread capture into this source"
@@ -207,13 +207,19 @@ Every proposed page has exactly one of these shapes:
 }
 ```
 
-```json
-{
-  "slug": "projects/example",
-  "effect": "update",
-  "appendMarkdown": "exact reviewed Markdown to append"
-}
-```
+An update chooses exactly one of two operations:
+
+- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
+  unchanged at the end of the current page. The server freezes the private
+  baseline, and apply may safely rebase this suffix over other suffix appends.
+- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
+  when existing compiled truth must be integrated, reorganized, corrected, or
+  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
+  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
+  page, not a diff. Apply never rebases a full rewrite.
+
+Append is an additive operation, not the only update operation. Do not express
+a synthesis rewrite as a dated section merely to fit the append shape.
 
 The proposal must include `capturePageSlug` exactly once. A differently
 slugged legacy source page is never proposed for create or update. Freeze
@@ -238,8 +244,11 @@ before staging; never reserve a second inventory slot for the same slug. Use `se
 full page bodies. Never request more than one `get_page` in the same assistant
 turn or tool batch.
 For an update, call exactly one `get_page` only when ready to construct and stage
-that entry. Draft only the exact new `appendMarkdown`; the stage operation
-freezes the title, body, and content hash privately. After an update target's `get_page` returns, the very next
+that entry. For an append, draft only the exact new `appendMarkdown`; the stage
+operation freezes the title, body, and content hash privately. For a full
+rewrite, preserve the exact title, body, and content hash from that read as the
+reviewed baseline and draft the complete intended `bodyMarkdown`. After an update
+target's `get_page` returns, the very next
 assistant turn must call `brain_stage_ingestion_proposal_page` for that same
 update, as the only tool call in that turn. Do not call `get_page` for another
 target, or make any other large read, between that baseline read and its staging
@@ -257,10 +266,10 @@ and `effect` must match its inventory slot. Follow the returned
 `brain_finalize_ingestion_proposal` in its own turn with `total_pages`, plus
 compact `summary`, `proposed_timeline_entries`,
 `proposed_links`, and bounded `unresolved`. Return `failed` without corpus
-mutation when the canonical plan or its escaped representation exceeds 98,304
-UTF-8 bytes, the compact manifest exceeds 262,144 UTF-8 bytes, or any required
-value cannot be represented exactly. Never truncate, split, summarize, or
-reproduce page bodies in the final receipt.
+mutation when the raw plan exceeds 786,432 UTF-8 bytes, the JSON-escaped plan
+exceeds 1,572,864 UTF-8 bytes, the compact manifest exceeds 262,144 UTF-8
+bytes, or any required value cannot be represented exactly. Never truncate,
+split, summarize, or reproduce page bodies in the final receipt.
 
 Return the finalizer's compact manifest as `staged_proposal`:
 
@@ -314,9 +323,10 @@ Copy every value from `approvedProposal`; never send `slug`, `effect`,
 `title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
 authority or create collisions, performs the conditional write, safely rebases
-only an append-only update, records a durable per-sequence receipt, and verifies
-the resulting page state. Do not pre-read or reimplement its compare-and-swap
-logic with `get_page` or `put_page`.
+only an append operation, requires an unchanged reviewed baseline for a full
+rewrite, records a durable per-sequence receipt, and verifies the resulting
+page state. Do not pre-read or reimplement its compare-and-swap logic with
+`get_page` or `put_page`.
 
 A successful call returns `status` `applied` or `already_applied`, plus the
 bound `effect`, `slug`, hashes, and `rebased` flag. Record that exact
@@ -452,6 +462,11 @@ at least one concrete dated fact. Read the page back and verify every identity,
 revision, summary, date, participant, canonical link, admission warning, and
 local-mirror provenance field before continuing.
 
+When the exact immutable capture page already exists, stage its update as a
+full rewrite with the exact current baseline. The server replaces the proposed
+body with the bound capture bytes before hashing; never stage those bytes as an
+append to an earlier capture body.
+
 ### 5. Update canonical dossiers
 
 For each unambiguous, material person, company, or project:
@@ -468,6 +483,11 @@ For each unambiguous, material person, company, or project:
 5. Link the capture page to each canonical dossier. Cite and link that exact
    page from every dossier update so `get_backlinks` verifies navigation
    in both directions.
+
+Use a full rewrite whenever an existing dossier's current understanding needs
+coherent synthesis. Reserve append for material that truthfully belongs
+unchanged at the page's end. Never append a dated capture section to a dossier
+body; represent material dated events with `proposedTimelineEntries`.
 
 Use `concepts/` and `decisions/` only when the capture supports a reusable
 concept or durable decision as its own canonical page. Keep unresolved people,
