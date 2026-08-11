@@ -524,6 +524,11 @@ URL, the direct GitHub attribution, the concise body anatomy, and the absence of
 self-citations. After writing, use the server-authoritative page verification
 rule above to prove that this exact validated body landed before continuing.
 
+When the exact immutable capture page already exists, stage its update as a
+full rewrite with the exact current baseline. The server replaces the proposed
+body with the bound capture bytes before hashing; never stage those bytes as an
+append to an earlier capture body.
+
 ### 5. Update durable feature or initiative knowledge
 
 When phase 3 resolved a durable feature or initiative, use its stable page under

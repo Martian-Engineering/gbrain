@@ -199,6 +199,18 @@ describe('github-project-ingestion skill', () => {
     );
   });
 
+  test('rewrites an existing immutable capture instead of appending bound bytes', () => {
+    expect(skill).toMatch(
+      /exact immutable capture page already exists[\s\S]*stage its update as a\s+full rewrite/,
+    );
+    expect(skill).toMatch(
+      /server replaces the proposed\s+body with the bound capture bytes before hashing/,
+    );
+    expect(skill).toMatch(
+      /never stage those bytes as an\s+append to an earlier capture body/,
+    );
+  });
+
   test('verifies direct capture provenance and rejects capture self-citations', () => {
     expect(skill).toMatch(
       /confirm it contains the exact upstream identity\s+and clickable GitHub URL/,
