@@ -49,7 +49,8 @@ import {
  *
  * Read-only (all safe):
  *   query, search, get_page, list_pages, file_list, file_url,
- *   get_links, get_backlinks, traverse_graph, resolve_slugs, get_ingest_log
+ *   get_links, get_backlinks, traverse_graph, resolve_slugs, get_ingest_log,
+ *   get_skill
  *
  * Conditional write:
  *   put_page (namespace-enforced by the tool schema + server-side check),
@@ -78,6 +79,10 @@ export const BRAIN_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
   'get_ingest_log',
   'validate_links',
   'get_active_schema_pack',
+  // Published skill prose is available through the same confined catalog used
+  // by remote MCP clients. This lets one bound skill load a canonical policy
+  // that it explicitly references without exposing general filesystem reads.
+  'get_skill',
   // Exact ingestion proposals are staged in a job-owned evidence ledger.
   // Neither operation mutates corpus pages, links, takes, or timeline state.
   'stage_ingestion_proposal_page',
@@ -145,6 +150,7 @@ export const BRAIN_TOOL_USAGE_HINTS: Readonly<Record<string, string>> = {
   get_ingest_log: 'Read the brain ingestion log for diagnostic / verification queries.',
   validate_links: 'Validate explicit references on one page after a repair. Read-only.',
   get_active_schema_pack: 'Read the active source schema-pack identity before a schema-sensitive repair.',
+  get_skill: 'Read the complete prose for a published GBrain skill by name. Use when the active skill explicitly delegates policy to another packaged skill.',
   stage_ingestion_proposal_page: 'In ingestion propose mode, stage exactly one complete page proposal per agent turn before finalizing the compact manifest.',
   finalize_ingestion_proposal: 'After every proposed page is staged, validate and freeze the ordered manifest before returning the staged_proposal receipt.',
   apply_ingestion_proposal_page: 'In approved ingestion apply mode, apply one exact frozen create or compact update slot by proposal job, proposal digest, page sequence, and private-bound page digest.',
@@ -298,6 +304,7 @@ interface OpContextDeps {
   jobId: number;
   signal?: AbortSignal;
   brainId?: string;
+  availableToolNames?: readonly string[];
   allowedSlugPrefixes?: readonly string[];
   sourceId?: string;
 }
@@ -318,6 +325,7 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace
+    availableToolNames: deps.availableToolNames,
     brainId: deps.brainId,
     allowedSlugPrefixes: deps.allowedSlugPrefixes
       ? [...deps.allowedSlugPrefixes]
@@ -337,6 +345,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
   const picked: Operation[] = operations.filter(
     op => BRAIN_TOOL_ALLOWLIST.has(op.name) && filter.has(op.name),
   );
+  const pickedNames = picked.map(op => op.name);
 
   // #1586: fail fast on a malformed source id before any tool executes
   // (defense-in-depth — the seam is trusted, but the value round-trips
@@ -373,6 +382,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           jobId: ctx.jobId,
           signal: ctx.signal,
           brainId: opts.brainId,
+          availableToolNames: ctx.availableToolNames ?? pickedNames,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
           sourceId: opts.sourceId,
         });
@@ -418,7 +428,11 @@ export function filterAllowedTools(registry: ToolDef[], allowedToolNames: string
     seen.add(match.name);
     picked.push(match);
   }
-  return picked;
+  const availableToolNames = picked.map(tool => tool.name.replace(/^brain_/, ''));
+  return picked.map(tool => ({
+    ...tool,
+    execute: (input, ctx) => tool.execute(input, { ...ctx, availableToolNames }),
+  }));
 }
 
 /** Exported for unit tests (stable surface). */

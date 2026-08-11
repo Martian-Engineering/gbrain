@@ -299,6 +299,9 @@ export function confineManifestPath(skillsDir: string, entry: ManifestEntry): st
 
 /** Can THIS caller call THIS op on THIS server? Local owns everything. */
 function opCallableByCaller(op: Operation, ctx: OperationContext): boolean {
+  if (ctx.viaSubagent === true) {
+    return ctx.availableToolNames?.includes(op.name) ?? false;
+  }
   if (ctx.remote === false) return true; // local CLI — OS is the trust boundary
   if (op.localOnly) return false; // not reachable over a remote transport
   return hasScope(ctx.auth?.scopes ?? [], op.scope ?? 'read');

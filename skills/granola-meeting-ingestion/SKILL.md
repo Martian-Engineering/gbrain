@@ -1,11 +1,12 @@
 ---
 name: granola-meeting-ingestion
-version: 1.4.0
+version: 1.4.1
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
 tools:
   - get_active_schema_pack
+  - get_skill
   - search
   - query
   - get_page
@@ -70,11 +71,11 @@ skill; it does not define a second meeting-synthesis policy.
 - Treat Lore's transcript Markdown as immutable source authority. GBrain binds
   those exact bytes to `capturePageSlug` at job submission and replaces the
   model-authored capture body before the proposal is hashed and frozen.
-- Before interpreting the artifact, read all of
-  `skills/meeting-ingestion/SKILL.md` and follow it for meeting structure,
-  attendee enrichment, entity propagation, timelines, and back-links. If this
-  adapter and that skill appear to disagree about meeting knowledge, the
-  canonical meeting-ingestion skill controls.
+- Before interpreting the artifact, call `get_skill` with
+  `{ "name": "meeting-ingestion" }`. Read the complete returned `body` and
+  follow it for meeting structure, attendee enrichment, entity propagation,
+  timelines, and back-links. If this adapter and that skill appear to disagree
+  about meeting knowledge, the canonical meeting-ingestion skill controls.
 - Cite every meeting-derived fact inline as
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
@@ -398,11 +399,11 @@ receipt, which re-verifies every durable effect and inventory digest.
 
 ### 1. Load the canonical meeting policy
 
-Read all of `skills/meeting-ingestion/SKILL.md` before interpreting the
-artifact. Follow that skill rather than restating its attendee, entity,
-timeline, page-structure, or back-link rules here. The remaining steps add only
-Granola's selected-source, resolver, verbatim-capture, staged-review, and
-receipt protocol.
+Call `get_skill` with `{ "name": "meeting-ingestion" }` before interpreting
+the artifact. Read the complete returned `body`. Follow that skill rather than
+restating its attendee, entity, timeline, page-structure, or back-link rules
+here. The remaining steps add only Granola's selected-source, resolver,
+verbatim-capture, staged-review, and receipt protocol.
 
 ### 2. Verify the execution boundary
 

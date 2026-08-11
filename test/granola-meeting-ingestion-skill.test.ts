@@ -18,6 +18,7 @@ const meetingSkill = readFileSync(
 
 const expectedTools = [
   'get_active_schema_pack',
+  'get_skill',
   'search',
   'query',
   'get_page',
@@ -49,7 +50,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.4.0');
+    expect(skill).toContain('version: 1.4.1');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -259,7 +260,10 @@ describe('granola-meeting-ingestion skill', () => {
     expect(createHash('sha256').update(meetingSkill).digest('hex')).toBe(
       '7767334c63ff3bd8e60cd4d7cd1d1b44f0d6b0a7e0ac411529a1d59cc0a7781b',
     );
-    expect(skill).toContain('Read all of `skills/meeting-ingestion/SKILL.md`');
+    expect(skill).toContain('call `get_skill` with');
+    expect(skill).toContain('"name": "meeting-ingestion"');
+    expect(skill).toContain('Read the complete returned `body`');
+    expect(skill).not.toContain('skills/meeting-ingestion/SKILL.md');
     expect(skill).toContain('canonical meeting-ingestion skill controls');
     expect(skill).toContain('does not define a second meeting-synthesis policy');
     expect(skill).not.toContain('Every unambiguous attendee must have');
