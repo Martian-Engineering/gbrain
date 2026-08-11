@@ -4381,6 +4381,12 @@ const get_skill: Operation = {
     if (hasName === hasPath) {
       throw new OperationError('invalid_params', 'Provide exactly one of name or path');
     }
+    if (hasPath && ctx.viaSubagent !== true) {
+      throw new OperationError(
+        'permission_denied',
+        'Published skill support files are available only to Minions',
+      );
+    }
 
     const override = await sc.readMcpSkillsDir(ctx);
     const { dir } = sc.resolveSkillsDir(ctx, override);

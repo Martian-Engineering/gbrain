@@ -130,16 +130,16 @@ describe('get_skill over dispatch', () => {
     });
   });
 
-  test('path mode returns a confined published support file', async () => {
+  test('ordinary MCP callers cannot use Minion-only path mode', async () => {
     await withEnv({ GBRAIN_HOME: home }, async () => {
       await engine.setConfig('mcp.publish_skills', 'true');
       const r = await call('get_skill', { path: 'skills/_conventions/rules.md' }, {
         remote: true,
         auth: { token: 't', clientId: 'c', scopes: ['read'] },
       });
-      expect(r.isError).toBe(false);
-      expect(r.body.path).toBe('skills/_conventions/rules.md');
-      expect(r.body.body.length).toBeGreaterThan(0);
+      expect(r.isError).toBe(true);
+      expect(r.body.error).toBe('permission_denied');
+      expect(r.body.message).toContain('only to Minions');
     });
   });
 
