@@ -1,12 +1,13 @@
 ---
 name: gmail-thread-ingestion
-version: 1.3.0
+version: 1.4.0
 description: Ingest one complete prompt-supplied Gmail thread capture into one already-selected source.
 triggers:
   - "ingest this Gmail thread capture into this source"
   - "Prompt-supplied Gmail thread capture for one already-selected source"
 tools:
   - get_active_schema_pack
+  - get_skill
   - search
   - query
   - get_page
@@ -37,14 +38,24 @@ writes_to:
 # Gmail Thread Ingestion
 
 Ingest exactly one complete Gmail thread capture supplied in the task prompt
-into exactly one destination source that the caller already selected. These
-instructions are self-contained for a source-bound remote Minion.
+into exactly one destination source that the caller already selected. This
+skill is a source-bound adapter around the canonical enrich skill for people
+and company dossier decisions.
 
 ## Contract
 
 - Follow GBrain's native write shape: `put_page` creates or replaces a complete
   page. Rewrite compiled truth with the current best understanding; never
   append to it. Record dated events with `add_timeline_entry`.
+- Outside apply mode, before interpreting the artifact, call `get_skill` for each dependency:
+  `{ "name": "enrich" }`, `{ "path": "skills/_brain-filing-rules.md" }`, and
+  `{ "path": "skills/conventions/quality.md" }`. Read each complete returned
+  `body`. Follow `enrich` for people and company dossier creation or updates,
+  and follow the support documents for filing, notability, citations, graph
+  edges, and timeline materiality. Use only admitted email evidence and
+  existing bound brain context; this adapter does not acquire external
+  enrichment data. This adapter controls source, resolver, provenance,
+  proposal, and receipt boundaries.
 - Process only the supplied `artifactId` and `sourceId`.
 - The server-issued credential binds every tool call to the prompt's
   `sourceId` and approved slug prefixes. Never infer or broaden authority from
