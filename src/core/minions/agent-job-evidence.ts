@@ -115,6 +115,14 @@ export async function readAgentJobExecutionEvidence(
   const failedMutation = operations.some((operation) =>
     isMutationOperation(operation) && operation.execution_status === 'failed'
   );
+  // Complete page replacement is idempotent; relation writes are deliberately
+  // excluded because replaying them could duplicate durable history or edges.
+  const mutationOperations = operations.filter(isMutationOperation);
+  const completedPutPageOnly = mutationOperations.length > 0 &&
+    mutationOperations.every((operation) =>
+      operation.operation === 'put_page' &&
+      operation.execution_status === 'complete'
+    );
   const proposalFinalizers = operations.filter((operation) =>
     operation.operation === 'finalize_ingestion_proposal_application'
   );
@@ -149,6 +157,7 @@ export async function readAgentJobExecutionEvidence(
       pending,
       pendingMutation,
       failedMutation,
+      completedPutPageOnly,
       usesProposalApplication,
       proposalFinalizationVerified,
       unsupportedMutationCount,
@@ -254,6 +263,7 @@ function recoveryActions(input: {
   pending: boolean;
   pendingMutation: boolean;
   failedMutation: boolean;
+  completedPutPageOnly: boolean;
   usesProposalApplication: boolean;
   proposalFinalizationVerified: boolean;
   unsupportedMutationCount: number;
@@ -261,7 +271,7 @@ function recoveryActions(input: {
   const retryFilingFromCurrentState = input.terminal &&
     input.availability === 'complete' && !input.truncated &&
     input.unsupportedMutationCount === 0 && !input.pendingMutation &&
-    input.failedMutation;
+    (input.failedMutation || input.completedPutPageOnly);
   if (!input.terminal || input.pending) return [];
   const closeOrRefresh: RecoveryAction[] = [
     'refresh_proposal',
