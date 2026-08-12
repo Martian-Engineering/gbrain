@@ -98,7 +98,7 @@ const TOOL_FIELD_PATHS: Readonly<Record<string, readonly string[]>> = {
   [STAGE_PROPOSAL_TOOL_NAME]: [
     'artifact_id', 'source_id', 'admission_scope', 'sequence', 'total_pages',
     'page_inventory', 'page', 'page.slug', 'page.effect', 'page.title',
-    'page.bodyMarkdown', 'page.appendMarkdown',
+    'page.bodyMarkdown',
   ],
   [FINALIZE_PROPOSAL_TOOL_NAME]: [
     'artifact_id', 'source_id', 'admission_scope', 'total_pages', 'summary',

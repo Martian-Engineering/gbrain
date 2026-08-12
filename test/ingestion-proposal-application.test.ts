@@ -17,7 +17,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
-const APPROVED_UPDATE_MARKDOWN = '## Delivery\n\nApproved update.\n';
+const APPROVED_UPDATE_MARKDOWN = '# Target\n\nApproved current synthesis.\n';
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -102,7 +102,10 @@ async function freezeProposal(
       ? {
         slug: secondSlug,
         effect: 'update',
-        appendMarkdown: APPROVED_UPDATE_MARKDOWN,
+        title: 'Target',
+        bodyMarkdown: APPROVED_UPDATE_MARKDOWN,
+        baseMarkdown: '# Target',
+        expectedContentHash: 'b'.repeat(64),
       }
       : {
         slug: secondSlug,
@@ -280,7 +283,7 @@ describe('whole approved proposal application', () => {
     await applyAgentJobProposalPage(engine, applyJobId, pageInput(authority, 2));
 
     const updated = await engine.getPage('projects/target', { sourceId: 'company' });
-    expect(updated?.compiled_truth).toBe(`# Target\n\n${APPROVED_UPDATE_MARKDOWN}`);
+    expect(updated?.compiled_truth).toBe(APPROVED_UPDATE_MARKDOWN);
 
     const timeline = await applyAgentJobProposalRelation(
       engine,

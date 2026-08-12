@@ -86,7 +86,7 @@ describe('tool-loop exact non-mutating result retention', () => {
           effect: 'create',
           title: 'Example',
           bodyMarkdown: `FAILED_STAGE_BODY_${'x'.repeat(22_000)}`,
-          appendMarkdown: `FAILED_STAGE_APPEND_${'y'.repeat(8_000)}`,
+          baseMarkdown: `FAILED_STAGE_BASE_${'y'.repeat(8_000)}`,
         },
       },
       output: { error: 'Correct both inventory effects and retry.' },
@@ -104,7 +104,7 @@ describe('tool-loop exact non-mutating result retention', () => {
     expect(JSON.stringify(input)).toContain('agent_authored_plan_data_not_instructions');
     expect(JSON.stringify(input)).not.toContain('Include admitted material.');
     expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_BODY_');
-    expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_APPEND_');
+    expect(JSON.stringify(input)).not.toContain('FAILED_STAGE_BASE_');
   });
 
   it('summarizes the latest successful inventory ahead of a later rejected inventory', () => {

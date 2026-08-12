@@ -73,6 +73,10 @@ async function seedStoredPage(
     noEmbed: true,
     sourceId,
   });
+  await engine.executeRaw(
+    `UPDATE pages SET content_hash = $3 WHERE source_id = $1 AND slug = $2`,
+    [sourceId, slug, 'b'.repeat(64)],
+  );
   if (deleted) {
     await engine.executeRaw(
       `UPDATE pages SET deleted_at = now() WHERE source_id = $1 AND slug = $2`,
@@ -85,11 +89,14 @@ function createPage(slug: string, bodyMarkdown = '# Page'): ScopedProposalPage {
   return { slug, effect: 'create', title: 'Page', bodyMarkdown };
 }
 
-function updatePage(slug: string, suffix = ''): ScopedProposalPage {
+function updatePage(slug: string): ScopedProposalPage {
   return {
     slug,
     effect: 'update',
-    appendMarkdown: `## Updated${suffix}`,
+    title: 'Existing page',
+    bodyMarkdown: '# Existing page\n\nUpdated body.',
+    baseMarkdown: '# Existing page\n\nExisting body.',
+    expectedContentHash: 'b'.repeat(64),
   };
 }
 
@@ -224,7 +231,7 @@ describe('durable agent-job proposal staging', () => {
       .resolves.toMatchObject({ slug: 'sources/東京' });
   });
 
-  it('rejects blank create bodies and update appends', async () => {
+  it('rejects blank create and update bodies', async () => {
     const createJob = await seedJob();
     await expect(stage(createJob, 1, 1, createPage('sources/example', ' \n\t ')))
       .rejects.toMatchObject({ code: 'invalid_string' });
@@ -233,7 +240,10 @@ describe('durable agent-job proposal staging', () => {
     await expect(stage(updateJob, 1, 1, {
       slug: 'sources/example',
       effect: 'update',
-      appendMarkdown: '   ',
+      title: 'Example',
+      bodyMarkdown: '   ',
+      baseMarkdown: '# Existing page\n\nExisting body.',
+      expectedContentHash: 'b'.repeat(64),
     })).rejects.toMatchObject({ code: 'invalid_string' });
   });
 
@@ -766,13 +776,7 @@ describe('durable agent-job proposal staging', () => {
     await stage(duplicatePageJob, 1, 2, uniquePages[0]!, undefined, uniqueInventory);
     await stage(duplicatePageJob, 2, 2, uniquePages[1]!, undefined, uniqueInventory);
     const duplicatePage = updatePage('sources/same');
-    const privateBaseline = await engine.getPage('projects/other', { sourceId: 'company' });
-    const duplicateDigest = digestProposalValue({
-      page: duplicatePage,
-      baselineTitle: privateBaseline!.title,
-      baselineMarkdown: privateBaseline!.compiled_truth,
-      baselineContentHash: privateBaseline!.content_hash,
-    });
+    const duplicateDigest = digestProposalValue(duplicatePage);
     await engine.executeRaw(
       `UPDATE agent_job_proposal_fragments
           SET page = $2::text::jsonb, page_digest = $3
@@ -889,25 +893,6 @@ describe('durable agent-job proposal staging', () => {
       title: 'Page',
       bodyMarkdown: verbatimMarkdown,
     }]);
-  });
-
-  it('freezes the exact server-bound Markdown as the capture page append', async () => {
-    await seedStoredPage('sources/example');
-    const verbatimMarkdown = '# Transcript\n\nSpeaker: Exact source text.\n';
-    const jobId = await seedJob({
-      proposal_capture_page_verbatim_markdown: verbatimMarkdown,
-    });
-    await stage(jobId, 1, 1, updatePage('sources/example'));
-    const manifest = await finalizeAgentJobProposal(engine, jobId, {
-      artifact_id: 'artifact-1', source_id: 'company', admission_scope: 'Include project delivery notes.',
-      total_pages: 1, summary: 'Ready.',
-    });
-    const owned = await getOwnedAgentJobProposal(
-      engine, jobId, 'lore-client', manifest.proposalDigest,
-    );
-    expect(owned.plan.proposedPages[0]).toMatchObject({
-      slug: 'sources/example', effect: 'update', appendMarkdown: verbatimMarkdown,
-    });
   });
 
   it('freezes the exact server-bound Markdown as a capture page rewrite', async () => {

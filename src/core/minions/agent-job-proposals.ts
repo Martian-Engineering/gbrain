@@ -926,8 +926,6 @@ function bindVerbatimCapturePage<T extends ParsedStageProposalPageCore>(
   ) return candidate;
   const page = candidate.page.effect === 'create'
     ? { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown }
-    : 'appendMarkdown' in candidate.page
-    ? { ...candidate.page, appendMarkdown: binding.capturePageVerbatimMarkdown }
     : { ...candidate.page, bodyMarkdown: binding.capturePageVerbatimMarkdown };
   return { ...candidate, page };
 }
@@ -945,7 +943,7 @@ function parseStoredProposalPage(raw: unknown, binding: JobBinding): ScopedPropo
   const contentKey = record.effect === 'create'
     ? 'bodyMarkdown'
     : record.effect === 'update'
-    ? Object.hasOwn(record, 'appendMarkdown') ? 'appendMarkdown' : 'bodyMarkdown'
+    ? 'bodyMarkdown'
     : null;
   if (contentKey === null) return parseProposalPage(raw);
   if (record[contentKey] !== verbatimMarkdown) {
@@ -1208,11 +1206,8 @@ async function freezeProposalCandidate(
     contentHash: page.content_hash,
   };
   if (
-    !('appendMarkdown' in candidate.page)
-    && (
-      candidate.page.baseMarkdown !== baseline.markdown
-      || candidate.page.expectedContentHash !== baseline.contentHash
-    )
+    candidate.page.baseMarkdown !== baseline.markdown
+    || candidate.page.expectedContentHash !== baseline.contentHash
   ) {
     throw new AgentJobProposalError(
       'baseline_mismatch',
@@ -1276,13 +1271,7 @@ function digestFrozenProposalPage(
   if (!baseline) {
     throw new AgentJobProposalError('baseline_unavailable', 'An update requires a private baseline.');
   }
-  if (!('appendMarkdown' in page)) return digestProposalValue(page);
-  return digestProposalValue({
-    page,
-    baselineTitle: baseline.title,
-    baselineMarkdown: baseline.markdown,
-    baselineContentHash: baseline.contentHash,
-  });
+  return digestProposalValue(page);
 }
 
 /** Reject a proposed mutation target outside the job's durable slug fence. */

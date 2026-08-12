@@ -1,6 +1,6 @@
 ---
 name: gmail-thread-ingestion
-version: 1.2.0
+version: 1.3.0
 description: Ingest one complete prompt-supplied Gmail thread capture into one already-selected source.
 triggers:
   - "ingest this Gmail thread capture into this source"
@@ -42,6 +42,9 @@ instructions are self-contained for a source-bound remote Minion.
 
 ## Contract
 
+- Follow GBrain's native write shape: `put_page` creates or replaces a complete
+  page. Rewrite compiled truth with the current best understanding; never
+  append to it. Record dated events with `add_timeline_entry`.
 - Process only the supplied `artifactId` and `sourceId`.
 - The server-issued credential binds every tool call to the prompt's
   `sourceId` and approved slug prefixes. Never infer or broaden authority from
@@ -207,19 +210,12 @@ Every proposed page has exactly one of these shapes:
 }
 ```
 
-An update chooses exactly one of two operations:
-
-- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
-  unchanged at the end of the current page. The server freezes the private
-  baseline, and apply may safely rebase this suffix over other suffix appends.
-- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
-  when existing compiled truth must be integrated, reorganized, corrected, or
-  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
-  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
-  page, not a diff. Apply never rebases a full rewrite.
-
-Append is an additive operation, not the only update operation. Do not express
-a synthesis rewrite as a dated section merely to fit the append shape.
+Omit a dossier or project page when the admitted evidence does not justify
+changing its current best synthesis. An update is exactly
+`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
+Copy `baseMarkdown` and `expectedContentHash` exactly from the immediately
+preceding `get_page`; `bodyMarkdown` is the complete intended page, not a diff
+or dated addendum. Apply never rebases an update.
 
 The proposal must include `capturePageSlug` exactly once. A differently
 slugged legacy source page is never proposed for create or update. Freeze
@@ -244,9 +240,7 @@ before staging; never reserve a second inventory slot for the same slug. Use `se
 full page bodies. Never request more than one `get_page` in the same assistant
 turn or tool batch.
 For an update, call exactly one `get_page` only when ready to construct and stage
-that entry. For an append, draft only the exact new `appendMarkdown`; the stage
-operation freezes the title, body, and content hash privately. For a full
-rewrite, preserve the exact title, body, and content hash from that read as the
+that entry. Preserve the exact title, body, and content hash from that read as the
 reviewed baseline and draft the complete intended `bodyMarkdown`. After an update
 target's `get_page` returns, the very next
 assistant turn must call `brain_stage_ingestion_proposal_page` for that same
@@ -320,11 +314,10 @@ Apply each manifest page in sequence with
 ```
 
 Copy every value from `approvedProposal`; never send `slug`, `effect`,
-`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
+`title`, `bodyMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
-authority or create collisions, performs the conditional write, safely rebases
-only an append operation, requires an unchanged reviewed baseline for a full
-rewrite, records a durable per-sequence receipt, and verifies the resulting
+authority or create collisions, performs the conditional full-page write,
+requires an unchanged reviewed baseline, records a durable per-sequence receipt, and verifies the resulting
 page state. Do not pre-read or reimplement its compare-and-swap logic with
 `get_page` or `put_page`.
 
@@ -484,10 +477,10 @@ For each unambiguous, material person, company, or project:
    page from every dossier update so `get_backlinks` verifies navigation
    in both directions.
 
-Use a full rewrite whenever an existing dossier's current understanding needs
-coherent synthesis. Reserve append for material that truthfully belongs
-unchanged at the page's end. Never append a dated capture section to a dossier
-body; represent material dated events with `proposedTimelineEntries`.
+Rewrite the complete page whenever an existing dossier's current understanding
+needs coherent synthesis. If the evidence does not justify that rewrite, omit
+the dossier update. Never add a dated capture section to a dossier body;
+represent material dated events with `proposedTimelineEntries`.
 
 Use `concepts/` and `decisions/` only when the capture supports a reusable
 concept or durable decision as its own canonical page. Keep unresolved people,

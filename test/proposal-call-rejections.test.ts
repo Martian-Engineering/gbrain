@@ -213,7 +213,7 @@ describe('proposal call rejection ledger', () => {
           effect: index,
           title: index,
           bodyMarkdown: index,
-          appendMarkdown: index,
+          baseMarkdown: index,
         },
         ...Object.fromEntries(Array.from({ length: 70 }, (_, key) => [`secret_${key}`, key])),
       },
@@ -229,7 +229,7 @@ describe('proposal call rejection ledger', () => {
     const event = (await readProposalCallRejections(engine, jobId, 'active')).events[0]!;
     expect(event.calls).toHaveLength(8);
     expect(event.omitted_call_count).toBe(4);
-    expect(event.calls[0]!.fields).toHaveLength(12);
+    expect(event.calls[0]!.fields).toHaveLength(11);
     expect(event.calls[0]!.unknown_key_count).toBe(64);
     expect(event.calls[0]!.unknown_key_count_truncated).toBe(true);
     expect(JSON.stringify(event)).not.toContain('secret_0');
