@@ -1914,6 +1914,77 @@ describe('get_agent_job owner-scoped receipt', () => {
     expect(owned.execution_evidence.allowed_recovery_actions).toEqual([]);
   });
 
+  it('authorizes current-state retry after only completed page writes', async () => {
+    await seedClient('lore', { bound_tools: ['put_page'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'failed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES ($1, 1, 'put-complete', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'sources/example', content: '# Example' }),
+        JSON.stringify({
+          slug: 'sources/example',
+          status: 'created_or_updated',
+          content_hash: 'b'.repeat(64),
+        }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.availability).toBe('complete');
+    expect(owned.execution_evidence.allowed_recovery_actions).toContain(
+      'retry_filing_from_current_state',
+    );
+  });
+
+  it('does not retry completed page writes mixed with relation writes', async () => {
+    await seedClient('lore', { bound_tools: ['put_page', 'add_timeline_entry'] });
+    const [row] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
+       VALUES ('subagent', 'failed', $1::jsonb, 'default', 0, now())
+       RETURNING id`,
+      [JSON.stringify({ __owner_client_id: 'lore', source_id: 'default' })],
+    );
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, status, output, ordinal)
+       VALUES
+         ($1, 1, 'put-complete', 'brain_put_page', $2::jsonb, 'complete', $3::jsonb, 0),
+         ($1, 2, 'timeline-complete', 'brain_add_timeline_entry', $4::jsonb, 'complete', $5::jsonb, 0)`,
+      [
+        row.id,
+        JSON.stringify({ slug: 'sources/example', content: '# Example' }),
+        JSON.stringify({
+          slug: 'sources/example',
+          status: 'created_or_updated',
+          content_hash: 'b'.repeat(64),
+        }),
+        JSON.stringify({ slug: 'sources/example', date: '2026-08-12', text: 'Event' }),
+        JSON.stringify({ status: 'ok' }),
+      ],
+    );
+
+    const owned = await get_agent_job.handler(
+      makeCtx({ clientId: 'lore' }),
+      { id: row.id },
+    ) as any;
+
+    expect(owned.execution_evidence.allowed_recovery_actions).not.toContain(
+      'retry_filing_from_current_state',
+    );
+  });
+
   it('does not authorize current-state retry while a mutation is pending', async () => {
     await seedClient('lore', { bound_tools: ['put_page'] });
     const [row] = await engine.executeRaw<{ id: number }>(
