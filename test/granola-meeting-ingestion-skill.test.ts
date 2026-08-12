@@ -15,6 +15,10 @@ const meetingSkill = readFileSync(
   join(skillsDir, 'meeting-ingestion', 'SKILL.md'),
   'utf8',
 );
+const enrichSkill = readFileSync(
+  join(skillsDir, 'enrich', 'SKILL.md'),
+  'utf8',
+);
 
 const expectedTools = [
   'get_active_schema_pack',
@@ -50,7 +54,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.5.0');
+    expect(skill).toContain('version: 1.6.0');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -257,16 +261,23 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toMatch(/Reject a non-canonical slug\s+before returning a proposal/);
   });
 
-  test('inherits meeting semantics without maintaining a second policy copy', () => {
+  test('loads canonical knowledge policies without maintaining a second copy', () => {
     expect(createHash('sha256').update(meetingSkill).digest('hex')).toBe(
       '7767334c63ff3bd8e60cd4d7cd1d1b44f0d6b0a7e0ac411529a1d59cc0a7781b',
     );
-    expect(skill).toContain('call `get_skill` with');
+    expect(createHash('sha256').update(enrichSkill).digest('hex')).toBe(
+      '14f961494d06fa707f9713d16f5445c28a87146c0b3c688172c0898eff47a9c0',
+    );
+    expect(skill).toMatch(/Outside apply mode[\s\S]{0,100}call `get_skill` for\s+each dependency/);
     expect(skill).toContain('"name": "meeting-ingestion"');
-    expect(skill).toContain('Read the complete returned `body`');
+    expect(skill).toContain('"name": "enrich"');
+    expect(skill).toContain('"path": "skills/_brain-filing-rules.md"');
+    expect(skill).toContain('"path": "skills/conventions/quality.md"');
+    expect(skill).toContain('Read each complete returned `body`');
     expect(skill).not.toContain('skills/meeting-ingestion/SKILL.md');
-    expect(skill).toContain('canonical meeting-ingestion skill controls');
+    expect(skill).toContain('Canonical policies control knowledge');
     expect(skill).toContain('does not define a second meeting-synthesis policy');
+    expect(skill).toContain('does not acquire external enrichment data');
     expect(skill).not.toContain('Every unambiguous attendee must have');
     expect(skill).not.toContain('Add a dated timeline entry only when');
     expect(skill).toContain('Every page created or updated during enrichment must appear');

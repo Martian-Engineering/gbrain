@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { operations } from '../src/core/operations.ts';
@@ -8,6 +9,7 @@ import { BRAIN_TOOL_ALLOWLIST } from '../src/core/minions/tools/brain-allowlist.
 const skillsDir = join(import.meta.dir, '..', 'skills');
 const skillPath = join(skillsDir, 'gmail-thread-ingestion', 'SKILL.md');
 const skill = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : '';
+const enrichSkill = readFileSync(join(skillsDir, 'enrich', 'SKILL.md'), 'utf8');
 const resolver = readFileSync(join(skillsDir, 'RESOLVER.md'), 'utf8');
 const manifest = JSON.parse(
   readFileSync(join(skillsDir, 'manifest.json'), 'utf8'),
@@ -15,6 +17,7 @@ const manifest = JSON.parse(
 
 const expectedTools = [
   'get_active_schema_pack',
+  'get_skill',
   'search',
   'query',
   'get_page',
@@ -44,7 +47,7 @@ const expectedPrefixes = [
 
 describe('gmail-thread-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.3.0');
+    expect(skill).toContain('version: 1.4.0');
     expect(getSkillAgentBindings(skillsDir, 'gmail-thread-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -59,6 +62,18 @@ describe('gmail-thread-ingestion skill', () => {
       expect(operationNames.has(tool)).toBe(true);
       expect(BRAIN_TOOL_ALLOWLIST.has(tool)).toBe(true);
     }
+  });
+
+  test('loads canonical enrichment and its support policies', () => {
+    expect(createHash('sha256').update(enrichSkill).digest('hex')).toBe(
+      '14f961494d06fa707f9713d16f5445c28a87146c0b3c688172c0898eff47a9c0',
+    );
+    expect(skill).toMatch(/Outside apply mode[\s\S]{0,100}call `get_skill` for each dependency/);
+    expect(skill).toContain('"name": "enrich"');
+    expect(skill).toContain('"path": "skills/_brain-filing-rules.md"');
+    expect(skill).toContain('"path": "skills/conventions/quality.md"');
+    expect(skill).toMatch(/Read each complete returned\s+`body`/);
+    expect(skill).toMatch(/does not acquire external\s+enrichment data/);
   });
 
   test('registers the published skill and its resolver route', () => {

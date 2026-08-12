@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.5.0
+version: 1.6.0
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -74,11 +74,12 @@ skill; it does not define a second meeting-synthesis policy.
 - Treat Lore's transcript Markdown as immutable source authority. GBrain binds
   those exact bytes to `capturePageSlug` at job submission and replaces the
   model-authored capture body before the proposal is hashed and frozen.
-- Before interpreting the artifact, call `get_skill` with
-  `{ "name": "meeting-ingestion" }`. Read the complete returned `body` and
-  follow it for meeting structure, attendee enrichment, entity propagation,
-  timelines, and back-links. If this adapter and that skill appear to disagree
-  about meeting knowledge, the canonical meeting-ingestion skill controls.
+- Outside apply mode, before interpreting the artifact, load the canonical
+  dependencies listed in Workflow step 1. Follow `meeting-ingestion` for meeting structure, entity
+  propagation, timelines, and back-links. Follow `enrich` for people and
+  company dossier creation or updates. Canonical policies control knowledge
+  semantics; this adapter controls source, resolver, provenance, proposal, and
+  receipt boundaries.
 - Cite every meeting-derived fact inline as
   `[Source: Granola meeting "<title>", <YYYY-MM-DD>]`.
 - Every explicit page reference must resolve, produce a graph edge, and be
@@ -392,13 +393,22 @@ receipt, which re-verifies every durable effect and inventory digest.
 
 ## Workflow
 
-### 1. Load the canonical meeting policy
+### 1. Load the canonical knowledge policies
 
-Call `get_skill` with `{ "name": "meeting-ingestion" }` before interpreting
-the artifact. Read the complete returned `body`. Follow that skill rather than
-restating its attendee, entity, timeline, page-structure, or back-link rules
-here. The remaining steps add only Granola's selected-source, resolver,
-verbatim-capture, staged-review, and receipt protocol.
+Outside apply mode, before interpreting the artifact, call `get_skill` for
+each dependency:
+
+1. `{ "name": "meeting-ingestion" }`
+2. `{ "name": "enrich" }`
+3. `{ "path": "skills/_brain-filing-rules.md" }`
+4. `{ "path": "skills/conventions/quality.md" }`
+
+Read each complete returned `body`. Follow those policies rather than
+restating their attendee, dossier, filing, citation, timeline, or back-link
+rules here. Use only admitted Granola evidence and existing bound brain
+context; this adapter does not acquire external enrichment data. The remaining
+steps define Granola's selected-source, resolver, verbatim-capture,
+staged-review, and receipt protocol.
 
 ### 2. Verify the execution boundary
 
