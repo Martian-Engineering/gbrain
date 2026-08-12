@@ -12,7 +12,6 @@ export { AgentJobProposalError } from '../ingestion-proposal-contract.ts';
 import { assertValidSourceId } from '../source-id.ts';
 import type { WriteThroughResult } from '../write-through.ts';
 import {
-  appendAttempt,
   baselineFromFragment,
   digestFrozenProposalPage,
   getOwnedApprovedProposalAuthority,
@@ -445,14 +444,7 @@ async function preflightFrozenInventory(
     if (!current || current.deleted_at || !current.content_hash || !baseline) {
       throw new AgentJobProposalError('page_unavailable', `Approved update target ${page.slug} is missing or deleted.`);
     }
-    if ('appendMarkdown' in page) {
-      if (current.title !== baseline.title) {
-        throw new AgentJobProposalError('stale_page', `Approved update target ${page.slug} changed title.`);
-      }
-      appendAttempt(current.compiled_truth, baseline, page.appendMarkdown);
-    } else {
-      rewriteAttempt(current as typeof current & { content_hash: string }, baseline, page);
-    }
+    rewriteAttempt(current as typeof current & { content_hash: string }, baseline, page);
   }
   for (const entry of authority.plan.proposedTimelineEntries) {
     await assertVirtualPageExists(engine, authority.sourceId, planned, entry.pageSlug);

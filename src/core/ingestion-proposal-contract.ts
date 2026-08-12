@@ -94,16 +94,6 @@ export const PROPOSAL_CREATE_PAGE_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** Compact append intent for one existing page. */
-export interface ScopedProposalAppendPage {
-  slug: string;
-  effect: 'update';
-  appendMarkdown: string;
-}
-
-/** Exact fields accepted for a compact append proposal. */
-export const PROPOSAL_APPEND_PAGE_KEYS = ['slug', 'effect', 'appendMarkdown'] as const;
-
 /** Exact full-page rewrite reviewed against an explicit baseline. */
 export interface ScopedProposalRewritePage {
   slug: string;
@@ -124,18 +114,6 @@ export const PROPOSAL_REWRITE_PAGE_KEYS = [
   'expectedContentHash',
 ] as const;
 
-/** Canonical model schema for a compact append operation. */
-export const PROPOSAL_APPEND_PAGE_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    slug: { type: 'string' },
-    effect: { type: 'string', enum: ['update'] },
-    appendMarkdown: { type: 'string' },
-  },
-  required: PROPOSAL_APPEND_PAGE_KEYS,
-  additionalProperties: false,
-} as const;
-
 /** Canonical model schema for an exact full-page rewrite operation. */
 export const PROPOSAL_REWRITE_PAGE_JSON_SCHEMA = {
   type: 'object',
@@ -151,18 +129,18 @@ export const PROPOSAL_REWRITE_PAGE_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** Reject append text that could create or close a server-managed region. */
+/** Reject authored text that could create or close a server-managed region. */
 function assertNoManagedRegionMarker(markdown: string): void {
   if (MANAGED_REGION_MARKER_RE.test(markdown)) {
     throw new AgentJobProposalError(
       'managed_region_marker',
-      'appendMarkdown must not contain a GBrain managed-region marker.',
+      'bodyMarkdown must not contain a GBrain managed-region marker.',
     );
   }
   if (TIMELINE_SENTINEL_RE.test(markdown)) {
     throw new AgentJobProposalError(
       'timeline_sentinel',
-      'appendMarkdown must not contain a structural timeline or history sentinel.',
+      'bodyMarkdown must not contain a structural timeline or history sentinel.',
     );
   }
 }
@@ -170,7 +148,6 @@ function assertNoManagedRegionMarker(markdown: string): void {
 /** One public page mutation admitted to a scoped ingestion proposal. */
 export type ScopedProposalPage =
   | ScopedProposalCreatePage
-  | ScopedProposalAppendPage
   | ScopedProposalRewritePage;
 
 /** External tool input for one ordered proposal page. */
@@ -363,7 +340,7 @@ function parseInventoryEntries(raw: unknown, totalPages?: number): ProposalPageI
   });
 }
 
-/** Parse one complete create, compact append, or reviewed full rewrite. */
+/** Parse one complete create or reviewed full rewrite. */
 export function parseProposalPage(
   raw: unknown,
   options: { opaqueMarkdownForSlug?: string } = {},
@@ -372,29 +349,12 @@ export function parseProposalPage(
   if (page.effect !== 'create' && page.effect !== 'update') {
     throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
   }
-  const appendUpdate = page.effect === 'update' && Object.hasOwn(page, 'appendMarkdown');
-  const rewriteUpdate = page.effect === 'update' && Object.hasOwn(page, 'bodyMarkdown');
-  if (page.effect === 'update' && appendUpdate === rewriteUpdate) {
-    throw new AgentJobProposalError(
-      'invalid_keys',
-      'page must contain exactly one update shape: appendMarkdown or title, bodyMarkdown, baseMarkdown, and expectedContentHash.',
-    );
-  }
   const allowed = page.effect === 'create'
     ? PROPOSAL_CREATE_PAGE_KEYS
-    : appendUpdate
-    ? PROPOSAL_APPEND_PAGE_KEYS
     : PROPOSAL_REWRITE_PAGE_KEYS;
   assertExactKeys(page, allowed, 'page');
   const slug = readCanonicalSlug(page.slug, 'page.slug');
   const opaqueMarkdown = slug === options.opaqueMarkdownForSlug;
-  if (page.effect === 'update' && appendUpdate) {
-    const appendMarkdown = opaqueMarkdown
-      ? readString(page.appendMarkdown, 'page.appendMarkdown')
-      : readNonBlankString(page.appendMarkdown, 'page.appendMarkdown');
-    if (!opaqueMarkdown) assertNoManagedRegionMarker(appendMarkdown);
-    return { slug, effect: page.effect, appendMarkdown };
-  }
   const title = readBoundedString(page.title, 'page.title', 1_000);
   const bodyMarkdown = opaqueMarkdown
     ? readString(page.bodyMarkdown, 'page.bodyMarkdown')

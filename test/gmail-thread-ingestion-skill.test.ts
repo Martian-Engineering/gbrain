@@ -44,11 +44,13 @@ const expectedPrefixes = [
 
 describe('gmail-thread-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.2.0');
+    expect(skill).toContain('version: 1.3.0');
     expect(getSkillAgentBindings(skillsDir, 'gmail-thread-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
     });
+    expect(skill).toMatch(/put_page` creates or replaces a complete\s+page/);
+    expect(skill).toMatch(/Rewrite compiled truth with the current best understanding; never\s+append to it/);
   });
 
   test('declares only Minion-supported canonical operations', () => {
@@ -153,16 +155,16 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).not.toMatch(/newer thread version updates the same source page/i);
   });
 
-  test('supports append and full-rewrite staging with body-free server-bound apply', () => {
+  test('supports full-page staging with body-free server-bound apply', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
     expect(skill).toContain('{slug,effect}');
-    expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
+    expect(skill).not.toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toContain(
       '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
     );
-    expect(skill).toContain('Append is an additive operation, not the only update operation');
-    expect(skill).toMatch(/Apply never rebases a full rewrite/);
-    expect(skill).toMatch(/requires an unchanged reviewed baseline for a full\s+rewrite/);
+    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff\s+or dated addendum/);
+    expect(skill).toMatch(/Apply never rebases an update/);
+    expect(skill).toMatch(/requires an unchanged reviewed baseline/);
     expect(skill).toContain('786,432 UTF-8 bytes');
     expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
@@ -214,9 +216,9 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('add_timeline_entry');
     expect(skill).toContain('get_backlinks');
     expect(skill).toContain('both directions');
-    expect(skill).toMatch(/Use a full rewrite whenever an existing dossier's current understanding needs\s+coherent synthesis/);
-    expect(skill).toMatch(/Reserve append for material that truthfully belongs\s+unchanged at the page's end/);
-    expect(skill).toMatch(/Never append a dated capture section to a dossier\s+body/);
+    expect(skill).toMatch(/Rewrite the complete page whenever an existing dossier's current understanding\s+needs coherent synthesis/);
+    expect(skill).toMatch(/If the evidence does not justify that rewrite, omit\s+the dossier update/);
+    expect(skill).toMatch(/Never add a dated capture section to a dossier body/);
     expect(skill).toContain('proposedTimelineEntries');
   });
 

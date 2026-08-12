@@ -1258,7 +1258,7 @@ describe('get_agent_job owner-scoped receipt', () => {
           sequence: 2,
           page_digest: 'b'.repeat(64),
           source_id: 'company',
-          appendMarkdown: 'private reviewed text',
+          bodyMarkdown: 'private reviewed text',
         }),
         JSON.stringify({
           status: 'applied',

@@ -50,11 +50,13 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.4.1');
+    expect(skill).toContain('version: 1.5.0');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
     });
+    expect(skill).toMatch(/put_page` creates or replaces a complete\s+page/);
+    expect(skill).toMatch(/Rewrite compiled truth with the current best understanding; never\s+append to it/);
   });
 
   test('declares only canonical GBrain operations', () => {
@@ -134,13 +136,12 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('786,432 UTF-8 bytes');
     expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('{slug,effect:"create",title,bodyMarkdown}');
-    expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
+    expect(skill).not.toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toContain(
       '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
     );
-    expect(skill).toContain('Append is an additive operation, not the only update operation');
-    expect(skill).toMatch(/Apply never rebases a full rewrite/);
-    expect(skill).toMatch(/server freezes the (?:current )?private\s+baseline/i);
+    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff\s+or dated addendum/);
+    expect(skill).toMatch(/Apply never rebases an update/);
     expect(skill).toContain('"status": "staged_proposal"');
     expect(skill).toContain('"proposalDigest": "64 lowercase hex characters"');
   });
@@ -209,7 +210,7 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('"proposal_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"page_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"source_id": "verified source id"');
-    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected\s+content hash/i);
+    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, a baseline, or an expected\s+content hash/i);
     expect(skill).toContain('Do not pre-read or reimplement its compare-and-swap logic');
     expect(skill).toContain('`get_page` or `put_page`');
     expect(skill).toContain('"proposalSequence": 1');

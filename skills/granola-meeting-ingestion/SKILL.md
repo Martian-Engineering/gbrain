@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.4.1
+version: 1.5.0
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -45,6 +45,9 @@ skill; it does not define a second meeting-synthesis policy.
 
 ## Contract
 
+- Follow GBrain's native write shape: `put_page` creates or replaces a complete
+  page. Rewrite compiled truth with the current best understanding; never
+  append to it. Record dated events with `add_timeline_entry`.
 - Process only the supplied `artifactId` and `sourceId`.
 - The server-issued credential binds every tool call to the prompt's
   `sourceId` and approved slug prefixes. Never try to discover or broaden that
@@ -235,21 +238,14 @@ In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
 `add_link`, or `add_timeline_entry`. Read-only discovery and job-evidence
 staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the capture page, meeting page, and every dossier page
-that the scoped ingestion requires. A create entry is exactly
-`{slug,effect:"create",title,bodyMarkdown}`. An update chooses exactly one of
-two operations:
-
-- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
-  unchanged at the end of the current page. The server freezes the private
-  baseline, and apply may safely rebase this suffix over other suffix appends.
-- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
-  when existing compiled truth must be integrated, reorganized, corrected, or
-  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
-  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
-  page, not a diff. Apply never rebases a full rewrite.
-
-Append is an additive operation, not the only update operation. Do not express
-a synthesis rewrite as a dated section merely to fit the append shape.
+that the scoped ingestion materially improves. Omit a dossier page when the
+admitted evidence does not justify changing its current best synthesis. A
+create entry is exactly `{slug,effect:"create",title,bodyMarkdown}`. An update
+is exactly
+`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
+Copy `baseMarkdown` and `expectedContentHash` exactly from the immediately
+preceding `get_page`; `bodyMarkdown` is the complete intended page, not a diff
+or dated addendum. Apply never rebases an update.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -347,11 +343,10 @@ Apply each manifest page in sequence with
 ```
 
 Copy every value from `approvedProposal`; never send `slug`, `effect`,
-`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
+`title`, `bodyMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
-authority or create collisions, performs the conditional write, safely rebases
-only an append operation, requires an unchanged reviewed baseline for a full
-rewrite, records a durable per-sequence receipt, and verifies the resulting
+authority or create collisions, performs the conditional full-page write,
+requires an unchanged reviewed baseline, records a durable per-sequence receipt, and verifies the resulting
 page state. Do not pre-read or reimplement its compare-and-swap logic with
 `get_page` or `put_page`.
 
@@ -478,8 +473,8 @@ meeting content:
 - link the analyzed meeting to the exact raw capture page;
 - cite every derived fact with the Granola title and date;
 - honor the resolver's exclusions on every derived page and relation; and
-- use a full rewrite whenever an existing dossier needs coherent synthesis,
-  reserving append for material that truthfully belongs at the page's end.
+- rewrite the complete page whenever an existing dossier needs coherent
+  synthesis, and omit the update when the evidence does not justify it.
 
 Use explicit Markdown links only for identities resolved in this source.
 Historical meetings receive the same durable brain treatment; `historical`

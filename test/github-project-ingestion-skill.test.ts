@@ -43,11 +43,13 @@ const expectedPrefixes = [
 
 describe('github-project-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.4.0');
+    expect(skill).toContain('version: 1.5.0');
     expect(getSkillAgentBindings(skillsDir, 'github-project-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
     });
+    expect(skill).toMatch(/put_page` creates or replaces a complete\s+page/);
+    expect(skill).toMatch(/Rewrite compiled truth with the current best understanding; never\s+append to it/);
   });
 
   test('declares only Minion-supported canonical operations', () => {
@@ -126,13 +128,13 @@ describe('github-project-ingestion skill', () => {
       /Update the body's current understanding only when the capture is the newest\s+evidence recorded for that page, judged by `upstreamOrder` and revision dates\s+already recorded\./,
     );
     expect(skill).toMatch(
-      /Appending dated capture sections or per-artifact narration to a feature or\s+initiative page body\./,
+      /Adding dated capture sections or per-artifact narration to a feature or\s+initiative page body instead of maintaining its current synthesis\./,
     );
     expect(skill).toMatch(
-      /Use a full rewrite whenever the feature or initiative's current understanding\s+must be integrated, reorganized, corrected, or otherwise synthesized\s+coherently/,
+      /Rewrite the complete page whenever the feature or initiative's current\s+understanding must be integrated, reorganized, corrected, or otherwise\s+synthesized coherently/,
     );
     expect(skill).toMatch(
-      /Reserve append for material that truthfully belongs unchanged at\s+the page's end/,
+      /If the evidence does not justify that rewrite, omit the\s+page update/,
     );
     expect(skill).toMatch(/A dated capture section never qualifies/);
     expect(skill).toContain('proposedTimelineEntries');
@@ -141,7 +143,7 @@ describe('github-project-ingestion skill', () => {
   test('applies the rewrite rule to propagated entity and decision dossiers', () => {
     expect(skill).toMatch(/same update rule for entity and decision dossiers/);
     expect(skill).toMatch(
-      /rewrite compiled\s+truth coherently, append only genuine end material/,
+      /rewrite compiled\s+truth coherently or omit the update/,
     );
     expect(skill).toMatch(/keep dated events in\s+`proposedTimelineEntries`/);
   });
@@ -249,20 +251,20 @@ describe('github-project-ingestion skill', () => {
     expect(skill).not.toContain('<sourceId>:<slug> created');
   });
 
-  test('supports append and full-rewrite scoped proposals with a bounded complete plan', () => {
+  test('supports full-page scoped proposals with a bounded complete plan', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('at most 32 pages');
     expect(skill).toContain('262,144 UTF-8 bytes');
     expect(skill).toContain('{slug,effect:"create",title,bodyMarkdown}');
-    expect(skill).toContain('{slug,effect:"update",appendMarkdown}');
+    expect(skill).not.toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toContain(
       '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
     );
-    expect(skill).toContain('Append is an additive operation, not the only update operation');
-    expect(skill).toMatch(/Apply never rebases a full rewrite/);
-    expect(skill).toMatch(/requires an unchanged reviewed baseline for a full\s+rewrite/);
+    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff\s+or dated addendum/);
+    expect(skill).toMatch(/Apply never rebases an update/);
+    expect(skill).toMatch(/requires an unchanged reviewed baseline/);
     expect(skill).toContain('786,432 UTF-8 bytes');
     expect(skill).toContain('1,572,864 UTF-8 bytes');
     expect(skill).toContain('"status": "staged_proposal"');
@@ -342,7 +344,7 @@ describe('github-project-ingestion skill', () => {
     expect(skill).toContain('"proposal_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"page_digest": "64 lowercase hex characters"');
     expect(skill).toContain('"source_id": "verified source id"');
-    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected\s+content hash/);
+    expect(skill).toMatch(/never send `slug`, `effect`,\s+`title`, `bodyMarkdown`, a baseline, or an expected\s+content hash/);
     expect(skill).toMatch(/Do not pre-read or reimplement its compare-and-swap\s+logic with `get_page` or `put_page`/);
     expect(skill).toContain('"proposalSequence": 1');
     expect(skill).toContain('"status": "pending | applied | already_applied | failed"');

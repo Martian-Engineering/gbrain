@@ -142,7 +142,10 @@ describe('OpenAI tool-loop context budgeting', () => {
             page: {
               slug: 'companies/signalcore',
               effect: 'update',
-              appendMarkdown: oldStageBody,
+              title: 'SignalCore',
+              bodyMarkdown: oldStageBody,
+              baseMarkdown: oldStageBody,
+              expectedContentHash: 'b'.repeat(64),
             },
           },
         }],

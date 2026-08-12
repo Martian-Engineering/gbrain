@@ -177,9 +177,8 @@ export async function getOwnedApprovedProposalAuthority(
 /**
  * Apply one exact frozen page under a separate owner/source-bound agent job.
  *
- * The proposal row and fragment are locked with the corpus mutation. A single
- * bounded CAS retry handles a writer that wins after the first page read; a
- * non-prefix change is never rebased and leaves every row untouched.
+ * The proposal row and fragment are locked with the corpus mutation. Updates
+ * use the frozen content hash as a compare-and-swap boundary.
  */
 export async function applyAgentJobProposalPage(
   engine: BrainEngine,
@@ -217,75 +216,33 @@ export async function applyAgentJobProposalPage(
     }
 
     const firstPage = await readApplicablePage(tx, page.slug, input.source_id);
-    if (!('appendMarkdown' in page)) {
-      const rewrite = rewriteAttempt(firstPage, baseline, page);
-      if (rewrite.alreadyApplied) {
-        return recordAppliedPage(tx, input, page.slug, 'update', {
-          previousContentHash: firstPage.content_hash,
-          contentHash: firstPage.content_hash,
-          rebased: false,
-          status: 'already_applied',
-        });
-      }
-      let contentHash: string;
-      try {
-        contentHash = await persistRewrite(tx, applyBinding, applyJobId, firstPage, page);
-      } catch (error) {
-        if (error instanceof StalePageError) {
-          throw new AgentJobProposalError(
-            'stale_page',
-            'Page changed after review; no full rewrite was applied.',
-          );
-        }
-        throw error;
-      }
-      return recordAppliedPage(tx, input, page.slug, 'update', {
-        previousContentHash: firstPage.content_hash,
-        contentHash,
-        rebased: false,
-        status: 'applied',
-      });
-    }
-    const firstAttempt = appendAttempt(firstPage.compiled_truth, baseline, page.appendMarkdown);
-    if (firstAttempt.alreadyApplied) {
+    const rewrite = rewriteAttempt(firstPage, baseline, page);
+    if (rewrite.alreadyApplied) {
       return recordAppliedPage(tx, input, page.slug, 'update', {
         previousContentHash: firstPage.content_hash,
         contentHash: firstPage.content_hash,
-        rebased: firstAttempt.rebased,
+        rebased: false,
         status: 'already_applied',
       });
     }
-
+    let contentHash: string;
     try {
-      const contentHash = await persistAppend(tx, applyBinding, applyJobId, firstPage, firstAttempt.markdown);
-      return recordAppliedPage(tx, input, page.slug, 'update', {
-        previousContentHash: firstPage.content_hash,
-        contentHash,
-        rebased: firstAttempt.rebased,
-        status: 'applied',
-      });
+      contentHash = await persistRewrite(tx, applyBinding, applyJobId, firstPage, page);
     } catch (error) {
-      if (!(error instanceof StalePageError)) throw error;
-      // putPage now holds the page's transaction lock. Re-read once and
-      // recompute from the exact frozen prefix; there is no retry loop.
-      const racedPage = await readApplicablePage(tx, page.slug, input.source_id);
-      const racedAttempt = appendAttempt(racedPage.compiled_truth, baseline, page.appendMarkdown);
-      if (racedAttempt.alreadyApplied) {
-        return recordAppliedPage(tx, input, page.slug, 'update', {
-          previousContentHash: racedPage.content_hash,
-          contentHash: racedPage.content_hash,
-          rebased: true,
-          status: 'already_applied',
-        });
+      if (error instanceof StalePageError) {
+        throw new AgentJobProposalError(
+          'stale_page',
+          'Page changed after review; no full rewrite was applied.',
+        );
       }
-      const contentHash = await persistAppend(tx, applyBinding, applyJobId, racedPage, racedAttempt.markdown);
-      return recordAppliedPage(tx, input, page.slug, 'update', {
-        previousContentHash: racedPage.content_hash,
-        contentHash,
-        rebased: true,
-        status: 'applied',
-      });
+      throw error;
     }
+    return recordAppliedPage(tx, input, page.slug, 'update', {
+      previousContentHash: firstPage.content_hash,
+      contentHash,
+      rebased: false,
+      status: 'applied',
+    });
   });
   if (writeThroughComplete(result.write_through)) return result;
   const writeThrough = await writePageThrough(engine, result.slug, {
@@ -294,18 +251,6 @@ export async function applyAgentJobProposalPage(
   const application = await import('./agent-job-proposal-application.ts');
   await application.recordProposalPageWriteThrough(engine, input, writeThrough);
   return { ...result, write_through: writeThrough };
-}
-
-/** Join an approved append without changing any byte of the reviewed text. */
-export function appendProposalMarkdown(baseline: string, appendMarkdown: string): string {
-  return baseline + appendBoundary(baseline) + appendMarkdown;
-}
-
-/** Return the sole separator accepted between authored text and an append. */
-function appendBoundary(markdown: string): string {
-  if (markdown.length === 0 || markdown.endsWith('\n\n')) return '';
-  if (markdown.endsWith('\n')) return '\n';
-  return '\n\n';
 }
 
 function parseApplyProposalPageInput(raw: unknown): ApplyProposalPageInput {
@@ -559,41 +504,9 @@ async function readApplicablePage(
 ): Promise<Page & { content_hash: string }> {
   const page = await engine.getPage(slug, { sourceId, includeDeleted: true });
   if (!page || page.deleted_at || !page.content_hash) {
-    throw new AgentJobProposalError('page_unavailable', `Append target ${slug} is missing or deleted.`);
+    throw new AgentJobProposalError('page_unavailable', `Page ${slug} is missing or deleted.`);
   }
   return page as Page & { content_hash: string };
-}
-
-/** Inspect whether a frozen append is pending, safely rebasable, or already present. */
-export function appendAttempt(
-  currentMarkdown: string,
-  baseline: PrivateUpdateBaseline,
-  appendMarkdown: string,
-): { markdown: string; rebased: boolean; alreadyApplied: boolean } {
-  const frozenResult = appendProposalMarkdown(baseline.markdown, appendMarkdown);
-  if (currentMarkdown === frozenResult) {
-    return { markdown: currentMarkdown, rebased: false, alreadyApplied: true };
-  }
-  const currentIsSafeAppend = currentMarkdown === baseline.markdown
-    || currentMarkdown.startsWith(baseline.markdown + appendBoundary(baseline.markdown));
-  if (!currentIsSafeAppend) {
-    throw new AgentJobProposalError(
-      'stale_page',
-      'Page changed outside an append-only suffix; no mutation was performed.',
-    );
-  }
-  if (currentMarkdown.endsWith(appendMarkdown)) {
-    const prefix = currentMarkdown.slice(0, -appendMarkdown.length);
-    if (appendProposalMarkdown(prefix, appendMarkdown) === currentMarkdown) {
-      return { markdown: currentMarkdown, rebased: true, alreadyApplied: true };
-    }
-  }
-  const rebased = currentMarkdown !== baseline.markdown;
-  return {
-    markdown: appendProposalMarkdown(currentMarkdown, appendMarkdown),
-    rebased,
-    alreadyApplied: false,
-  };
 }
 
 /** Require a full rewrite to match either its reviewed baseline or exact result. */
@@ -692,42 +605,6 @@ async function applyFrozenCreate(
     rebased: false,
     status: 'applied',
   });
-}
-
-async function persistAppend(
-  engine: BrainEngine,
-  binding: ApplyJobBinding,
-  applyJobId: number,
-  page: Page & { content_hash: string },
-  markdown: string,
-): Promise<string> {
-  const tags = await engine.getTags(page.slug, { sourceId: page.source_id });
-  const content = serializeMarkdown(page.frontmatter, markdown, '', {
-    type: page.type,
-    title: page.title,
-    tags,
-  });
-  const { isAvailable } = await import('../ai/gateway.ts');
-  const result = await importFromContent(engine, page.slug, content, {
-    sourceId: page.source_id,
-    expectedContentHash: page.content_hash,
-    noEmbed: !isAvailable('embedding'),
-    remote: true,
-    withinTransaction: true,
-    skipLinkExtraction: true,
-    verbatimBodyMarkdown: markdown,
-    writeContext: {
-      actor: binding.actor,
-      writeIntent: 'live_ingest',
-      batchId: `job:${applyJobId}`,
-      reason: 'approved ingestion proposal append',
-    },
-  });
-  if (result.status !== 'imported') {
-    throw new AgentJobProposalError('apply_failed', `Append import returned ${result.status}.`);
-  }
-  const current = await readApplicablePage(engine, page.slug, page.source_id);
-  return current.content_hash;
 }
 
 /** Persist one exact reviewed full-page rewrite with a conditional hash. */
@@ -841,10 +718,7 @@ async function appliedReplayResult(
         'Previously applied update changed after its frozen receipt was recorded.',
       );
     }
-    if (
-      !('appendMarkdown' in page)
-      && (current.title !== page.title || current.compiled_truth !== page.bodyMarkdown)
-    ) {
+    if (current.title !== page.title || current.compiled_truth !== page.bodyMarkdown) {
       throw new AgentJobProposalError(
         'stale_page',
         'Previously applied rewrite no longer matches its frozen body.',
@@ -896,7 +770,6 @@ export function baselineFromFragment(
   };
 }
 
-/** Bind a public page intent to its server-private baseline. */
 /** Bind a public page proposal to its server-private update baseline. */
 export function digestFrozenProposalPage(
   page: ScopedProposalPage,
@@ -906,13 +779,7 @@ export function digestFrozenProposalPage(
   if (!baseline) {
     throw new AgentJobProposalError('baseline_unavailable', 'An update requires a private baseline.');
   }
-  if (!('appendMarkdown' in page)) return digestProposalValue(page);
-  return digestProposalValue({
-    page,
-    baselineTitle: baseline.title,
-    baselineMarkdown: baseline.markdown,
-    baselineContentHash: baseline.contentHash,
-  });
+  return digestProposalValue(page);
 }
 
 function assertSafeJobId(jobId: number): void {

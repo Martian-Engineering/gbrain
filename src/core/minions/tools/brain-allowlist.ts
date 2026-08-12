@@ -36,7 +36,6 @@ import {
   type IngestionProposalToolBinding,
 } from '../ingestion-proposal-tool-binding.ts';
 import {
-  PROPOSAL_APPEND_PAGE_JSON_SCHEMA,
   PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
   PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
   PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
@@ -271,7 +270,6 @@ function stageIngestionProposalPageSchema(op: Operation): Record<string, unknown
     description: properties.page?.description,
     anyOf: [
       PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
-      PROPOSAL_APPEND_PAGE_JSON_SCHEMA,
       PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
     ],
   };

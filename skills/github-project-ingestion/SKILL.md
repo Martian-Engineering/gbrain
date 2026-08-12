@@ -1,6 +1,6 @@
 ---
 name: github-project-ingestion
-version: 1.4.0
+version: 1.5.0
 description: Ingest one complete prompt-supplied GitHub issue, pull request, or Markdown project-document revision into one already-selected source.
 triggers:
   - "ingest this GitHub project artifact into this source"
@@ -44,6 +44,9 @@ a source-bound remote Minion.
 
 ## Contract
 
+- Follow GBrain's native write shape: `put_page` creates or replaces a complete
+  page. Rewrite compiled truth with the current best understanding; never
+  append to it. Record dated events with `add_timeline_entry`.
 - Process only the supplied `artifactId` and `sourceId`.
 - The server-issued credential binds every tool call to the prompt's
   `sourceId` and approved slug prefixes. Never infer or broaden authority from
@@ -264,21 +267,14 @@ In `propose` mode, do not call any corpus-mutating tool, including `put_page`,
 `add_link`, or `add_timeline_entry`. Read-only discovery and job-evidence
 staging are allowed. Construct the complete set of pages that `apply` will write. For this
 provider that includes the exact capture and every feature, initiative, or
-entity page that the scoped ingestion requires. A create entry is exactly
-`{slug,effect:"create",title,bodyMarkdown}`. An update chooses exactly one of
-two operations:
-
-- `{slug,effect:"update",appendMarkdown}` for reviewed Markdown that belongs
-  unchanged at the end of the current page. The server freezes the private
-  baseline, and apply may safely rebase this suffix over other suffix appends.
-- `{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`
-  when existing compiled truth must be integrated, reorganized, corrected, or
-  fully rewritten. Copy `baseMarkdown` and `expectedContentHash` exactly from
-  the immediately preceding `get_page`; `bodyMarkdown` is the complete intended
-  page, not a diff. Apply never rebases a full rewrite.
-
-Append is an additive operation, not the only update operation. Do not express
-a synthesis rewrite as a dated section merely to fit the append shape.
+entity page that the scoped ingestion materially improves. Omit a dossier or
+project page when the admitted evidence does not justify changing its current
+best synthesis. A create entry is exactly
+`{slug,effect:"create",title,bodyMarkdown}`. An update is exactly
+`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
+Copy `baseMarkdown` and `expectedContentHash` exactly from the immediately
+preceding `get_page`; `bodyMarkdown` is the complete intended page, not a diff
+or dated addendum. Apply never rebases an update.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -295,9 +291,7 @@ inventory is frozen, use `search`, `query`, `list_pages`, and `resolve_slugs`
 results to work through it without preloading full page bodies. Never request
 more than one `get_page` in the same assistant turn or tool batch. For an update,
 call exactly one `get_page` only when ready to construct and stage that entry.
-For an append, draft only the exact new `appendMarkdown`; the stage operation
-freezes the title, body, and content hash privately. For a full rewrite,
-preserve the exact title, body, and content hash from that read as the reviewed
+Preserve the exact title, body, and content hash from that read as the reviewed
 baseline and draft the complete intended `bodyMarkdown`. After an update
 target's `get_page` returns, the very next assistant turn must call
 `brain_stage_ingestion_proposal_page` for that same update, as the only tool call
@@ -381,11 +375,10 @@ Apply each manifest page in sequence with
 ```
 
 Copy every value from `approvedProposal`; never send `slug`, `effect`,
-`title`, `bodyMarkdown`, `appendMarkdown`, a baseline, or an expected
+`title`, `bodyMarkdown`, a baseline, or an expected
 content hash. The operation resolves the frozen page server-side, rejects
-authority or create collisions, performs the conditional write, safely rebases
-only an append operation, requires an unchanged reviewed baseline for a full
-rewrite, records a durable per-sequence receipt, and verifies the resulting
+authority or create collisions, performs the conditional full-page write,
+requires an unchanged reviewed baseline, records a durable per-sequence receipt, and verifies the resulting
 page state. Do not pre-read or reimplement its compare-and-swap
 logic with `get_page` or `put_page`.
 
@@ -562,11 +555,11 @@ Link the feature or initiative page to the exact `sources/` capture page. A
 newer capture updates current understanding and adds only material dated
 changes to the page timeline.
 
-Use a full rewrite whenever the feature or initiative's current understanding
-must be integrated, reorganized, corrected, or otherwise synthesized
-coherently. Reserve append for material that truthfully belongs unchanged at
-the page's end. A dated capture section never qualifies; represent that history
-with `proposedTimelineEntries`.
+Rewrite the complete page whenever the feature or initiative's current
+understanding must be integrated, reorganized, corrected, or otherwise
+synthesized coherently. If the evidence does not justify that rewrite, omit the
+page update. A dated capture section never qualifies as current synthesis.
+Represent dated history with `proposedTimelineEntries`.
 
 When `historical: true`:
 
@@ -599,7 +592,7 @@ For each unambiguous, material entity or decision:
 5. Use explicit links only for identities resolved within this source.
 
 Use the same update rule for entity and decision dossiers: rewrite compiled
-truth coherently, append only genuine end material, and keep dated events in
+truth coherently or omit the update, and keep dated events in
 `proposedTimelineEntries`.
 
 People belong in `people/`, organizations in `companies/`, ongoing work in
@@ -641,8 +634,8 @@ duplication.
   as a project without independently resolving durable work.
 - Creating separate project pages for artifacts that concern the same feature
   or initiative.
-- Appending dated capture sections or per-artifact narration to a feature or
-  initiative page body.
+- Adding dated capture sections or per-artifact narration to a feature or
+  initiative page body instead of maintaining its current synthesis.
 - Recording material dated changes in the page body instead of timeline
   entries.
 - Skipping timeline entries because a capture is historical.
