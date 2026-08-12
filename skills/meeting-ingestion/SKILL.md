@@ -1,10 +1,9 @@
 ---
 name: meeting-ingestion
-version: 1.0.0
+version: 1.1.0
 description: |
-  Ingest meeting transcripts into brain pages with attendee enrichment, entity
-  propagation, and timeline merge. A meeting is NOT fully ingested until the
-  enrich skill has processed every entity.
+  Ingest meeting transcripts into brain pages with attendee provenance,
+  evidence-driven entity enrichment, and timeline merge.
 triggers:
   - "meeting transcript"
   - "process this meeting"
@@ -33,16 +32,19 @@ writes_to:
 
 This skill guarantees:
 - Meeting page created with attendees, summary, key decisions, action items
-- EVERY attendee gets a people page (created or updated)
-- EVERY company discussed gets entity propagation
-- Timeline entries on ALL mentioned entities (timeline merge)
-- Meeting is NOT fully ingested until enrich runs for every entity
+- Every confidently resolved attendee is linked from the meeting page
+- Every confidently resolved attendee gets a dated attendance timeline entry
+- Dossier pages are created or rewritten only when the admitted evidence
+  materially improves their current best synthesis
+- Material dated events propagate to the affected entity timelines
 - Back-links created bidirectionally
 
 > **Convention:** See `skills/conventions/quality.md` for Iron Law back-linking.
 
-Every attendee and company mentioned MUST get a back-link from their page to
-the meeting page. An unlinked mention is a broken brain.
+Every confidently resolved attendee MUST get a meeting-page link whose inverse
+is visible from the attendee page. A resolved attendee without that graph edge
+is a broken brain. Link other entities when the meeting establishes a useful
+relationship, not merely because their names appear in passing.
 
 ## Phases
 
@@ -82,9 +84,18 @@ Extract from the transcript:
 
 For EACH attendee:
 1. `gbrain search "{name}"` — does a people page exist?
-2. If NO → create via enrich skill (this is mandatory, not optional)
-3. If YES → update compiled truth with meeting context
-4. Add timeline entry on the person's page:
+2. If identity is ambiguous → leave the attendee unresolved rather than
+   guessing or creating a duplicate.
+3. If NO page exists → create one via the enrich skill only when the admitted
+   evidence establishes enough identity and useful context for a real dossier.
+   Do not create a name-only attendee stub.
+4. If YES → read the current page. Rewrite its complete compiled truth with
+   `put_page` only when the admitted meeting evidence materially improves the
+   current best synthesis. Otherwise leave the page body unchanged.
+5. Link every confidently resolved attendee from the meeting page. If resolving
+   an attendee changes the meeting page, rewrite the complete meeting page.
+6. Add a timeline entry on every confidently resolved attendee's page,
+   independently of whether the dossier body changed:
    `gbrain timeline-add <person-slug> <date> "Attended <meeting-title>"`
 
 **Note (v0.10.1):** Once the meeting page is written via `gbrain put`, the
@@ -97,14 +108,16 @@ for dated events (auto-link only handles links, not timeline entries).
 
 For each company, project, or concept discussed:
 1. Check brain for existing page
-2. Create/update as needed
-3. Add timeline entry referencing the meeting
-4. Back-link from entity page to meeting page
+2. Create or rewrite its complete page only when the admitted evidence
+   materially improves the current best synthesis
+3. Add a timeline entry only for a material dated event, not a passing mention
+4. Link it to the meeting when the meeting establishes a useful relationship
 
 ### Phase 5: Timeline merge
 
-The same event appears on ALL mentioned entities' timelines. If Alice met Bob at
-Acme Corp, the event goes on Alice's page, Bob's page, AND Acme Corp's page.
+Attendance appears on every confidently resolved attendee's timeline. Other
+material dated events appear on each affected entity's timeline. A passing
+mention alone does not justify a timeline entry or dossier rewrite.
 
 ### Phase 6: Sync
 
@@ -112,13 +125,14 @@ Acme Corp, the event goes on Alice's page, Bob's page, AND Acme Corp's page.
 
 ## Output Format
 
-Meeting page created. Report: "Meeting ingested: {N} attendees enriched, {N} entities
-updated, {N} action items captured."
+Meeting page created. Report: "Meeting ingested: {N} attendees linked, {N}
+attendance events recorded, {N} dossiers updated, {N} action items captured."
 
 ## Anti-Patterns
 
-- Creating the meeting page without enriching attendees
-- Skipping entity propagation ("I'll do that later")
-- Not merging timelines across all mentioned entities
+- Creating the meeting page without resolving and linking identifiable attendees
+- Rewriting an attendee dossier solely to record attendance
+- Skipping an attendance timeline entry because the dossier body did not change
+- Adding timeline entries or dossier prose for passing entity mentions
 - Creating attendee stubs without meaningful content
-- Filing meeting pages without cross-linking to all participants
+- Filing meeting pages without cross-linking confidently resolved participants

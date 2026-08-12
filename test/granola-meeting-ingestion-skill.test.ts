@@ -50,7 +50,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.5.0');
+    expect(skill).toContain('version: 1.5.1');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -164,6 +164,8 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toMatch(/strict `YYYY-MM-DD` date/);
     expect(skill).toContain('"proposedTimelineEntries": [');
     expect(skill).toContain('"proposedLinks": [');
+    expect(skill).toMatch(/Omitting a dossier entry from `proposedPages` never removes an independently\s+required attendance timeline entry or meeting-to-attendee graph edge/);
+    expect(skill).toMatch(/A dossier body rewrite, a timeline entry, and a graph link are\s+separate decisions/);
     expect(skill).toMatch(/cannot be\s+represented by `proposedPages`, `proposedTimelineEntries`, or `proposedLinks`/);
   });
   test('splits partial disqualification from classed needs-attention outcomes', () => {
@@ -259,8 +261,13 @@ describe('granola-meeting-ingestion skill', () => {
 
   test('inherits meeting semantics without maintaining a second policy copy', () => {
     expect(createHash('sha256').update(meetingSkill).digest('hex')).toBe(
-      '7767334c63ff3bd8e60cd4d7cd1d1b44f0d6b0a7e0ac411529a1d59cc0a7781b',
+      '14930c5cce17edc083a2f2d6e21afe3e11e2944b2b6ee003a77be45177cb2589',
     );
+    expect(meetingSkill).toContain('version: 1.1.0');
+    expect(meetingSkill).toMatch(/Every confidently resolved attendee gets a dated attendance timeline entry/);
+    expect(meetingSkill).toMatch(/Rewrite its complete compiled truth with\s+`put_page` only when the admitted meeting evidence materially improves/);
+    expect(meetingSkill).toMatch(/independently of whether the dossier body changed/);
+    expect(meetingSkill).not.toContain('EVERY attendee gets a people page');
     expect(skill).toContain('call `get_skill` with');
     expect(skill).toContain('"name": "meeting-ingestion"');
     expect(skill).toContain('Read the complete returned `body`');

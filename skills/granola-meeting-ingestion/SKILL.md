@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.5.0
+version: 1.5.1
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -283,6 +283,10 @@ a sequence for different content, or stage after finalization. The exact
 
 Populate `proposedTimelineEntries` with the exact timeline mutations required
 by the canonical meeting-ingestion workflow, using the capture-page reference.
+Omitting a dossier entry from `proposedPages` never removes an independently
+required attendance timeline entry or meeting-to-attendee graph edge from the
+completed plan. A dossier body rewrite, a timeline entry, and a graph link are
+separate decisions.
 Populate `proposedLinks` with typed links only for relationships that the
 planned Markdown does not express accurately. Enforce the same admission scope
 across all three arrays. Validate each timeline entry's date and capture-page
