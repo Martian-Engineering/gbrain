@@ -156,6 +156,9 @@ describe('google-calendar-event-ingestion skill', () => {
     expect(skill).toContain('updatedPages');
     expect(skill).toContain('verifiedPages');
     expect(skill).toContain('<sourceId>:<slug>');
+    expect(skill).toContain('"canonicalExternalId": "copied exactly from the prompt"');
+    expect(skill).toContain('"eventPageSlug": "<sourceId>:<exact eventPageSlug>"');
+    expect(skill).toContain('"readBackVerifiedPages"');
     expect(skill).toContain('Read back every created or updated page');
     expect(skill).toContain('validate_links');
     expect(skill).toContain('get_backlinks');

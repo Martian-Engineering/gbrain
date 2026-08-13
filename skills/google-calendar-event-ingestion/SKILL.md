@@ -397,11 +397,21 @@ For a normal write:
   "createdPages": ["<sourceId>:<slug>"],
   "updatedPages": ["<sourceId>:<slug>"],
   "verifiedPages": ["<sourceId>:<slug>"],
-  "unresolved": []
+  "unresolved": [],
+  "canonicalExternalId": "copied exactly from the prompt",
+  "captureExternalId": "copied exactly from the prompt",
+  "revision": "copied exactly from the prompt",
+  "tombstone": false,
+  "sourcePageSlug": "<sourceId>:<exact capturePageSlug>",
+  "eventPageSlug": "<sourceId>:<exact eventPageSlug>",
+  "readBackVerifiedPages": ["<sourceId>:<every written slug>"],
+  "linksVerified": true
 }
 ```
 
 For apply, retain those page arrays and add ordered `pageResults`,
 `timelineResults`, and `linkResults`. Populate receipt fields only from exact
-successful server results. Keep unattempted sequences pending. Return exactly
-the JSON receipt and nothing else.
+successful server results. Retain the same canonical, capture, revision,
+tombstone, exact-page, read-back, and link-verification fields so the caller can
+bind approved execution to the immutable Calendar revision. Keep unattempted
+sequences pending. Return exactly the JSON receipt and nothing else.
