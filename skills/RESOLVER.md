@@ -40,6 +40,7 @@ This is the dispatcher. Skills are the implementation. **Read the skill file bef
 | Prompt-supplied Granola meeting for one already-selected source | `skills/granola-meeting-ingestion/SKILL.md` |
 | Prompt-supplied GitHub issue, pull request, or Markdown project-document revision for one already-selected source | `skills/github-project-ingestion/SKILL.md` |
 | Prompt-supplied Gmail thread capture for one already-selected source | `skills/gmail-thread-ingestion/SKILL.md` |
+| Prompt-supplied Google Calendar event capture for one already-selected source | `skills/google-calendar-event-ingestion/SKILL.md` |
 | Generic "ingest this" (auto-routes to above) | `skills/ingest/SKILL.md` |
 
 ## Thinking skills (from GStack)
