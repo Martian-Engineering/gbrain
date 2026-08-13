@@ -11,6 +11,7 @@ const skillPath = join(skillsDir, 'google-calendar-event-ingestion', 'SKILL.md')
 const skill = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : '';
 const enrichSkill = readFileSync(join(skillsDir, 'enrich', 'SKILL.md'), 'utf8');
 const resolver = readFileSync(join(skillsDir, 'RESOLVER.md'), 'utf8');
+const filingRules = readFileSync(join(skillsDir, '_brain-filing-rules.json'), 'utf8');
 const manifest = JSON.parse(
   readFileSync(join(skillsDir, 'manifest.json'), 'utf8'),
 ) as { skills: Array<{ name: string; path: string; description: string }> };
@@ -124,6 +125,9 @@ describe('google-calendar-event-ingestion skill', () => {
     expect(skill).toContain('A tombstone never deletes the event page');
     expect(skill).toMatch(/cancelled or\s+deleted current state/);
     expect(skill).toContain('copy conflict');
+    expect(filingRules).toContain('Native Calendar imports remain current-state calendar-event pages under calendar/');
+    expect(filingRules).toContain('"directory": "calendar/"');
+    expect(filingRules).not.toContain('Calendar imports land at daily/calendar/');
   });
 
   test('uses Lore integrity and treats event content as untrusted evidence', () => {

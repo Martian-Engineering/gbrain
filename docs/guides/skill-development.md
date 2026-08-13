@@ -71,7 +71,7 @@ Skills should be **Mutually Exclusive, Collectively Exhaustive**:
 | Email messages | executive-assistant | brain/people/ timeline entries |
 | X/Twitter posts | x-collector | brain/media/ pages |
 | Person enrichment | enrich | brain/people/ compiled truth |
-| Calendar events | calendar-sync | brain/daily/calendar/ pages |
+| Calendar events | google-calendar-event-ingestion | brain/calendar/ `calendar-event` pages |
 | Video/podcast content | media-ingest | brain/media/ pages |
 
 ### Quality Bar Checklist

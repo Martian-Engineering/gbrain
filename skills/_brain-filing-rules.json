@@ -145,7 +145,13 @@
       "kind": "daily",
       "directory": "daily/",
       "examples": ["daily/calendar/YYYY-MM-DD.md", "daily/notes/YYYY-MM-DD.md"],
-      "description": "Date-keyed pages for events, calendar entries, or daily notes. Calendar imports land at daily/calendar/YYYY-MM-DD.md with attendees cross-linked to people/. Use when the primary subject is the date itself, not a person or topic."
+      "description": "Date-keyed authored agendas, read models, and daily notes. Native Calendar imports remain current-state calendar-event pages under calendar/; daily/calendar pages are never their source of truth. Use daily/ only when the primary subject is the date itself, not an imported event, person, or topic."
+    },
+    {
+      "kind": "calendar-event",
+      "directory": "calendar/",
+      "examples": ["calendar/google/{stable-event-id}.md"],
+      "description": "Native current-state schedule records keyed by stable provider event identity. Calendar evidence records scheduled intent, change, or cancellation and does not prove occurrence or attendance."
     },
     {
       "kind": "media-format",
