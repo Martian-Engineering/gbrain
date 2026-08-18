@@ -292,6 +292,52 @@ describe('gateway resume reconciliation', () => {
     expect(executions).toEqual(['search']); // idempotent-pending re-executed once
   });
 
+  it('assigns a durable baseline reference when a missing page read must re-execute', async () => {
+    const sourceId = 'company';
+    const { jobId, ctx } = await makeJob('redispatch proposal read', 'openai:gpt-4o', {
+      proposal_artifact_id: 'artifact-1',
+      proposal_admission_scope: 'Admitted scope.',
+      source_id: sourceId,
+    });
+    const rawPage = {
+      source_id: sourceId,
+      slug: 'projects/example',
+      title: 'Example',
+      compiled_truth: '# Example',
+      content_hash: 'b'.repeat(64),
+    };
+    await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'redispatch proposal read' }]);
+    await seedMessage(jobId, 1, 'assistant', [{
+      type: 'tool-call', toolCallId: 'tc-missing-page', toolName: 'brain_get_page', input: { slug: rawPage.slug },
+    }]);
+
+    let captured: ChatMessage[] = [];
+    __setChatTransportForTests(async (opts) => {
+      captured = opts.messages;
+      return { text: 'done', blocks: [{ type: 'text', text: 'done' }] as ChatBlock[], stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'openai:gpt-4o', providerId: 'openai' } satisfies ChatResult;
+    });
+    const pageTool: ToolDef = {
+      name: 'brain_get_page', description: 'read', input_schema: { type: 'object' }, idempotent: true,
+      async execute() { return rawPage; },
+    };
+    await buildHandler([pageTool])(ctx);
+
+    const healed = (captured[2].content as ChatBlock[])[0] as Extract<ChatBlock, { type: 'tool-result' }>;
+    expect(healed.output).toMatchObject(rawPage);
+    expect((healed.output as Record<string, unknown>).proposal_baseline_ref)
+      .toMatch(/^gbrain\.proposal-baseline\.v1:[0-9a-f-]{36}$/);
+    const rows = await engine.executeRaw<{ gbrain_tool_use_id: string }>(
+      `SELECT gbrain_tool_use_id::text AS gbrain_tool_use_id
+         FROM subagent_tool_executions
+        WHERE job_id = $1 AND tool_use_id = 'tc-missing-page'`,
+      [jobId],
+    );
+    expect((healed.output as Record<string, unknown>).proposal_baseline_ref)
+      .toBe(`gbrain.proposal-baseline.v1:${rows[0]!.gbrain_tool_use_id}`);
+  });
+
   it('throws on a non-idempotent tool still pending on resume', async () => {
     const { jobId, ctx } = await makeJob('unsafe', 'openai:gpt-4o');
     await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'unsafe' }]);

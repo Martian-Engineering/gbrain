@@ -1089,17 +1089,15 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       // because priorTools is keyed by the original UUID — the short-
       // circuit silently breaks and the tool re-executes. Pinned by
       // test/e2e/subagent-crash-replay-multi-provider.test.ts.
-      const candidateId = randomUUIDv7();
-      const rows = await engine.executeRaw<{ gbrain_tool_use_id: string }>(
-        `INSERT INTO subagent_tool_executions
-           (job_id, message_idx, tool_use_id, tool_name, input, status, schema_version, ordinal, gbrain_tool_use_id, provider_id)
-         VALUES ($1, $2, $3, $4, $5::text::jsonb, 'pending', 2, $6, $7, $8)
-         ON CONFLICT (job_id, message_idx, ordinal) DO UPDATE
-           SET status = subagent_tool_executions.status
-         RETURNING gbrain_tool_use_id::text AS gbrain_tool_use_id`,
-        [ctx.id, messageIdx, providerToolCallId, toolName, JSON.stringify(input ?? null), ordinal, candidateId, recipeIdFromModel(model)],
-      );
-      const gbrainToolUseId = rows[0]?.gbrain_tool_use_id ?? candidateId;
+      const gbrainToolUseId = await persistGatewayToolExecPending(engine, {
+        jobId: ctx.id,
+        messageIdx,
+        ordinal,
+        providerToolCallId,
+        toolName,
+        input,
+        providerId: recipeIdFromModel(model),
+      });
       heartbeat('tool_called', { turn_idx: turnIdx, tool_name: toolName });
       return { gbrainToolUseId };
     },
@@ -1299,12 +1297,19 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
       if (exec?.status === 'pending' && !toolDef.idempotent) {
         throw new Error(`non-idempotent tool "${call.toolName}" pending on resume; cannot safely re-run`);
       }
-      await persistToolExecPending(engine, jobId, msg.message_idx, call.toolCallId, call.toolName, call.input);
+      const gbrainToolUseId = await persistGatewayToolExecPending(engine, {
+        jobId,
+        messageIdx: msg.message_idx,
+        ordinal: callIdx,
+        providerToolCallId: call.toolCallId,
+        toolName: call.toolName,
+        input: call.input,
+      });
       try {
         const output = await toolDef.execute(call.input, { engine, jobId, remote: true, signal });
         await persistToolExecComplete(engine, jobId, call.toolCallId, output);
         const decoratedOutput = decorateToolResult
-          ? decorateToolResult(call.toolName, output, exec?.gbrain_tool_use_id ?? null)
+          ? decorateToolResult(call.toolName, output, gbrainToolUseId)
           : output;
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: decoratedOutput });
       } catch (e) {
@@ -1593,6 +1598,70 @@ async function persistToolExecPending(
      ON CONFLICT (job_id, tool_use_id) DO NOTHING`,
     [jobId, messageIdx, toolUseId, toolName, jsonStr],
   );
+}
+
+interface GatewayPendingToolExecution {
+  jobId: number;
+  messageIdx: number;
+  ordinal: number;
+  providerToolCallId: string;
+  toolName: string;
+  input: unknown;
+  providerId?: string;
+}
+
+/** Persist or recover the stable execution identity for one gateway tool call. */
+async function persistGatewayToolExecPending(
+  engine: BrainEngine,
+  execution: GatewayPendingToolExecution,
+): Promise<string> {
+  const candidateId = randomUUIDv7();
+  const inputJson = JSON.stringify(execution.input ?? null);
+
+  // A legacy dangling row can already own the provider tool-call ID while
+  // lacking the stable columns. Promote it in place before attempting the
+  // ordinal-keyed insert used by normal gateway replay.
+  const promoted = await engine.executeRaw<{ gbrain_tool_use_id: string }>(
+    `UPDATE subagent_tool_executions
+        SET schema_version = 2,
+            ordinal = COALESCE(ordinal, $4),
+            gbrain_tool_use_id = COALESCE(gbrain_tool_use_id, $5),
+            provider_id = COALESCE(provider_id, $6)
+      WHERE job_id = $1 AND tool_use_id = $2 AND tool_name = $3
+      RETURNING gbrain_tool_use_id::text AS gbrain_tool_use_id`,
+    [
+      execution.jobId,
+      execution.providerToolCallId,
+      execution.toolName,
+      execution.ordinal,
+      candidateId,
+      execution.providerId ?? null,
+    ],
+  );
+  if (promoted[0]?.gbrain_tool_use_id) return promoted[0].gbrain_tool_use_id;
+
+  // A provider may rename its call ID on replay. The ordinal conflict keeps
+  // the original durable identity and returns it to the active gateway loop.
+  const rows = await engine.executeRaw<{ gbrain_tool_use_id: string }>(
+    `INSERT INTO subagent_tool_executions
+       (job_id, message_idx, tool_use_id, tool_name, input, status,
+        schema_version, ordinal, gbrain_tool_use_id, provider_id)
+     VALUES ($1, $2, $3, $4, $5::text::jsonb, 'pending', 2, $6, $7, $8)
+     ON CONFLICT (job_id, message_idx, ordinal) DO UPDATE
+       SET status = subagent_tool_executions.status
+     RETURNING gbrain_tool_use_id::text AS gbrain_tool_use_id`,
+    [
+      execution.jobId,
+      execution.messageIdx,
+      execution.providerToolCallId,
+      execution.toolName,
+      inputJson,
+      execution.ordinal,
+      candidateId,
+      execution.providerId ?? null,
+    ],
+  );
+  return rows[0]?.gbrain_tool_use_id ?? candidateId;
 }
 
 async function persistToolExecComplete(
