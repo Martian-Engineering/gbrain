@@ -16,6 +16,7 @@ interface PageReadVerificationIdentity {
 /** Keep oversized page reads useful for hash verification without retaining private body text. */
 export const pageReadVerificationContextPolicy: ToolLoopContextPolicy = {
   toolName: 'brain_get_page',
+  retainPreferredExactResult: true,
   projectResult: projectPageReadResult,
   projectFailedResult: projectFailedPageReadResult,
 };

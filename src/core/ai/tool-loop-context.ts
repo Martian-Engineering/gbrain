@@ -65,6 +65,8 @@ export interface ToolLoopContextEvidence {
 /** Domain policy for projecting one tool's input and summarized evidence. */
 export interface ToolLoopContextPolicy {
   readonly toolName: string;
+  /** Allow the newest exact result when provider tokenization proves it fits. */
+  readonly retainPreferredExactResult?: boolean;
   projectInput?(input: unknown, maxBytes: number): unknown;
   projectResult?(output: unknown, maxBytes: number): unknown;
   projectFailedResult?(output: unknown, maxBytes: number): unknown;
@@ -385,7 +387,10 @@ function restoreExactSingletonReadResult(
   options: ToolLoopContextOptions,
 ): ChatMessage {
   const evidence = originalRound.evidence[0]!;
-  if (policyForTool(options, evidence.toolName)?.projectResult) return compactedResult;
+  const policy = policyForTool(options, evidence.toolName);
+  if (policy?.projectResult && policy.retainPreferredExactResult !== true) {
+    return compactedResult;
+  }
   const originalResult = toolResultBlocks(originalRound.result).find(block => (
     block.toolCallId === evidence.toolCallId
   ));

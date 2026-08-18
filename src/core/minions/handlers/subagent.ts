@@ -51,6 +51,7 @@ import {
 import { resolveModel, isAnthropicProvider, TIER_DEFAULTS } from '../../model-config.ts';
 import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts';
 import { toolLoop as gatewayToolLoop } from '../../ai/gateway.ts';
+import { exposeProposalBaselineRef } from '../ingestion-proposal-baseline-ref.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
 import { classifyCapabilities } from '../../ai/capabilities.ts';
 import { isReasoningEffort } from '../../ai/types.ts';
@@ -894,6 +895,17 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       idempotent: t.idempotent === true,
       // Unknown/custom ToolDefs stay fail-closed for context compaction.
       mutating: t.mutating !== false,
+      ...(t.name === 'brain_get_page' && proposalBinding
+        ? {
+            decorateResult(output: unknown, context: { gbrainToolUseId: string }): unknown {
+              return exposeProposalBaselineRef(
+                output,
+                context.gbrainToolUseId,
+                proposalBinding.sourceId,
+              );
+            },
+          }
+        : {}),
       async execute(input: unknown, signal: AbortSignal): Promise<unknown> {
         return await t.execute(input, {
           engine,

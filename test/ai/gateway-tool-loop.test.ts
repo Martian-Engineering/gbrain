@@ -158,6 +158,58 @@ describe('gateway.toolLoop (v0.38 D11 — provider-agnostic loop control)', () =
     expect(events[4]).toBe('onAssistantTurn(1)'); // final assistant turn
   });
 
+  it('decorates model-facing results only after persisting the raw outcome', async () => {
+    let turn = 0;
+    let persistedOutput: unknown;
+    let modelOutput: unknown;
+    __setChatTransportForTests(async opts => {
+      turn++;
+      if (turn === 1) {
+        return {
+          text: '',
+          blocks: [{ type: 'tool-call', toolCallId: 'read', toolName: 'read', input: {} }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-sonnet-4-6',
+          providerId: 'anthropic',
+        };
+      }
+      const resultMessage = opts.messages.find(message => (
+        typeof message.content !== 'string'
+        && message.content.some(block => block.type === 'tool-result')
+      ));
+      modelOutput = typeof resultMessage?.content === 'string'
+        ? undefined
+        : resultMessage?.content.find(block => block.type === 'tool-result')?.output;
+      return {
+        text: 'done',
+        blocks: [{ type: 'text', text: 'done' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-sonnet-4-6',
+        providerId: 'anthropic',
+      };
+    });
+
+    await toolLoop({
+      initialMessages: [{ role: 'user', content: 'read' }],
+      tools: [{ name: 'read', description: 'read', inputSchema: { type: 'object' } }],
+      toolHandlers: new Map([['read', {
+        idempotent: true,
+        mutating: false,
+        async execute() { return { value: 'raw' }; },
+        decorateResult(output, { gbrainToolUseId }) {
+          return { ...(output as object), ref: gbrainToolUseId };
+        },
+      }]]),
+      onToolCallStart: async () => ({ gbrainToolUseId: 'durable-read-id' }),
+      onToolCallComplete: async (_id, output) => { persistedOutput = output; },
+    });
+
+    expect(persistedOutput).toEqual({ value: 'raw' });
+    expect(modelOutput).toEqual({ value: 'raw', ref: 'durable-read-id' });
+  });
+
   it('keeps the proposal guard before assistant persistence and exposes its typed rejection seam', async () => {
     __setChatTransportForTests(async () => ({
       text: '',

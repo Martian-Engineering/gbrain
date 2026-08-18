@@ -3250,6 +3250,8 @@ export interface ToolHandler {
   idempotent?: boolean;
   mutating?: boolean;
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;
+  /** Decorate only the model-facing result after the raw outcome is durable. */
+  decorateResult?(output: unknown, context: { gbrainToolUseId: string }): unknown;
 }
 
 /**
@@ -3568,11 +3570,14 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
       // Replay short-circuit: prior outcome wins, idempotent re-execute allowed.
       const prior = opts.replayState?.priorTools.get(gbrainToolUseId);
       if (prior?.status === 'complete') {
+        const replayOutput = handler.decorateResult
+          ? handler.decorateResult(prior.output, { gbrainToolUseId })
+          : prior.output;
         toolResultBlocks.push({
           type: 'tool-result',
           toolCallId: call.toolCallId,
           toolName: call.toolName,
-          output: prior.output,
+          output: replayOutput,
         });
         opts.onHeartbeat?.('tool_replay_complete', { turn_idx: turnIdx, tool_name: call.toolName });
         continue;
@@ -3602,11 +3607,14 @@ export async function toolLoop(opts: ToolLoopOpts): Promise<ToolLoopResult> {
         const output = await handler.execute(call.input, opts.abortSignal ?? new AbortController().signal);
         // Step 4: settle complete.
         await opts.onToolCallComplete?.(gbrainToolUseId, output);
+        const modelOutput = handler.decorateResult
+          ? handler.decorateResult(output, { gbrainToolUseId })
+          : output;
         toolResultBlocks.push({
           type: 'tool-result',
           toolCallId: call.toolCallId,
           toolName: call.toolName,
-          output,
+          output: modelOutput,
         });
         opts.onHeartbeat?.('tool_result', { turn_idx: turnIdx, tool_name: call.toolName });
       } catch (err) {

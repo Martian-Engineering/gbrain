@@ -49,6 +49,25 @@ function projectedResult(messages: ChatMessage[]): Record<string, unknown> {
 }
 
 describe('page-read verification working-context policy', () => {
+  it('retains the newest exact read when provider accounting proves it fits', () => {
+    const output = {
+      source_id: 'company',
+      slug: 'projects/large-filing',
+      content_hash: VALID_HASH,
+      compiled_truth: `EXACT_BASELINE_${'x'.repeat(20_000)}`,
+      proposal_baseline_ref: `gbrain.proposal-baseline.v1:${'1'.repeat(8)}-${'1'.repeat(4)}-${'1'.repeat(4)}-${'1'.repeat(4)}-${'1'.repeat(12)}`,
+    };
+
+    const compacted = compactToolLoopMessages(pageReadRound(output), 1_000, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [pageReadVerificationContextPolicy],
+      preferredProjectionBytes: 30_000,
+      preferredProjectionFits: () => true,
+    });
+
+    expect(projectedResult(compacted)).toEqual(output);
+  });
+
   it('projects a 140952-byte page body to authenticated identity and content hash', () => {
     const privateBodyMarker = 'PRIVATE_LARGE_FILING_';
     const compiledTruth = privateBodyMarker
