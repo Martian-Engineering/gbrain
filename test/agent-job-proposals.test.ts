@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
@@ -25,8 +26,10 @@ import { compactToolLoopMessages } from '../src/core/ai/tool-loop-context.ts';
 import { proposalInventoryContextPolicy } from '../src/core/ingestion-proposal-context-policy.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import type { ChatMessage } from '../src/core/ai/gateway.ts';
+import { proposalBaselineRefForExecution } from '../src/core/minions/ingestion-proposal-baseline-ref.ts';
 
 let engine: PGLiteEngine;
+const baselineRefs = new Map<string, string>();
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -40,6 +43,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  baselineRefs.clear();
 });
 
 async function seedJob(overrides: Record<string, unknown> = {}): Promise<number> {
@@ -89,7 +93,7 @@ function createPage(slug: string, bodyMarkdown = '# Page'): ScopedProposalPage {
   return { slug, effect: 'create', title: 'Page', bodyMarkdown };
 }
 
-function updatePage(slug: string): ScopedProposalPage {
+function updatePage(slug: string): Extract<ScopedProposalPage, { effect: 'update' }> {
   return {
     slug,
     effect: 'update',
@@ -112,6 +116,9 @@ async function stage(
   admissionScope = 'Include project delivery notes.',
   inventory: ProposalPageInventoryEntry[] = pageInventory(page),
 ) {
+  const stagePage = page.effect === 'update'
+    ? await referencedUpdatePage(jobId, page)
+    : page;
   return stageAgentJobProposalPage(engine, jobId, {
     artifact_id: 'artifact-1',
     source_id: 'company',
@@ -119,8 +126,51 @@ async function stage(
     sequence,
     total_pages: totalPages,
     page_inventory: inventory,
-    page,
+    page: stagePage,
   });
+}
+
+/** Seed the exact completed get_page execution used by one test update. */
+async function referencedUpdatePage(
+  jobId: number,
+  page: Extract<ScopedProposalPage, { effect: 'update' }>,
+): Promise<Record<string, unknown>> {
+  const cacheKey = `${jobId}:${page.slug}`;
+  let baselineReadRef = baselineRefs.get(cacheKey);
+  if (!baselineReadRef) {
+    const executionId = randomUUID();
+    const current = await engine.getPage(page.slug, { sourceId: 'company', includeDeleted: true });
+    await engine.executeRaw(
+      `INSERT INTO subagent_tool_executions
+         (job_id, message_idx, tool_use_id, tool_name, input, output, status,
+          schema_version, ordinal, gbrain_tool_use_id)
+       VALUES ($1, $2, $3, 'brain_get_page', $4::text::jsonb, $5::text::jsonb,
+               'complete', 2, 0, $6)`,
+      [
+        jobId,
+        10_000 + baselineRefs.size,
+        randomUUID(),
+        JSON.stringify({ source_id: 'company', slug: page.slug }),
+        JSON.stringify({
+          source_id: 'company',
+          slug: page.slug,
+          title: current?.title ?? page.title,
+          compiled_truth: page.baseMarkdown,
+          content_hash: page.expectedContentHash,
+        }),
+        executionId,
+      ],
+    );
+    baselineReadRef = proposalBaselineRefForExecution(executionId);
+    baselineRefs.set(cacheKey, baselineReadRef);
+  }
+  return {
+    slug: page.slug,
+    effect: 'update',
+    title: page.title,
+    bodyMarkdown: page.bodyMarkdown,
+    baselineReadRef,
+  };
 }
 
 describe('proposal turn pre-persistence boundary', () => {
@@ -293,6 +343,81 @@ describe('durable agent-job proposal staging', () => {
     ]);
     expect(owned.plan.proposedTimelineEntries[0]!.pageSlug).toBe('projects/existing');
     expect(digestProposalValue(owned.plan)).toBe(manifest.proposalDigest);
+  });
+
+  it('rejects malformed and cross-job baseline references without revealing execution identity', async () => {
+    await seedStoredPage('sources/example');
+    const sourceJobId = await seedJob();
+    const targetJobId = await seedJob();
+    const update = updatePage('sources/example');
+    const referencedPage = await referencedUpdatePage(sourceJobId, update);
+    const common = {
+      artifact_id: 'artifact-1',
+      source_id: 'company',
+      admission_scope: 'Include project delivery notes.',
+      sequence: 1,
+      total_pages: 1,
+      page_inventory: [{ slug: update.slug, effect: 'update' }],
+    };
+
+    await expect(stageAgentJobProposalPage(engine, targetJobId, {
+      ...common,
+      page: referencedPage,
+    })).rejects.toMatchObject({
+      code: 'baseline_reference_unavailable',
+      message: expect.not.stringContaining(String(referencedPage.baselineReadRef)),
+    });
+    await expect(stageAgentJobProposalPage(engine, targetJobId, {
+      ...common,
+      page: { ...referencedPage, baselineReadRef: 'not-a-reference' },
+    })).rejects.toMatchObject({ code: 'invalid_baseline_reference' });
+  });
+
+  it('rejects a new stage when the page changes after its baseline read', async () => {
+    await seedStoredPage('sources/example');
+    const jobId = await seedJob();
+    const update = updatePage('sources/example');
+    const referencedPage = await referencedUpdatePage(jobId, update);
+    await engine.executeRaw(
+      `UPDATE pages
+          SET compiled_truth = $3, content_hash = $4
+        WHERE source_id = $1 AND slug = $2`,
+      ['company', update.slug, '# Existing page\n\nConcurrent change.', 'c'.repeat(64)],
+    );
+
+    await expect(stageAgentJobProposalPage(engine, jobId, {
+      artifact_id: 'artifact-1', source_id: 'company',
+      admission_scope: 'Include project delivery notes.', sequence: 1, total_pages: 1,
+      page_inventory: [{ slug: update.slug, effect: 'update' }],
+      page: referencedPage,
+    })).rejects.toMatchObject({ code: 'baseline_stale' });
+  });
+
+  it('fails closed when the authenticated read omits part of the rewrite baseline', async () => {
+    await seedStoredPage('sources/example');
+    const jobId = await seedJob();
+    const update = {
+      ...updatePage('sources/example'),
+      baseMarkdown: '# Existing page\n\nVisible projection only.',
+    } as Extract<ScopedProposalPage, { effect: 'update' }>;
+
+    await expect(stage(jobId, 1, 1, update))
+      .rejects.toMatchObject({ code: 'baseline_content_unavailable' });
+  });
+
+  it('replays an already-frozen stage after later corpus drift', async () => {
+    await seedStoredPage('sources/example');
+    const jobId = await seedJob();
+    const update = updatePage('sources/example');
+    const first = await stage(jobId, 1, 1, update);
+    await engine.executeRaw(
+      `UPDATE pages
+          SET compiled_truth = $3, content_hash = $4
+        WHERE source_id = $1 AND slug = $2`,
+      ['company', update.slug, '# Existing page\n\nLater approved change.', 'd'.repeat(64)],
+    );
+
+    await expect(stage(jobId, 1, 1, update)).resolves.toEqual(first);
   });
 
   it('finalizes durably while the newest retained stage call carries the full inventory', async () => {

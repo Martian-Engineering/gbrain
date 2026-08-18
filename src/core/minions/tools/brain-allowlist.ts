@@ -38,7 +38,7 @@ import {
 import {
   PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
   PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
-  PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
+  PROPOSAL_REFERENCED_REWRITE_PAGE_JSON_SCHEMA,
 } from '../../ingestion-proposal-contract.ts';
 
 /**
@@ -270,7 +270,7 @@ function stageIngestionProposalPageSchema(op: Operation): Record<string, unknown
     description: properties.page?.description,
     anyOf: [
       PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
-      PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
+      PROPOSAL_REFERENCED_REWRITE_PAGE_JSON_SCHEMA,
     ],
   };
   return { ...base, properties, additionalProperties: false };

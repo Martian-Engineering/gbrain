@@ -34,6 +34,7 @@ import {
   type StageProposalPageInput,
   type StageProposalPageResult,
 } from '../ingestion-proposal-contract.ts';
+import { executionIdFromProposalBaselineRef } from './ingestion-proposal-baseline-ref.ts';
 import {
   finalizedIngestionProposalExists,
   promoteIngestionProposalAuthority,
@@ -171,7 +172,12 @@ interface PrivateUpdateBaseline {
   contentHash: string;
 }
 
-interface FrozenProposalCandidate extends ParsedStageProposalPageCore {
+type MaterializedStageProposalPageCore = Omit<ParsedStageProposalPageCore, 'page'> & {
+  page: ScopedProposalPage;
+  referencedBaseline: PrivateUpdateBaseline | null;
+};
+
+interface FrozenProposalCandidate extends MaterializedStageProposalPageCore {
   pageDigest: string;
   baseline: PrivateUpdateBaseline | null;
 }
@@ -334,9 +340,15 @@ export async function assertProposalToolTurnPersistableForJob(
     const boundCandidate = bindVerbatimCapturePage(binding, candidate);
     assertBindingMatches(binding, boundCandidate);
     assertSlugAllowed(binding, boundCandidate.page.slug, 'Proposed page');
+    const materializedCandidate = await materializeProposalBaselineRef(
+      tx,
+      jobId,
+      binding,
+      boundCandidate,
+    );
     const fragments = await readStoredFragments(tx, jobId);
-    const replay = assertCumulativeStageFits(binding, boundCandidate, fragments);
-    if (!replay) await freezeProposalCandidate(tx, binding, boundCandidate);
+    const replay = assertCumulativeStageFits(binding, materializedCandidate, fragments);
+    if (!replay) await freezeProposalCandidate(tx, binding, materializedCandidate);
   });
 }
 
@@ -365,17 +377,23 @@ export async function stageAgentJobProposalPage(
 
   return engine.transaction(async (tx) => {
     const binding = await readJobBinding(tx, jobId, true);
-    const candidate = bindVerbatimCapturePage(binding, parsedCandidate);
-    assertBindingMatches(binding, candidate);
-    assertPageInventoryForBinding(binding, candidate.pageInventory);
-    const frozenInventory = parseFrozenPageInventory(binding, candidate.totalPages);
-    if (frozenInventory) assertExactPageInventory(frozenInventory, candidate.pageInventory);
-    assertPageMatchesInventorySlot(candidate);
+    const referencedCandidate = bindVerbatimCapturePage(binding, parsedCandidate);
+    assertBindingMatches(binding, referencedCandidate);
+    assertPageInventoryForBinding(binding, referencedCandidate.pageInventory);
+    const frozenInventory = parseFrozenPageInventory(binding, referencedCandidate.totalPages);
+    if (frozenInventory) assertExactPageInventory(frozenInventory, referencedCandidate.pageInventory);
+    assertPageMatchesInventorySlot(referencedCandidate);
     if (await finalizedIngestionProposalExists(tx, jobId)) {
       throw new AgentJobProposalError('proposal_finalized', 'This job proposal is already finalized.');
     }
 
-    await assertFirstInventoryEffectsMatchCorpus(tx, binding, candidate.pageInventory);
+    await assertFirstInventoryEffectsMatchCorpus(tx, binding, referencedCandidate.pageInventory);
+    const candidate = await materializeProposalBaselineRef(
+      tx,
+      jobId,
+      binding,
+      referencedCandidate,
+    );
     const fragments = await readStoredFragments(tx, jobId);
     const replay = assertCumulativeStageFits(binding, candidate, fragments);
     const frozenBinding = await freezeProposalBinding(
@@ -406,7 +424,7 @@ export async function stageAgentJobProposalPage(
       [
         jobId, frozenBinding.ownerClientId, frozenBinding.sourceId, frozenBinding.artifactId,
         frozenBinding.admissionScope, candidate.sequence, candidate.totalPages,
-        canonicalProposalJson(candidate.page), frozenCandidate.pageDigest,
+        canonicalProposalJson(frozenCandidate.page), frozenCandidate.pageDigest,
         frozenCandidate.baseline?.title ?? null,
         frozenCandidate.baseline?.markdown ?? null,
         frozenCandidate.baseline?.contentHash ?? null,
@@ -1136,7 +1154,7 @@ async function readStoredFragments(engine: BrainEngine, jobId: number): Promise<
  */
 function assertCumulativeStageFits(
   binding: JobBinding,
-  candidate: ParsedStageProposalPageCore,
+  candidate: MaterializedStageProposalPageCore,
   fragments: readonly StoredProposalFragment[],
 ): StoredProposalFragment | null {
   let stagedBytes = 0;
@@ -1181,11 +1199,94 @@ function assertCumulativeStageFits(
   return replay;
 }
 
+interface StoredBaselineReadExecution {
+  output: unknown;
+}
+
+type MaterializedBaselineCandidate<T extends ParsedStageProposalPageCore> = Omit<T, 'page'> & {
+  page: ScopedProposalPage;
+  referencedBaseline: PrivateUpdateBaseline | null;
+};
+
+/** Resolve one model reference against an exact completed page read from this job. */
+async function materializeProposalBaselineRef<T extends ParsedStageProposalPageCore>(
+  engine: BrainEngine,
+  jobId: number,
+  binding: JobBinding,
+  candidate: T,
+): Promise<MaterializedBaselineCandidate<T>> {
+  if (candidate.page.effect === 'create') {
+    return { ...candidate, page: candidate.page, referencedBaseline: null };
+  }
+  const executionId = executionIdFromProposalBaselineRef(candidate.page.baselineReadRef);
+  if (!executionId) {
+    throw new AgentJobProposalError(
+      'invalid_baseline_reference',
+      'baselineReadRef must be the opaque reference from the immediately preceding page read.',
+    );
+  }
+  // The execution ledger is the capability boundary. Keep lookup failures
+  // opaque so a model cannot use references to enumerate another job's reads.
+  const rows = await engine.executeRaw<StoredBaselineReadExecution>(
+    `SELECT output
+       FROM subagent_tool_executions
+      WHERE job_id = $1
+        AND gbrain_tool_use_id::text = $2
+        AND tool_name = 'brain_get_page'
+        AND status = 'complete'
+      LIMIT 1`,
+    [jobId, executionId],
+  );
+  const rawOutput = rows[0]?.output;
+  const output = rawOutput && typeof rawOutput === 'object' && !Array.isArray(rawOutput)
+    ? rawOutput as Record<string, unknown>
+    : null;
+  if (!output) throw unavailableBaselineReference(candidate.page.slug);
+  // Bind all semantic identity from authenticated output, not the model's
+  // staging arguments. The job source and requested slug must both agree.
+  const title = output.title;
+  const markdown = output.compiled_truth;
+  const contentHash = output.content_hash;
+  if (
+    output.source_id !== binding.sourceId
+    || output.slug !== candidate.page.slug
+    || typeof title !== 'string'
+    || typeof markdown !== 'string'
+    || typeof contentHash !== 'string'
+    || !SHA256_RE.test(contentHash)
+  ) {
+    throw unavailableBaselineReference(candidate.page.slug);
+  }
+  const baseline = { title, markdown, contentHash };
+  // Materialize the established frozen proposal shape here. Downstream
+  // review, authority retention, approval, and apply never see the reference.
+  return {
+    ...candidate,
+    page: {
+      slug: candidate.page.slug,
+      effect: 'update',
+      title: candidate.page.title,
+      bodyMarkdown: candidate.page.bodyMarkdown,
+      baseMarkdown: baseline.markdown,
+      expectedContentHash: baseline.contentHash,
+    },
+    referencedBaseline: baseline,
+  };
+}
+
+/** Collapse missing, cross-job, wrong-tool, and mismatched references alike. */
+function unavailableBaselineReference(slug: string): AgentJobProposalError {
+  return new AgentJobProposalError(
+    'baseline_reference_unavailable',
+    `The proposal baseline reference for ${slug} is unavailable or does not match this job, source, and page. Read the page again and retry the same inventory slot.`,
+  );
+}
+
 /** Load and freeze the exact private baseline for an existing-page update. */
 async function freezeProposalCandidate(
   engine: BrainEngine,
   binding: JobBinding,
-  candidate: ParsedStageProposalPageCore,
+  candidate: MaterializedStageProposalPageCore,
 ): Promise<FrozenProposalCandidate> {
   if (candidate.page.effect === 'create') {
     return { ...candidate, pageDigest: digestFrozenProposalPage(candidate.page, null), baseline: null };
@@ -1200,24 +1301,34 @@ async function freezeProposalCandidate(
       `Update baseline is unavailable for ${candidate.page.slug}; rebuild the inventory against current pages.`,
     );
   }
-  const baseline: PrivateUpdateBaseline = {
+  const currentBaseline: PrivateUpdateBaseline = {
     title: page.title,
     markdown: page.compiled_truth,
     contentHash: page.content_hash,
   };
+  const referencedBaseline = candidate.referencedBaseline;
+  if (!referencedBaseline) {
+    throw new AgentJobProposalError('baseline_unavailable', 'An update requires a referenced baseline.');
+  }
+  if (referencedBaseline.contentHash !== currentBaseline.contentHash) {
+    throw new AgentJobProposalError(
+      'baseline_stale',
+      `The page changed after its proposal baseline read for ${candidate.page.slug}; read it again and rebuild the proposal.`,
+    );
+  }
   if (
-    candidate.page.baseMarkdown !== baseline.markdown
-    || candidate.page.expectedContentHash !== baseline.contentHash
+    referencedBaseline.title !== currentBaseline.title
+    || referencedBaseline.markdown !== currentBaseline.markdown
   ) {
     throw new AgentJobProposalError(
-      'baseline_mismatch',
-      `The reviewed rewrite baseline for ${candidate.page.slug} does not match the current page; read it again and rebuild the proposal.`,
+      'baseline_content_unavailable',
+      `The exact page read for ${candidate.page.slug} does not contain the complete rewrite baseline. This page cannot be safely staged as a full rewrite.`,
     );
   }
   return {
     ...candidate,
-    baseline,
-    pageDigest: digestFrozenProposalPage(candidate.page, baseline),
+    baseline: currentBaseline,
+    pageDigest: digestFrozenProposalPage(candidate.page, currentBaseline),
   };
 }
 

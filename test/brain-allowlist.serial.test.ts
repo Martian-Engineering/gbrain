@@ -25,7 +25,7 @@ import { assertProposalToolTurnPersistableForJob } from '../src/core/minions/age
 import {
   PROPOSAL_CREATE_PAGE_JSON_SCHEMA,
   PROPOSAL_PAGE_INVENTORY_ENTRY_JSON_SCHEMA,
-  PROPOSAL_REWRITE_PAGE_JSON_SCHEMA,
+  PROPOSAL_REFERENCED_REWRITE_PAGE_JSON_SCHEMA,
 } from '../src/core/ingestion-proposal-contract.ts';
 
 let engine: PGLiteEngine;
@@ -249,7 +249,7 @@ describe('buildBrainTools', () => {
 
     const [createPage, rewritePage] = schema.properties.page.anyOf;
     expect(createPage).toEqual(PROPOSAL_CREATE_PAGE_JSON_SCHEMA);
-    expect(rewritePage).toEqual(PROPOSAL_REWRITE_PAGE_JSON_SCHEMA);
+    expect(rewritePage).toEqual(PROPOSAL_REFERENCED_REWRITE_PAGE_JSON_SCHEMA);
     expect(createPage.additionalProperties).toBe(false);
     expect(createPage.required).toEqual(['slug', 'effect', 'title', 'bodyMarkdown']);
     expect(createPage.properties.effect).toEqual({ type: 'string', enum: ['create'] });
@@ -262,12 +262,9 @@ describe('buildBrainTools', () => {
 
     expect(rewritePage.additionalProperties).toBe(false);
     expect(rewritePage.required).toEqual([
-      'slug', 'effect', 'title', 'bodyMarkdown', 'baseMarkdown', 'expectedContentHash',
+      'slug', 'effect', 'title', 'bodyMarkdown', 'baselineReadRef',
     ]);
-    expect(rewritePage.properties.expectedContentHash).toEqual({
-      type: 'string',
-      pattern: '^[a-f0-9]{64}$',
-    });
+    expect(rewritePage.properties.baselineReadRef).toEqual({ type: 'string' });
   });
 
   test('stage proposal identity omission preserves the exact nested schema', () => {

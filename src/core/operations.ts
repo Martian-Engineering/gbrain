@@ -5906,7 +5906,7 @@ const submit_agent: Operation = {
 
 const stage_ingestion_proposal_page: Operation = {
   name: 'stage_ingestion_proposal_page',
-  description: 'Stage one exact page body and optimistic baseline in the current ingestion agent job. This writes job evidence only and never mutates corpus state.',
+  description: 'Stage one exact page body using a durable page-read baseline reference in the current ingestion agent job. This writes job evidence only and never mutates corpus state.',
   // Operation mutability classifies corpus effects; durable job evidence is
   // intentionally excluded from corpus-write audit and retry semantics.
   mutating: false,

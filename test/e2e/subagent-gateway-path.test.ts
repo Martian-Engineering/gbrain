@@ -173,6 +173,74 @@ function buildHandler(toolRegistry: ToolDef[]) {
 describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gateway.toolLoop)', () => {
   afterAll(() => clearGateway());
 
+  it('forces proposal jobs through the gateway and exposes the durable page-read reference', async () => {
+    await engine.setConfig('agent.use_gateway_loop', 'false');
+    let turn = 0;
+    let referencedResult: Record<string, unknown> | undefined;
+    __setChatTransportForTests(async opts => {
+      turn++;
+      if (turn === 1) {
+        return {
+          text: '',
+          blocks: [{
+            type: 'tool-call', toolCallId: 'baseline-read', toolName: 'brain_get_page',
+            input: { source_id: 'company', slug: 'projects/example' },
+          }] as ChatBlock[],
+          stopReason: 'tool_calls',
+          usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-sonnet-4-6',
+          providerId: 'anthropic',
+        } satisfies ChatResult;
+      }
+      const result = opts.messages
+        .flatMap(message => typeof message.content === 'string' ? [] : message.content)
+        .find(block => block.type === 'tool-result');
+      referencedResult = result?.type === 'tool-result'
+        ? result.output as Record<string, unknown>
+        : undefined;
+      return {
+        text: 'reference received',
+        blocks: [{ type: 'text', text: 'reference received' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'anthropic:claude-sonnet-4-6',
+        providerId: 'anthropic',
+      } satisfies ChatResult;
+    });
+    const page = {
+      source_id: 'company', slug: 'projects/example', title: 'Example',
+      compiled_truth: '# Example', content_hash: 'a'.repeat(64),
+    };
+    const getPage: ToolDef = {
+      name: 'brain_get_page', description: 'read page', input_schema: { type: 'object' },
+      idempotent: true, mutating: false, async execute() { return page; },
+    };
+    const { jobId, ctx } = await makeFakeJob({
+      prompt: 'read the proposal baseline',
+      model: 'anthropic:claude-sonnet-4-6',
+      data: {
+        __owner_client_id: 'lore-client', source_id: 'company',
+        proposal_artifact_id: 'artifact-1', proposal_capture_page_slug: 'sources/example',
+        proposal_admission_scope: 'Derived scope.', allowed_slug_prefixes: ['sources/*', 'projects/*'],
+      },
+    });
+
+    const result = await buildHandler([getPage])(ctx);
+
+    expect(result.result).toBe('reference received');
+    expect(referencedResult).toMatchObject(page);
+    expect(referencedResult?.proposal_baseline_ref)
+      .toMatch(/^gbrain\.proposal-baseline\.v1:[0-9a-f-]{36}$/);
+    const [execution] = await engine.executeRaw<{ output: unknown; gbrain_tool_use_id: string }>(
+      `SELECT output, gbrain_tool_use_id::text AS gbrain_tool_use_id
+         FROM subagent_tool_executions WHERE job_id = $1`,
+      [jobId],
+    );
+    expect(execution?.output).toEqual(page);
+    expect(referencedResult?.proposal_baseline_ref)
+      .toBe(`gbrain.proposal-baseline.v1:${execution?.gbrain_tool_use_id}`);
+  });
+
   it('returns a malformed stage as a tool error and accepts its correction in the same job', async () => {
     const inventory = [{ slug: 'sources/example', effect: 'create' as const }];
     const malformedInput: StageProposalPageInput = {
@@ -365,13 +433,13 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
   it('rejects a cumulative stage overflow before assistant, tool, or fragment persistence', async () => {
     const crossingInput = {
       artifact_id: 'artifact-1', source_id: 'company',
-      admission_scope: 'Derived scope.', sequence: 2, total_pages: 2,
-      page_inventory: [
-        { slug: 'sources/large-1', effect: 'create' },
-        { slug: 'sources/large-2', effect: 'create' },
-      ],
+      admission_scope: 'Derived scope.', sequence: 5, total_pages: 5,
+      page_inventory: Array.from({ length: 5 }, (_, index) => ({
+        slug: `sources/large-${index + 1}`,
+        effect: 'create',
+      })),
       page: {
-        slug: 'sources/large-2', effect: 'create', title: 'Large',
+        slug: 'sources/large-5', effect: 'create', title: 'Large',
         bodyMarkdown: 'x'.repeat(80_000),
       },
     };
@@ -402,11 +470,17 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
         proposal_admission_scope: 'Derived scope.', allowed_slug_prefixes: ['sources/*'],
       },
     });
-    await stageAgentJobProposalPage(engine, jobId, {
-      ...crossingInput,
-      sequence: 1,
-      page: { ...crossingInput.page, slug: 'sources/large-1' },
-    });
+    for (let sequence = 1; sequence < 5; sequence++) {
+      await stageAgentJobProposalPage(engine, jobId, {
+        ...crossingInput,
+        sequence,
+        page: {
+          ...crossingInput.page,
+          slug: `sources/large-${sequence}`,
+          bodyMarkdown: 'x'.repeat(180_000),
+        },
+      });
+    }
 
     await expect(handler(ctx)).rejects.toThrow(/maximum/i);
     const messages = await engine.executeRaw<{ role: string }>(
@@ -421,7 +495,7 @@ describe('runSubagentViaGateway (v0.38 Slice 1 — full handler path through gat
     expect(executed).toBe(false);
     expect(messages.map((row) => row.role)).toEqual(['user', 'user']);
     expect(executions).toHaveLength(0);
-    expect(fragments.map((row) => Number(row.sequence))).toEqual([1]);
+    expect(fragments.map((row) => Number(row.sequence))).toEqual([1, 2, 3, 4]);
   });
 
   it('happy path 1-turn: gateway returns text, handler returns SubagentResult', async () => {

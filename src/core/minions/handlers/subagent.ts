@@ -255,8 +255,9 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // route ALL subagent jobs through gateway.toolLoop() (works for every
     // provider in src/core/ai/recipes/). When OFF, route through the legacy
     // Anthropic-direct path AND refuse non-Anthropic models loudly.
+    const proposalBinding = proposalToolBindingFromJobData(data);
     const useGatewayLoopRaw = await engine.getConfig('agent.use_gateway_loop').catch(() => null);
-    const useGatewayLoop = data.use_gateway_loop === true || (
+    const useGatewayLoop = proposalBinding !== undefined || data.use_gateway_loop === true || (
       typeof useGatewayLoopRaw === 'string'
       && (useGatewayLoopRaw === 'true' || useGatewayLoopRaw === '1')
     );
@@ -275,7 +276,6 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     // allow-list — flows through buildBrainTools → the put_page schema
     // description AND the OperationContext, so the model's tool schema and
     // the server-side check stay in sync).
-    const proposalBinding = proposalToolBindingFromJobData(data);
     const registry = deps.toolRegistry ?? buildBrainTools({
       subagentId: ctx.id,
       engine,

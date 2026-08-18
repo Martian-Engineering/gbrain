@@ -104,6 +104,15 @@ export interface ScopedProposalRewritePage {
   expectedContentHash: string;
 }
 
+/** Model-facing full rewrite bound to an exact durable page-read execution. */
+export interface ScopedProposalReferencedRewritePage {
+  slug: string;
+  effect: 'update';
+  title: string;
+  bodyMarkdown: string;
+  baselineReadRef: string;
+}
+
 /** Exact fields accepted for a full rewrite proposal. */
 export const PROPOSAL_REWRITE_PAGE_KEYS = [
   'slug',
@@ -129,6 +138,29 @@ export const PROPOSAL_REWRITE_PAGE_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** Exact fields accepted from the model for one referenced full rewrite. */
+export const PROPOSAL_REFERENCED_REWRITE_PAGE_KEYS = [
+  'slug',
+  'effect',
+  'title',
+  'bodyMarkdown',
+  'baselineReadRef',
+] as const;
+
+/** Canonical model schema for a full rewrite backed by a page-read reference. */
+export const PROPOSAL_REFERENCED_REWRITE_PAGE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string' },
+    effect: { type: 'string', enum: ['update'] },
+    title: { type: 'string' },
+    bodyMarkdown: { type: 'string' },
+    baselineReadRef: { type: 'string' },
+  },
+  required: PROPOSAL_REFERENCED_REWRITE_PAGE_KEYS,
+  additionalProperties: false,
+} as const;
+
 /** Reject authored text that could create or close a server-managed region. */
 function assertNoManagedRegionMarker(markdown: string): void {
   if (MANAGED_REGION_MARKER_RE.test(markdown)) {
@@ -150,6 +182,11 @@ export type ScopedProposalPage =
   | ScopedProposalCreatePage
   | ScopedProposalRewritePage;
 
+/** One model-authored page intent before private baseline materialization. */
+export type ScopedProposalStagePage =
+  | ScopedProposalCreatePage
+  | ScopedProposalReferencedRewritePage;
+
 /** External tool input for one ordered proposal page. */
 export interface StageProposalPageInput {
   artifact_id: string;
@@ -168,7 +205,7 @@ export interface ParsedStageProposalPageCore {
   admissionScope: string;
   sequence: number;
   totalPages: number;
-  page: ScopedProposalPage;
+  page: ScopedProposalStagePage;
 }
 
 /** Fully validated page-stage input with its normalized repeated inventory. */
@@ -215,7 +252,7 @@ export function parseStageProposalPageCore(raw: unknown): ParsedStageProposalPag
   if (sequence > totalPages) {
     throw new AgentJobProposalError('invalid_sequence', 'sequence must be within 1..total_pages.');
   }
-  const page = parseProposalPage(input.page);
+  const page = parseStageProposalPage(input.page);
   return {
     artifactId,
     sourceId,
@@ -377,6 +414,28 @@ export function parseProposalPage(
     baseMarkdown,
     expectedContentHash,
   };
+}
+
+/** Parse one model-facing create or baseline-referenced full rewrite. */
+export function parseStageProposalPage(raw: unknown): ScopedProposalStagePage {
+  const page = readRecord(raw, 'page');
+  if (page.effect !== 'create' && page.effect !== 'update') {
+    throw new AgentJobProposalError('invalid_page', 'page.effect must be create or update.');
+  }
+  if (page.effect === 'create') {
+    const parsed = parseProposalPage(raw);
+    if (parsed.effect !== 'create') {
+      throw new AgentJobProposalError('invalid_page', 'page.effect must remain create.');
+    }
+    return parsed;
+  }
+  assertExactKeys(page, PROPOSAL_REFERENCED_REWRITE_PAGE_KEYS, 'page');
+  const slug = readCanonicalSlug(page.slug, 'page.slug');
+  const title = readBoundedString(page.title, 'page.title', 1_000);
+  const bodyMarkdown = readNonBlankString(page.bodyMarkdown, 'page.bodyMarkdown');
+  assertNoManagedRegionMarker(bodyMarkdown);
+  const baselineReadRef = readNonBlankString(page.baselineReadRef, 'page.baselineReadRef');
+  return { slug, effect: 'update', title, bodyMarkdown, baselineReadRef };
 }
 
 /** Format one-based duplicate positions as a compact correction hint. */
