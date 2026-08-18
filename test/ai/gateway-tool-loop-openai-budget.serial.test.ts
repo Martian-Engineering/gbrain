@@ -46,6 +46,69 @@ describe('OpenAI tool-loop context budgeting', () => {
     resetGateway();
   });
 
+  it('runs an exact-fit fresh prompt beyond the byte-safe fallback', async () => {
+    configureGateway({
+      chat_model: 'openai:gpt-5.6-terra',
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: 1536,
+      expansion_model: 'openai:gpt-5.6-luna',
+      env: { OPENAI_API_KEY: 'stub' },
+    });
+    const model = 'openai:gpt-5.6-terra';
+    const system = 'File the complete source-grounded artifact.';
+    const tools: ChatToolDef[] = [];
+    const sentence = 'The source records delivery milestones, participants, decisions, and evidence. ';
+    const messages: ChatMessage[] = [{
+      role: 'user',
+      content: sentence.repeat(Math.ceil((220 * 1024) / sentence.length)),
+    }];
+    const budgets = resolveToolLoopMessageBudgets({
+      model,
+      maxOutputTokens: 32_768,
+      contextWindowTokens: 200_000,
+      system,
+      tools,
+    });
+    expect(Buffer.byteLength(JSON.stringify(messages), 'utf8'))
+      .toBeGreaterThan(budgets.byteSafeBytes);
+    expect(openAiToolLoopRequestFits({
+      budgets,
+      system,
+      tools,
+      modelMessages: toModelMessages(messages),
+    })).toBe(true);
+
+    let providerMessages: ChatMessage[] = [];
+    __setChatTransportForTests(async options => {
+      providerMessages = structuredClone(options.messages);
+      return {
+        text: 'filed',
+        blocks: [{ type: 'text', text: 'filed' }] as ChatBlock[],
+        stopReason: 'end',
+        usage: {
+          input_tokens: 55_000,
+          output_tokens: 2,
+          cache_read_tokens: 0,
+          cache_creation_tokens: 0,
+        },
+        model,
+        providerId: 'openai',
+      };
+    });
+
+    await toolLoop({
+      model,
+      system,
+      initialMessages: messages,
+      tools,
+      toolHandlers: new Map(),
+      maxTokens: 32_768,
+      contextWindowTokens: 200_000,
+    });
+
+    expect(providerMessages).toEqual(messages);
+  }, 30_000);
+
   it('keeps a production-sized page body out of preferred OpenAI context while retaining hash proof', async () => {
     configureGateway({
       chat_model: 'openai:gpt-5.6-terra',

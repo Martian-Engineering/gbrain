@@ -5780,10 +5780,10 @@ const submit_agent: Operation = {
       });
       selectedModel = promptBudget.model;
       selectedMaxOutputTokens = promptBudget.maxOutputTokens;
-      if (promptBudget.messageBytes > promptBudget.messageBudgetBytes) {
+      if (!promptBudget.requestFits) {
         throw new OperationError(
           'invalid_params',
-          `submit_agent: initial prompt is too large for model ${selectedModel} with the published skill and requested tools (${promptBudget.messageBytes} UTF-8 bytes; maximum ${promptBudget.messageBudgetBytes}).`,
+          `submit_agent: initial prompt is too large for model ${selectedModel} with the published skill, requested tools, and output budget (${promptBudget.messageBytes} UTF-8 bytes; conservative byte-safe budget ${promptBudget.messageBudgetBytes}).`,
         );
       }
     }

@@ -1,8 +1,15 @@
 import type { BrainEngine } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
 import { resolveModel, TIER_DEFAULTS } from '../model-config.ts';
-import type { ChatMessage, ChatToolDef } from '../ai/gateway.ts';
-import { resolveToolLoopMessageBudget } from '../ai/tool-loop-context.ts';
+import {
+  toModelMessages,
+  type ChatMessage,
+  type ChatToolDef,
+} from '../ai/gateway.ts';
+import {
+  openAiToolLoopRequestFits,
+  resolveToolLoopMessageBudgets,
+} from '../ai/tool-loop-context.ts';
 import { buildSystemPrompt } from './system-prompt.ts';
 import { buildBrainTools, filterAllowedTools } from './tools/brain-allowlist.ts';
 import { resolveSubagentMaxOutputTokens } from './subagent-limits.ts';
@@ -26,9 +33,10 @@ export interface SubagentInitialPromptBudget {
   maxOutputTokens: number;
   messageBytes: number;
   messageBudgetBytes: number;
+  requestFits: boolean;
 }
 
-/** Resolve a conservative fresh-job prompt surface and executable byte budget. */
+/** Resolve the provider-aware admission boundary for a fresh Minion job. */
 export async function resolveSubagentInitialPromptBudget(
   args: SubagentInitialPromptBudgetArgs,
 ): Promise<SubagentInitialPromptBudget> {
@@ -60,15 +68,36 @@ export async function resolveSubagentInitialPromptBudget(
     inputSchema: tool.input_schema as Record<string, unknown>,
   }));
   const message: ChatMessage[] = [{ role: 'user', content: args.prompt }];
+  const budgets = resolveToolLoopMessageBudgets({
+    model,
+    maxOutputTokens,
+    system,
+    tools,
+  });
+  const messageBytes = Buffer.byteLength(JSON.stringify(message), 'utf8');
+  let requestFits = messageBytes <= budgets.byteSafeBytes;
+
+  // OpenAI models have an exact tokenizer available. Admit the complete
+  // provider request when it fits the same target used by the running tool
+  // loop; if tokenization ever fails, retain the byte-safe fallback above.
+  if (budgets.openAiTokenLimits) {
+    try {
+      requestFits = openAiToolLoopRequestFits({
+        budgets,
+        system,
+        tools,
+        modelMessages: toModelMessages(message),
+      });
+    } catch {
+      // The independently safe byte result remains authoritative.
+    }
+  }
+
   return {
     model,
     maxOutputTokens,
-    messageBytes: Buffer.byteLength(JSON.stringify(message), 'utf8'),
-    messageBudgetBytes: resolveToolLoopMessageBudget({
-      model,
-      maxOutputTokens,
-      system,
-      tools,
-    }),
+    messageBytes,
+    messageBudgetBytes: budgets.byteSafeBytes,
+    requestFits,
   };
 }
