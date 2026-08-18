@@ -194,7 +194,9 @@ describe('OpenAI tool-loop context budgeting', () => {
     }];
     const sentence = 'The source records delivery milestones, participants, decisions, and evidence. ';
     const task = sentence.repeat(Math.ceil((220 * 1024) / sentence.length));
-    const privateError = 'Page not found: sources/google-gmail/example';
+    const missingSlug = `sources/google-gmail/${'a'.repeat(234)}`;
+    expect(missingSlug).toHaveLength(255);
+    const privateError = `Page not found: ${missingSlug}`;
     const messages: ChatMessage[] = [
       { role: 'user', content: task },
       {
@@ -203,7 +205,7 @@ describe('OpenAI tool-loop context budgeting', () => {
           type: 'tool-call',
           toolCallId: 'missing-source',
           toolName: 'brain_get_page',
-          input: { slug: 'sources/google-gmail/example' },
+          input: { slug: missingSlug },
         }],
       },
       {
@@ -239,8 +241,8 @@ describe('OpenAI tool-loop context budgeting', () => {
 
     expect(compacted[0]).toEqual(messages[0]);
     expect(JSON.stringify(compacted)).not.toContain(privateError);
-    expect(JSON.stringify(compacted)).toContain('sources/google-gmail/example');
     expect(resultOutput(compacted, 'missing-source')).toMatchObject({
+      slug: missingSlug,
       working_context_projection: {
         verification: 'not_found',
         interpretation: 'authenticated_page_absence',

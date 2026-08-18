@@ -49,8 +49,10 @@ function projectFailedPageReadResult(value: unknown, maxBytes: number): unknown 
 
 /** Convert the tool's canonical missing-page error to a non-prose fact. */
 function pageNotFoundProjection(value: unknown, maxBytes: number): unknown | null {
-  if (typeof value !== 'string' || !value.startsWith('Page not found: ')) return null;
+  const slug = missingPageSlug(value);
+  if (!slug) return null;
   const projection = {
+    slug,
     working_context_projection: {
       schema: PROJECTION_SCHEMA,
       verification: 'not_found',
@@ -60,6 +62,14 @@ function pageNotFoundProjection(value: unknown, maxBytes: number): unknown | nul
   return jsonBytes(projection) <= maxBytes
     ? projection
     : { working_context_projection: true };
+}
+
+/** Parse only the operation's canonical missing-page error and validate its slug. */
+function missingPageSlug(value: unknown): string | null {
+  const prefix = 'Page not found: ';
+  if (typeof value !== 'string' || !value.startsWith(prefix)) return null;
+  const slug = value.slice(prefix.length);
+  return isValidPageSlug(slug) ? slug : null;
 }
 
 /** Accept only bounded canonical identity and a complete lowercase SHA-256 hash. */

@@ -30,6 +30,9 @@ const OPENAI_PROTOCOL_TOKEN_RESERVE = 1_024;
 const FALLBACK_CONTEXT_TOKENS = 128_000;
 const PAYLOAD_LIMITS = [12_000, 4_000, 1_000, 256, 64, 0] as const;
 const MAX_STRUCTURAL_IDENTITY_VALUE_BYTES = 256;
+// A valid page slug may contain 255 three-byte CJK characters. Leave room for
+// the typed failure envelope so a missing-page fact always names its target.
+const MAX_FAILED_READ_PROJECTION_BYTES = 1_024;
 const STRUCTURAL_IDENTITY_KEYS = [
   'slug',
   'page_slug',
@@ -366,7 +369,7 @@ function compactFailedReadRound(
             ...block,
             output: policy.projectFailedResult(
               original.output,
-              MAX_STRUCTURAL_IDENTITY_VALUE_BYTES,
+              MAX_FAILED_READ_PROJECTION_BYTES,
             ),
           }
         : block;
