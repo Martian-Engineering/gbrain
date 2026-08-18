@@ -230,6 +230,18 @@ export function compactToolLoopMessages(
   maxBytes: number,
   options: ToolLoopContextOptions = {},
 ): ChatMessage[] {
+  const freshPrompt = messages.length === 1 &&
+    messages[0]?.role === 'user' &&
+    typeof messages[0].content === 'string';
+  if (freshPrompt && options.preferredProjectionFits) {
+    try {
+      // Fresh admission has no tool evidence to project. Preserve its complete
+      // prompt when exact provider accounting accepts it.
+      if (options.preferredProjectionFits(messages)) return messages;
+    } catch {
+      // Fall through to the independently safe byte projection.
+    }
+  }
   const fallback = compactToolLoopMessagesToByteBudget(messages, maxBytes, options);
   if (fallback === messages) return fallback;
   const preferredBytes = options.preferredProjectionBytes;

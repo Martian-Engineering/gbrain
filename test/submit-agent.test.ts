@@ -815,7 +815,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       expect(row.data.system).toContain('Knowledge Correction');
     });
 
-    it('accepts a production-sized 128 KiB prompt with the published GitHub skill on Terra', async () => {
+    it('accepts a production-sized prompt beyond the byte-safe budget when exact OpenAI tokens fit', async () => {
       const tools = [
         'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
         'resolve_slugs', 'get_links', 'get_backlinks',
@@ -833,8 +833,9 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       const ctx = makeCtx({ clientId: 'lore', scopes: ['read', 'agent'] });
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
 
+      const sentence = 'The statement of work describes delivery milestones, participants, decisions, and source-grounded evidence. ';
       const result = await callSubmitAgent(ctx, {
-        prompt: 'p'.repeat(128 * 1024),
+        prompt: sentence.repeat(Math.ceil((220 * 1024) / sentence.length)),
         skill_name: 'github-project-ingestion',
         model: 'openai:gpt-5.6-terra',
         max_output_tokens: 32_768,
@@ -850,9 +851,9 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
         [result.id],
       );
       expect(row?.data.max_tokens).toBe(32_768);
-    });
+    }, 30_000);
 
-    it('rejects an over-budget fresh prompt before creating a job or audit record', async () => {
+    it('rejects a true token-overflow fresh prompt before creating a job or audit record', async () => {
       const tools = [
         'get_active_schema_pack', 'search', 'query', 'get_page', 'list_pages',
         'resolve_slugs', 'get_links', 'get_backlinks',
@@ -871,7 +872,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       ctx.config = { mcp: { skills_dir: path.resolve(import.meta.dir, '../skills') } };
 
       await expect(callSubmitAgent(ctx, {
-        prompt: 'p'.repeat(300_000),
+        prompt: ' a'.repeat(110_000),
         skill_name: 'github-project-ingestion',
         model: 'openai:gpt-5.6-terra',
         allowed_tools: tools,
@@ -888,7 +889,7 @@ describe('submit_agent op (v0.38 Slice 3 — remote-callable agent dispatch with
       );
       expect(rows[0]?.n).toBe(0);
       expect(fs.readdirSync(tmpAuditDir)).toEqual([]);
-    });
+    }, 30_000);
 
     it('refuses an unpublished server skill', async () => {
       await seedClient('lore', {
