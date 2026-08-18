@@ -254,6 +254,74 @@ describe('OpenAI tool-loop context budgeting', () => {
     })).toBe(true);
   }, 30_000);
 
+  it('projects completed mutation evidence beside an exact-fit oversized task', () => {
+    const model = 'openai:gpt-5.6-terra';
+    const system = 'File the complete source-grounded artifact.';
+    const tools: ChatToolDef[] = [{
+      name: 'brain_put_page',
+      description: 'Write one canonical page.',
+      inputSchema: { type: 'object', properties: { slug: { type: 'string' } } },
+    }];
+    const sentence = 'The source records delivery milestones, participants, decisions, and evidence. ';
+    const task = sentence.repeat(Math.ceil((220 * 1024) / sentence.length));
+    const privateBody = `PRIVATE_MUTATION_BODY_${'x'.repeat(3_000)}`;
+    const privateResult = `PRIVATE_MUTATION_RESULT_${'y'.repeat(500)}`;
+    const messages: ChatMessage[] = [
+      { role: 'user', content: task },
+      {
+        role: 'assistant',
+        content: [{
+          type: 'tool-call',
+          toolCallId: 'put-source',
+          toolName: 'brain_put_page',
+          input: {
+            source_id: 'martian-restricted',
+            slug: 'sources/google-gmail/example',
+            content: privateBody,
+          },
+        }],
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result',
+          toolCallId: 'put-source',
+          toolName: 'brain_put_page',
+          output: { ok: true, privateResult },
+        }],
+      },
+    ];
+    const budgets = resolveToolLoopMessageBudgets({
+      model,
+      maxOutputTokens: 32_768,
+      contextWindowTokens: 200_000,
+      system,
+      tools,
+    });
+
+    const compacted = compactToolLoopMessages(messages, budgets.byteSafeBytes, {
+      mutatingToolNames: new Set(['brain_put_page']),
+      preferredProjectionBytes: budgets.preferredProjectionBytes,
+      preferredProjectionFits: candidate => openAiToolLoopRequestFits({
+        budgets,
+        system,
+        tools,
+        modelMessages: toModelMessages(candidate),
+      }),
+    });
+
+    expect(compacted[0]).toEqual(messages[0]);
+    expect(JSON.stringify(compacted)).toContain('sources/google-gmail/example');
+    expect(JSON.stringify(compacted)).not.toContain('PRIVATE_MUTATION_BODY_');
+    expect(JSON.stringify(compacted)).not.toContain('PRIVATE_MUTATION_RESULT_');
+    expect(openAiToolLoopRequestFits({
+      budgets,
+      system,
+      tools,
+      modelMessages: toModelMessages(compacted),
+    })).toBe(true);
+  }, 30_000);
+
   it('keeps a production-sized page body out of preferred OpenAI context while retaining hash proof', async () => {
     configureGateway({
       chat_model: 'openai:gpt-5.6-terra',
@@ -708,7 +776,7 @@ describe('OpenAI tool-loop context budgeting', () => {
 
       expect(resultOutput(compacted, scenario.id)).not.toEqual(exactOutput);
       expect(JSON.stringify(compacted)).not.toContain(`FORBIDDEN_${scenario.id}_`);
-      expect(preferredChecks).toBe(scenario.id === 'failed' ? 1 : 0);
+      expect(preferredChecks).toBe(scenario.id === 'mismatch' ? 0 : 1);
     }
   });
 });
