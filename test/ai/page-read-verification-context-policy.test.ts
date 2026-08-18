@@ -159,6 +159,7 @@ describe('page-read verification working-context policy', () => {
     });
 
     expect(projectedResult(compacted)).toEqual({
+      slug: 'projects/missing-filing',
       working_context_projection: {
         schema: 'gbrain.page_read_verification_projection.v1',
         verification: 'not_found',
