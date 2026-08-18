@@ -15,6 +15,10 @@ import type { ChatBlock, ChatMessage, ChatToolDef } from './gateway.ts';
 
 const CONTEXT_TARGET_FRACTION = 0.7;
 const ESTIMATED_CHARS_PER_TOKEN = 2;
+// Exact OpenAI tokenization remains the acceptance boundary. This wider byte
+// ceiling only bounds candidate construction so ordinary prose (often close
+// to four UTF-8 bytes per token) can reach that exact check.
+const OPENAI_PREFERRED_BYTES_PER_TOKEN = 4;
 // Byte-level provider tokenizers cannot emit more tokens than UTF-8 bytes.
 // One byte per token is intentionally conservative for ASCII, CJK, emoji,
 // and mixed JSON without requiring a model-specific tokenizer at runtime.
@@ -186,7 +190,10 @@ export function resolveToolLoopMessageBudgets(args: {
     byteSafeBytes: Math.max(0, Math.min(targetBudget, byteSafeBudget)),
     preferredProjectionBytes: openAiStaticTokens === null
       ? Math.max(0, Math.min(targetBudget, byteSafeBudget))
-      : Math.max(0, targetBudget),
+      : Math.max(
+        0,
+        targetMessageTokens - openAiStaticTokens - OPENAI_PROTOCOL_TOKEN_RESERVE,
+      ) * OPENAI_PREFERRED_BYTES_PER_TOKEN,
     openAiTokenLimits: openAiStaticTokens === null
       ? null
       : {
@@ -230,6 +237,8 @@ export function compactToolLoopMessages(
   maxBytes: number,
   options: ToolLoopContextOptions = {},
 ): ChatMessage[] {
+  if (jsonBytes(messages) <= maxBytes) return messages;
+
   const freshPrompt = messages.length === 1 &&
     messages[0]?.role === 'user' &&
     typeof messages[0].content === 'string';
@@ -242,34 +251,33 @@ export function compactToolLoopMessages(
       // Fall through to the independently safe byte projection.
     }
   }
-  const fallback = compactToolLoopMessagesToByteBudget(messages, maxBytes, options);
-  if (fallback === messages) return fallback;
   const preferredBytes = options.preferredProjectionBytes;
   if (
-    preferredBytes === undefined
-    || preferredBytes <= maxBytes
-    || !options.preferredProjectionFits
-  ) return fallback;
-
-  try {
-    return buildPreferredNewestSingletonProjection(
-      messages,
-      preferredBytes,
-      options,
-      options.preferredProjectionFits,
-    ) ?? fallback;
-  } catch {
-    // Exact provider tokenization is optional. Any failure retains the
-    // independently valid worst-case byte projection.
-    return fallback;
+    preferredBytes !== undefined
+    && preferredBytes > maxBytes
+    && options.preferredProjectionFits
+  ) {
+    try {
+      const preferred = buildPreferredNewestReadProjection(
+        messages,
+        preferredBytes,
+        options,
+        options.preferredProjectionFits,
+      );
+      if (preferred) return preferred;
+    } catch {
+      // Exact provider tokenization is optional. Fall through to the
+      // independently valid worst-case byte projection.
+    }
   }
+  return compactToolLoopMessagesToByteBudget(messages, maxBytes, options);
 }
 
 /**
- * Build a minimal preferred projection around the newest singleton read.
+ * Build a minimal preferred projection around the newest read-only round.
  * Older rounds become durable ledger evidence instead of consuming headroom.
  */
-function buildPreferredNewestSingletonProjection(
+function buildPreferredNewestReadProjection(
   messages: ChatMessage[],
   preferredBytes: number,
   options: ToolLoopContextOptions,
@@ -277,43 +285,70 @@ function buildPreferredNewestSingletonProjection(
 ): ChatMessage[] | null {
   const { rounds, otherCount } = collectToolRounds(messages);
   const originalRound = rounds.at(-1);
-  if (!originalRound || originalRound.evidence.length !== 1) return null;
+  if (!originalRound || originalRound.evidence.length === 0) return null;
 
-  const evidence = originalRound.evidence[0]!;
-  if (
-    evidence.failed
-    || isMutationSensitive(evidence.toolName, options.mutatingToolNames)
-  ) return null;
-
-  const originalResult = toolResultBlocks(originalRound.result).find(block => (
-    block.toolCallId === evidence.toolCallId
-  ));
-  if (!originalResult || originalResult.toolName !== evidence.toolName) return null;
+  const originalResults = new Map(
+    toolResultBlocks(originalRound.result).map(block => [block.toolCallId, block]),
+  );
+  const unsafeEvidence = originalRound.evidence.some(evidence => {
+    const result = originalResults.get(evidence.toolCallId);
+    return evidence.failed
+      || isMutationSensitive(evidence.toolName, options.mutatingToolNames)
+      || result?.toolName !== evidence.toolName;
+  });
+  if (unsafeEvidence) return null;
 
   const task = buildTaskAnchor(messages);
   const summary = buildLedgerSummary(rounds.slice(0, -1), otherCount, options);
+  const exactRoundAllowed = originalRound.evidence.every(evidence => {
+    const policy = policyForTool(options, evidence.toolName);
+    return !policy?.projectInput && !policy?.projectResult;
+  });
+  if (exactRoundAllowed) {
+    const exact = [
+      task,
+      ...(summary ? [summary] : []),
+      originalRound.assistant,
+      originalRound.result,
+    ];
+    if (jsonBytes(exact) <= preferredBytes && fits(exact)) return exact;
+  }
+
   for (const perPayload of PAYLOAD_LIMITS) {
     const compacted = compactRound(originalRound, perPayload, options);
-    const policy = policyForTool(options, evidence.toolName);
-    const exactResult: ChatMessage = policy?.projectResult
-      ? compacted.result
-      : {
-          ...compacted.result,
-          content: mapBlocks(compacted.result, block => (
-            block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
-              ? { ...block, output: originalResult.output }
-              : block
-          )),
-        };
+    const preferredResult = originalRound.evidence.length === 1
+      ? restoreExactSingletonReadResult(compacted.result, originalRound, options)
+      : compacted.result;
     const preferred = [
       task,
       ...(summary ? [summary] : []),
       compacted.assistant,
-      exactResult,
+      preferredResult,
     ];
     if (jsonBytes(preferred) <= preferredBytes && fits(preferred)) return preferred;
   }
   return null;
+}
+
+/** Restore one exact read result when no domain policy requires projection. */
+function restoreExactSingletonReadResult(
+  compactedResult: ChatMessage,
+  originalRound: ToolRound,
+  options: ToolLoopContextOptions,
+): ChatMessage {
+  const evidence = originalRound.evidence[0]!;
+  if (policyForTool(options, evidence.toolName)?.projectResult) return compactedResult;
+  const originalResult = toolResultBlocks(originalRound.result).find(block => (
+    block.toolCallId === evidence.toolCallId
+  ));
+  return {
+    ...compactedResult,
+    content: mapBlocks(compactedResult, block => (
+      block.type === 'tool-result' && block.toolCallId === evidence.toolCallId
+        ? { ...block, output: originalResult!.output }
+        : block
+    )),
+  };
 }
 
 /** Build one evidence-preserving projection under a UTF-8 byte ceiling. */

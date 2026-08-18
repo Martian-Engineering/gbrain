@@ -109,6 +109,81 @@ describe('OpenAI tool-loop context budgeting', () => {
     expect(providerMessages).toEqual(messages);
   }, 30_000);
 
+  it('keeps an exact-fit oversized task after a parallel read round', () => {
+    const model = 'openai:gpt-5.6-terra';
+    const system = 'File the complete source-grounded artifact.';
+    const tools: ChatToolDef[] = [
+      {
+        name: 'brain_get_skill',
+        description: 'Read one ingestion skill.',
+        inputSchema: { type: 'object', properties: { name: { type: 'string' } } },
+      },
+      {
+        name: 'brain_get_active_schema_pack',
+        description: 'Read the active schema pack.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+    ];
+    const sentence = 'The source records delivery milestones, participants, decisions, and evidence. ';
+    const task = sentence.repeat(Math.ceil((220 * 1024) / sentence.length));
+    const readSpecs = [
+      ['schema', 'brain_get_active_schema_pack', 282],
+      ['filing', 'brain_get_skill', 12_682],
+      ['proposal', 'brain_get_skill', 9_986],
+      ['sources', 'brain_get_skill', 1_963],
+    ] as const;
+    const messages: ChatMessage[] = [
+      { role: 'user', content: task },
+      {
+        role: 'assistant',
+        content: readSpecs.map(([id, toolName]) => ({
+          type: 'tool-call' as const,
+          toolCallId: id,
+          toolName,
+          input: toolName === 'brain_get_skill' ? { name: id } : {},
+        })),
+      },
+      {
+        role: 'user',
+        content: readSpecs.map(([id, toolName, outputBytes]) => ({
+          type: 'tool-result' as const,
+          toolCallId: id,
+          toolName,
+          output: { text: id.repeat(Math.ceil(outputBytes / id.length)) },
+        })),
+      },
+    ];
+    const budgets = resolveToolLoopMessageBudgets({
+      model,
+      maxOutputTokens: 32_768,
+      contextWindowTokens: 200_000,
+      system,
+      tools,
+    });
+    expect(Buffer.byteLength(JSON.stringify(messages), 'utf8'))
+      .toBeGreaterThan(budgets.byteSafeBytes);
+
+    const compacted = compactToolLoopMessages(messages, budgets.byteSafeBytes, {
+      mutatingToolNames: new Set(),
+      preferredProjectionBytes: budgets.preferredProjectionBytes,
+      preferredProjectionFits: candidate => openAiToolLoopRequestFits({
+        budgets,
+        system,
+        tools,
+        modelMessages: toModelMessages(candidate),
+      }),
+    });
+
+    expect(compacted).toEqual(messages);
+    for (const [id] of readSpecs) expect(resultOutput(compacted, id)).toBeDefined();
+    expect(openAiToolLoopRequestFits({
+      budgets,
+      system,
+      tools,
+      modelMessages: toModelMessages(compacted),
+    })).toBe(true);
+  }, 30_000);
+
   it('keeps a production-sized page body out of preferred OpenAI context while retaining hash proof', async () => {
     configureGateway({
       chat_model: 'openai:gpt-5.6-terra',
@@ -441,7 +516,7 @@ describe('OpenAI tool-loop context budgeting', () => {
       },
     });
 
-    expect(preferredChecks).toBe(2);
+    expect(preferredChecks).toBe(3);
     expect(resultOutput(compacted, 'large-input-read')).toEqual(exactOutput);
     expect(JSON.stringify(compacted)).toContain('working_context_projection');
   });
