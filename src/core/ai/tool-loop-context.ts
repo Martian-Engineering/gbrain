@@ -292,8 +292,7 @@ function buildPreferredNewestReadProjection(
   );
   const unsafeEvidence = originalRound.evidence.some(evidence => {
     const result = originalResults.get(evidence.toolCallId);
-    return evidence.failed
-      || isMutationSensitive(evidence.toolName, options.mutatingToolNames)
+    return isMutationSensitive(evidence.toolName, options.mutatingToolNames)
       || result?.toolName !== evidence.toolName;
   });
   if (unsafeEvidence) return null;
@@ -302,7 +301,7 @@ function buildPreferredNewestReadProjection(
   const summary = buildLedgerSummary(rounds.slice(0, -1), otherCount, options);
   const exactRoundAllowed = originalRound.evidence.every(evidence => {
     const policy = policyForTool(options, evidence.toolName);
-    return !policy?.projectInput && !policy?.projectResult;
+    return !evidence.failed && !policy?.projectInput && !policy?.projectResult;
   });
   if (exactRoundAllowed) {
     const exact = [
@@ -314,9 +313,15 @@ function buildPreferredNewestReadProjection(
     if (jsonBytes(exact) <= preferredBytes && fits(exact)) return exact;
   }
 
-  for (const perPayload of PAYLOAD_LIMITS) {
-    const compacted = compactRound(originalRound, perPayload, options);
-    const preferredResult = originalRound.evidence.length === 1
+  const payloadLimits = originalRound.evidence.some(evidence => evidence.failed)
+    ? [0] as const
+    : PAYLOAD_LIMITS;
+  for (const perPayload of payloadLimits) {
+    const compacted = originalRound.evidence.some(evidence => evidence.failed)
+      ? compactFailedReadRound(originalRound, options)
+      : compactRound(originalRound, perPayload, options);
+    const preferredResult = originalRound.evidence.length === 1 &&
+        !originalRound.evidence[0]!.failed
       ? restoreExactSingletonReadResult(compacted.result, originalRound, options)
       : compacted.result;
     const preferred = [
@@ -328,6 +333,16 @@ function buildPreferredNewestReadProjection(
     if (jsonBytes(preferred) <= preferredBytes && fits(preferred)) return preferred;
   }
   return null;
+}
+
+/** Retain bounded failed-read identity while dropping untrusted error payloads. */
+function compactFailedReadRound(
+  round: ToolRound,
+  options: ToolLoopContextOptions,
+): ToolRound {
+  const identified = compactRound(round, MAX_STRUCTURAL_IDENTITY_VALUE_BYTES, options);
+  const projected = compactRound(round, 0, options);
+  return { ...projected, assistant: identified.assistant };
 }
 
 /** Restore one exact read result when no domain policy requires projection. */
