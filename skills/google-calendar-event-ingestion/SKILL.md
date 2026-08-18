@@ -1,6 +1,6 @@
 ---
 name: google-calendar-event-ingestion
-version: 1.0.0
+version: 1.1.0
 description: Ingest one complete prompt-supplied Google Calendar event capture into one already-selected source.
 triggers:
   - "Prompt-supplied Google Calendar event capture for one already-selected source"
@@ -192,10 +192,16 @@ or `add_timeline_entry`.
 Construct one ordered inventory with at most 32 unique canonical slugs. It must
 contain `capturePageSlug` and `eventPageSlug` exactly once. A create is
 `{slug,effect:"create",title,bodyMarkdown}`. An update is exactly
-`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
-`bodyMarkdown` is the complete intended page, not a diff or dated addendum.
-Read the exact baseline immediately before staging an update. Do not preload
-multiple complete page bodies.
+`{slug,effect:"update",title,bodyMarkdown,baselineReadRef}`. `bodyMarkdown` is
+the complete intended page, not a diff or dated addendum. Read the exact
+baseline immediately before staging an update and copy its
+`proposal_baseline_ref` exactly into `baselineReadRef`. The server resolves and
+freezes the private baseline. Do not preload multiple complete page bodies.
+After the update target's `get_page` returns, the very next assistant turn must
+stage that same update as its only tool call. If the exact read lacks
+`proposal_baseline_ref`, do not reuse a hash-only working-context projection or
+repeat the same oversized read; return `failed` with a clear
+baseline-availability reason.
 
 Call `brain_stage_ingestion_proposal_page` once per turn with the stable
 one-based sequence, `total_pages`, complete `{slug,effect}` inventory, and one

@@ -47,7 +47,7 @@ const expectedPrefixes = [
 
 describe('gmail-thread-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.4.0');
+    expect(skill).toContain('version: 1.5.0');
     expect(getSkillAgentBindings(skillsDir, 'gmail-thread-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -175,10 +175,12 @@ describe('gmail-thread-ingestion skill', () => {
     expect(skill).toContain('{slug,effect}');
     expect(skill).not.toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toContain(
-      '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
+      '{slug,effect:"update",title,bodyMarkdown,baselineReadRef}',
     );
-    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff\s+or dated addendum/);
-    expect(skill).toMatch(/Apply never rebases an update/);
+    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff or\s+dated addendum/);
+    expect(skill).toMatch(/Apply\s+never rebases an update/);
+    expect(skill).toContain('proposal_baseline_ref');
+    expect(skill).toMatch(/If the exact read lacks\s+`proposal_baseline_ref`/);
     expect(skill).toMatch(/requires an unchanged reviewed baseline/);
     expect(skill).toContain('786,432 UTF-8 bytes');
     expect(skill).toContain('1,572,864 UTF-8 bytes');

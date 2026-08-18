@@ -1,6 +1,6 @@
 ---
 name: gmail-thread-ingestion
-version: 1.4.0
+version: 1.5.0
 description: Ingest one complete prompt-supplied Gmail thread capture into one already-selected source.
 triggers:
   - "ingest this Gmail thread capture into this source"
@@ -223,10 +223,11 @@ Every proposed page has exactly one of these shapes:
 
 Omit a dossier or project page when the admitted evidence does not justify
 changing its current best synthesis. An update is exactly
-`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
-Copy `baseMarkdown` and `expectedContentHash` exactly from the immediately
-preceding `get_page`; `bodyMarkdown` is the complete intended page, not a diff
-or dated addendum. Apply never rebases an update.
+`{slug,effect:"update",title,bodyMarkdown,baselineReadRef}`. Copy the
+immediately preceding `get_page` result's `proposal_baseline_ref` exactly into
+`baselineReadRef`; `bodyMarkdown` is the complete intended page, not a diff or
+dated addendum. The server resolves and freezes the private baseline. Apply
+never rebases an update.
 
 The proposal must include `capturePageSlug` exactly once. A differently
 slugged legacy source page is never proposed for create or update. Freeze
@@ -258,6 +259,9 @@ assistant turn must call `brain_stage_ingestion_proposal_page` for that same
 update, as the only tool call in that turn. Do not call `get_page` for another
 target, or make any other large read, between that baseline read and its staging
 call.
+If the exact read lacks `proposal_baseline_ref`, do not stage the update, reuse a
+hash-only working-context projection, or repeat the same oversized read. Return
+`failed` with a clear baseline-availability reason.
 
 Stage only one page per turn by calling `brain_stage_ingestion_proposal_page`
 with the one-based `sequence`, stable `total_pages`, complete ordered

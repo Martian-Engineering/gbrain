@@ -54,7 +54,7 @@ const expectedPrefixes = [
 
 describe('granola-meeting-ingestion skill', () => {
   test('derives the exact reviewed agent bindings', () => {
-    expect(skill).toContain('version: 1.6.0');
+    expect(skill).toContain('version: 1.7.0');
     expect(getSkillAgentBindings(skillsDir, 'granola-meeting-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -142,10 +142,12 @@ describe('granola-meeting-ingestion skill', () => {
     expect(skill).toContain('{slug,effect:"create",title,bodyMarkdown}');
     expect(skill).not.toContain('{slug,effect:"update",appendMarkdown}');
     expect(skill).toContain(
-      '{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}',
+      '{slug,effect:"update",title,bodyMarkdown,baselineReadRef}',
     );
-    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff\s+or dated addendum/);
-    expect(skill).toMatch(/Apply never rebases an update/);
+    expect(skill).toMatch(/bodyMarkdown` is the complete intended page, not a diff or\s+dated addendum/);
+    expect(skill).toMatch(/Apply\s+never rebases an update/);
+    expect(skill).toContain('proposal_baseline_ref');
+    expect(skill).toMatch(/If the exact read lacks\s+`proposal_baseline_ref`/);
     expect(skill).toContain('"status": "staged_proposal"');
     expect(skill).toContain('"proposalDigest": "64 lowercase hex characters"');
   });

@@ -1,6 +1,6 @@
 ---
 name: granola-meeting-ingestion
-version: 1.6.0
+version: 1.7.0
 description: Ingest one complete prompt-supplied Granola meeting artifact into one already-selected source.
 triggers:
   - "ingest this Granola meeting into this source"
@@ -243,10 +243,11 @@ that the scoped ingestion materially improves. Omit a dossier page when the
 admitted evidence does not justify changing its current best synthesis. A
 create entry is exactly `{slug,effect:"create",title,bodyMarkdown}`. An update
 is exactly
-`{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}`.
-Copy `baseMarkdown` and `expectedContentHash` exactly from the immediately
-preceding `get_page`; `bodyMarkdown` is the complete intended page, not a diff
-or dated addendum. Apply never rebases an update.
+`{slug,effect:"update",title,bodyMarkdown,baselineReadRef}`. Copy the
+immediately preceding `get_page` result's `proposal_baseline_ref` exactly into
+`baselineReadRef`; `bodyMarkdown` is the complete intended page, not a diff or
+dated addendum. The server resolves and freezes the private baseline. Apply
+never rebases an update.
 
 Before constructing final page bodies, freeze the complete ordered page inventory
 and stable `total_pages`; the inventory may contain at most 32 pages. Represent
@@ -267,6 +268,9 @@ target's `get_page` returns, the very next assistant turn must call
 `brain_stage_ingestion_proposal_page` for that same update, as the only tool call
 in that turn. Do not call `get_page` for another target, or make any other large
 read, between that baseline read and its staging call.
+If the exact read lacks `proposal_baseline_ref`, do not stage the update, reuse a
+hash-only working-context projection, or repeat the same oversized read. Return
+`failed` with a clear baseline-availability reason.
 
 Call `brain_stage_ingestion_proposal_page` with the one-based `sequence`, stable
 `total_pages`, complete ordered `page_inventory`, and page object. The server

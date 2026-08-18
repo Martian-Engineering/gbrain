@@ -49,7 +49,7 @@ const expectedPrefixes = [
 
 describe('google-calendar-event-ingestion skill', () => {
   test('derives the reviewed Reader bindings', () => {
-    expect(skill).toContain('version: 1.0.0');
+    expect(skill).toContain('version: 1.1.0');
     expect(getSkillAgentBindings(skillsDir, 'google-calendar-event-ingestion')).toEqual({
       tools: expectedTools,
       writes_to: expectedPrefixes,
@@ -142,8 +142,10 @@ describe('google-calendar-event-ingestion skill', () => {
 
   test('supports staged full-page proposals and body-free apply', () => {
     expect(skill).toContain('mode: <propose | apply | omit for normal mode>');
-    expect(skill).toContain('{slug,effect:"update",title,bodyMarkdown,baseMarkdown,expectedContentHash}');
-    expect(skill).toMatch(/`bodyMarkdown` is the complete intended page/);
+    expect(skill).toContain('{slug,effect:"update",title,bodyMarkdown,baselineReadRef}');
+    expect(skill).toMatch(/`bodyMarkdown` is\s+the complete intended page/);
+    expect(skill).toContain('proposal_baseline_ref');
+    expect(skill).toMatch(/If the exact read lacks\s+`proposal_baseline_ref`/);
     expect(skill).toContain('brain_stage_ingestion_proposal_page');
     expect(skill).toContain('brain_finalize_ingestion_proposal');
     expect(skill).toContain('brain_apply_ingestion_proposal_page');
