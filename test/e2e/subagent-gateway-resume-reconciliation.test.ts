@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import { makeSubagentHandler } from '../../src/core/minions/handlers/subagent.ts';
@@ -59,15 +60,20 @@ beforeEach(async () => {
   });
 });
 
-async function makeJob(prompt: string, model: string): Promise<{ jobId: number; ctx: MinionJobContext }> {
+async function makeJob(
+  prompt: string,
+  model: string,
+  data: Record<string, unknown> = {},
+): Promise<{ jobId: number; ctx: MinionJobContext }> {
+  const jobData = { prompt, model, ...data };
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO minion_jobs (name, status, data, queue, priority, created_at)
      VALUES ('subagent', 'active', $1::text::jsonb, 'default', 0, now()) RETURNING id`,
-    [JSON.stringify({ prompt, model })],
+    [JSON.stringify(jobData)],
   );
   const jobId = rows[0].id;
   const ctx: MinionJobContext = {
-    id: jobId, name: 'subagent', data: { prompt, model }, attempts_made: 1,
+    id: jobId, name: 'subagent', data: jobData, attempts_made: 1,
     signal: new AbortController().signal, deadlineAtMs: null, shutdownSignal: new AbortController().signal,
     updateProgress: async () => {}, updateTokens: async () => {}, log: async () => {},
     isActive: async () => true, readInbox: async () => [],
@@ -99,12 +105,23 @@ async function seedMessage(jobId: number, idx: number, role: string, blocks: Cha
   );
 }
 
-async function seedExec(jobId: number, msgIdx: number, toolUseId: string, name: string, status: string, output: unknown, ordinal: number, error?: string): Promise<void> {
+async function seedExec(
+  jobId: number,
+  msgIdx: number,
+  toolUseId: string,
+  name: string,
+  status: string,
+  output: unknown,
+  ordinal: number,
+  error?: string,
+  gbrainToolUseId?: string,
+): Promise<void> {
   await engine.executeRaw(
     `INSERT INTO subagent_tool_executions
-       (job_id, message_idx, tool_use_id, tool_name, input, status, output, error, schema_version, ordinal)
-     VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb, $8, 2, $9)`,
-    [jobId, msgIdx, toolUseId, name, JSON.stringify({}), status, output == null ? null : JSON.stringify(output), error ?? null, ordinal],
+       (job_id, message_idx, tool_use_id, tool_name, input, status, output, error,
+        schema_version, ordinal, gbrain_tool_use_id)
+     VALUES ($1, $2, $3, $4, $5::text::jsonb, $6, $7::text::jsonb, $8, 2, $9, $10)`,
+    [jobId, msgIdx, toolUseId, name, JSON.stringify({}), status, output == null ? null : JSON.stringify(output), error ?? null, ordinal, gbrainToolUseId ?? null],
   );
 }
 
@@ -186,6 +203,52 @@ describe('gateway resume reconciliation', () => {
     const msgs = await engine.executeRaw<{ message_idx: number; role: string }>(
       `SELECT message_idx, role FROM subagent_messages WHERE job_id = $1 ORDER BY message_idx`, [jobId]);
     expect(msgs.map(m => [m.message_idx, m.role])).toEqual([[0, 'user'], [1, 'assistant'], [2, 'user'], [3, 'assistant']]);
+  });
+
+  it('restores the proposal baseline reference when healing a settled page read', async () => {
+    const sourceId = 'company';
+    const { jobId, ctx } = await makeJob('resume proposal', 'openai:gpt-4o', {
+      proposal_artifact_id: 'artifact-1',
+      proposal_admission_scope: 'Admitted scope.',
+      source_id: sourceId,
+    });
+    const executionId = randomUUID();
+    const rawPage = {
+      source_id: sourceId,
+      slug: 'projects/example',
+      title: 'Example',
+      compiled_truth: '# Example',
+      content_hash: 'a'.repeat(64),
+    };
+    await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'resume proposal' }]);
+    await seedMessage(jobId, 1, 'assistant', [{
+      type: 'tool-call', toolCallId: 'tc-page', toolName: 'brain_get_page', input: { slug: rawPage.slug },
+    }]);
+    await seedExec(jobId, 1, 'tc-page', 'brain_get_page', 'complete', rawPage, 0, undefined, executionId);
+
+    let captured: ChatMessage[] = [];
+    __setChatTransportForTests(async (opts) => {
+      captured = opts.messages;
+      return { text: 'done', blocks: [{ type: 'text', text: 'done' }] as ChatBlock[], stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'openai:gpt-4o', providerId: 'openai' } satisfies ChatResult;
+    });
+    const pageTool: ToolDef = {
+      name: 'brain_get_page', description: 'read', input_schema: { type: 'object' }, idempotent: true,
+      async execute() { throw new Error('settled read must not execute again'); },
+    };
+    await buildHandler([pageTool])(ctx);
+
+    const healed = (captured[2].content as ChatBlock[])[0] as Extract<ChatBlock, { type: 'tool-result' }>;
+    expect(healed.output).toEqual({
+      ...rawPage,
+      proposal_baseline_ref: `gbrain.proposal-baseline.v1:${executionId}`,
+    });
+    const rows = await engine.executeRaw<{ output: unknown }>(
+      `SELECT output FROM subagent_tool_executions WHERE job_id = $1 AND tool_use_id = 'tc-page'`,
+      [jobId],
+    );
+    expect(rows[0]!.output).toEqual(rawPage);
   });
 
   it('heals MULTIPLE consecutive dangling assistant turns (pre-fix multi-turn corruption)', async () => {

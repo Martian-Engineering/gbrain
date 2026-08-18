@@ -67,6 +67,9 @@ export type {
 /** Maximum UTF-8 size of server-bound verbatim capture Markdown. */
 export const PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES = 512 * 1024;
 
+/** Maximum UTF-8 size Lore can retain for one frozen review baseline. */
+export const PROPOSAL_REVIEW_BASELINE_MAX_BYTES = 256 * 1024;
+
 /** Maximum UTF-8 size of one finalized, canonical proposal plan. */
 export const PROPOSAL_AGGREGATE_MAX_BYTES = 768 * 1024;
 
@@ -1256,6 +1259,14 @@ async function materializeProposalBaselineRef<T extends ParsedStageProposalPageC
     || !SHA256_RE.test(contentHash)
   ) {
     throw unavailableBaselineReference(candidate.page.slug);
+  }
+  const baselineBytes = Buffer.byteLength(markdown, 'utf8');
+  if (baselineBytes > PROPOSAL_REVIEW_BASELINE_MAX_BYTES) {
+    throw new AgentJobProposalError(
+      'baseline_too_large',
+      `The exact baseline for ${candidate.page.slug} is ${baselineBytes} UTF-8 bytes; `
+      + `the review contract permits at most ${PROPOSAL_REVIEW_BASELINE_MAX_BYTES}.`,
+    );
   }
   const baseline = { title, markdown, contentHash };
   // Materialize the established frozen proposal shape here. Downstream

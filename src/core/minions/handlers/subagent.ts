@@ -163,6 +163,7 @@ interface PersistedToolExec {
   status: 'pending' | 'complete' | 'failed';
   output: unknown;
   error: string | null;
+  gbrain_tool_use_id: string | null;
 }
 
 // ── Public handler factory ──────────────────────────────────
@@ -955,6 +956,12 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       priorMessages,
       priorTools: priorToolsV1,
       toolDefs,
+      decorateToolResult(toolName, output, gbrainToolUseId) {
+        const decorator = toolHandlers.get(toolName)?.decorateResult;
+        return decorator && gbrainToolUseId
+          ? decorator(output, { gbrainToolUseId })
+          : output;
+      },
       signal: ctx.signal,
     });
 
@@ -1181,6 +1188,11 @@ interface ReconcileArgs {
   priorMessages: PersistedMessage[];
   priorTools: PersistedToolExec[];
   toolDefs: ToolDef[];
+  decorateToolResult?: (
+    toolName: string,
+    output: unknown,
+    gbrainToolUseId: string | null,
+  ) => unknown;
   signal: AbortSignal;
 }
 
@@ -1215,7 +1227,7 @@ interface ReconcileResult {
  * resume stays balanced.
  */
 async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileResult> {
-  const { engine, jobId, priorMessages, priorTools, toolDefs, signal } = args;
+  const { engine, jobId, priorMessages, priorTools, toolDefs, decorateToolResult, signal } = args;
 
   const work = priorMessages.map(m => {
     const adapted = adaptContentBlocksToChatBlocks(m.content_blocks);
@@ -1267,7 +1279,11 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
       const exec = execByKey.get(`${msg.message_idx}:${call.toolCallId}`)
         ?? (fallback && fallback.tool_name === call.toolName ? fallback : undefined);
       if (exec?.status === 'complete') {
-        results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: exec.output ?? null });
+        const rawOutput = exec.output ?? null;
+        const output = decorateToolResult
+          ? decorateToolResult(call.toolName, rawOutput, exec.gbrain_tool_use_id)
+          : rawOutput;
+        results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output });
         continue;
       }
       if (exec?.status === 'failed') {
@@ -1287,7 +1303,10 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
       try {
         const output = await toolDef.execute(call.input, { engine, jobId, remote: true, signal });
         await persistToolExecComplete(engine, jobId, call.toolCallId, output);
-        results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output });
+        const decoratedOutput = decorateToolResult
+          ? decorateToolResult(call.toolName, output, exec?.gbrain_tool_use_id ?? null)
+          : output;
+        results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: decoratedOutput });
       } catch (e) {
         const errText = e instanceof Error ? (e.stack ?? e.message) : String(e);
         await persistToolExecFailed(
@@ -1482,7 +1501,8 @@ async function loadPriorMessages(engine: BrainEngine, jobId: number): Promise<Pe
 
 async function loadPriorTools(engine: BrainEngine, jobId: number): Promise<PersistedToolExec[]> {
   const rows = await engine.executeRaw<Record<string, unknown>>(
-    `SELECT message_idx, tool_use_id, tool_name, input, status, output, error
+    `SELECT message_idx, tool_use_id, tool_name, input, status, output, error,
+            gbrain_tool_use_id::text AS gbrain_tool_use_id
        FROM subagent_tool_executions
       WHERE job_id = $1
       ORDER BY message_idx, COALESCE(ordinal, 0), id`,
@@ -1498,6 +1518,7 @@ async function loadPriorTools(engine: BrainEngine, jobId: number): Promise<Persi
       ? null
       : (typeof r.output === 'string' ? JSON.parse(r.output) : r.output),
     error: (r.error as string) ?? null,
+    gbrain_tool_use_id: (r.gbrain_tool_use_id as string) ?? null,
   }));
 }
 

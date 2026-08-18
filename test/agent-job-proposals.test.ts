@@ -6,6 +6,7 @@ import {
   PROPOSAL_AGGREGATE_MAX_BYTES,
   PROPOSAL_ESCAPED_PLAN_MAX_BYTES,
   PROPOSAL_MANIFEST_MAX_BYTES,
+  PROPOSAL_REVIEW_BASELINE_MAX_BYTES,
   PROPOSAL_VERBATIM_CAPTURE_MAX_BYTES,
   PROPOSAL_MAX_PAGES,
   PROPOSAL_STAGE_INPUT_MAX_BYTES,
@@ -403,6 +404,25 @@ describe('durable agent-job proposal staging', () => {
 
     await expect(stage(jobId, 1, 1, update))
       .rejects.toMatchObject({ code: 'baseline_content_unavailable' });
+  });
+
+  it('rejects a materialized baseline that Lore cannot retain for review', async () => {
+    await seedStoredPage('sources/example');
+    const jobId = await seedJob();
+    const oversizedBaseline = 'x'.repeat(PROPOSAL_REVIEW_BASELINE_MAX_BYTES + 1);
+    await engine.executeRaw(
+      `UPDATE pages
+          SET compiled_truth = $3
+        WHERE source_id = $1 AND slug = $2`,
+      ['company', 'sources/example', oversizedBaseline],
+    );
+    const update = {
+      ...updatePage('sources/example'),
+      baseMarkdown: oversizedBaseline,
+    } as Extract<ScopedProposalPage, { effect: 'update' }>;
+
+    await expect(stage(jobId, 1, 1, update))
+      .rejects.toMatchObject({ code: 'baseline_too_large' });
   });
 
   it('replays an already-frozen stage after later corpus drift', async () => {
