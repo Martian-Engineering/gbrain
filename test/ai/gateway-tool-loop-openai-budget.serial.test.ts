@@ -194,7 +194,7 @@ describe('OpenAI tool-loop context budgeting', () => {
     }];
     const sentence = 'The source records delivery milestones, participants, decisions, and evidence. ';
     const task = sentence.repeat(Math.ceil((220 * 1024) / sentence.length));
-    const privateError = 'PRIVATE_FAILED_READ_OUTPUT';
+    const privateError = 'Page not found: sources/google-gmail/example';
     const messages: ChatMessage[] = [
       { role: 'user', content: task },
       {
@@ -227,6 +227,7 @@ describe('OpenAI tool-loop context budgeting', () => {
 
     const compacted = compactToolLoopMessages(messages, budgets.byteSafeBytes, {
       mutatingToolNames: new Set(),
+      toolPolicies: [pageReadVerificationContextPolicy],
       preferredProjectionBytes: budgets.preferredProjectionBytes,
       preferredProjectionFits: candidate => openAiToolLoopRequestFits({
         budgets,
@@ -239,6 +240,12 @@ describe('OpenAI tool-loop context budgeting', () => {
     expect(compacted[0]).toEqual(messages[0]);
     expect(JSON.stringify(compacted)).not.toContain(privateError);
     expect(JSON.stringify(compacted)).toContain('sources/google-gmail/example');
+    expect(resultOutput(compacted, 'missing-source')).toMatchObject({
+      working_context_projection: {
+        verification: 'not_found',
+        interpretation: 'authenticated_page_absence',
+      },
+    });
     expect(openAiToolLoopRequestFits({
       budgets,
       system,
