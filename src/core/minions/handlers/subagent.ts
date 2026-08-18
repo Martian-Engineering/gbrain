@@ -1102,24 +1102,10 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       return { gbrainToolUseId };
     },
     onToolCallComplete: async (gbrainToolUseId, output) => {
-      await engine.executeRaw(
-        `UPDATE subagent_tool_executions
-           SET status = 'complete', output = $1::text::jsonb, ended_at = now()
-         WHERE gbrain_tool_use_id::text = $2`,
-        [JSON.stringify(output ?? null), gbrainToolUseId],
-      );
+      await persistGatewayToolExecComplete(engine, gbrainToolUseId, output);
     },
     onToolCallFailed: async (gbrainToolUseId, errorMsg, errorCode) => {
-      await engine.executeRaw(
-        `UPDATE subagent_tool_executions
-           SET status = 'failed', error = $1, output = $2::text::jsonb, ended_at = now()
-         WHERE gbrain_tool_use_id::text = $3`,
-        [
-          errorMsg,
-          JSON.stringify(boundedToolFailure(errorCode)),
-          gbrainToolUseId,
-        ],
-      );
+      await persistGatewayToolExecFailed(engine, gbrainToolUseId, errorMsg, errorCode);
     },
     // Persist the tool-result user turn so a resume reloads a balanced
     // transcript. JSON.stringify inside persistMessage ISO-izes any Date in
@@ -1307,17 +1293,14 @@ async function reconcileGatewayReplay(args: ReconcileArgs): Promise<ReconcileRes
       });
       try {
         const output = await toolDef.execute(call.input, { engine, jobId, remote: true, signal });
-        await persistToolExecComplete(engine, jobId, call.toolCallId, output);
+        await persistGatewayToolExecComplete(engine, gbrainToolUseId, output);
         const decoratedOutput = decorateToolResult
           ? decorateToolResult(call.toolName, output, gbrainToolUseId)
           : output;
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: decoratedOutput });
       } catch (e) {
         const errText = e instanceof Error ? (e.stack ?? e.message) : String(e);
-        await persistToolExecFailed(
-          engine, jobId, msg.message_idx, call.toolCallId, call.toolName, call.input,
-          errText, toolErrorCode(e),
-        );
+        await persistGatewayToolExecFailed(engine, gbrainToolUseId, errText, toolErrorCode(e));
         results.push({ type: 'tool-result', toolCallId: call.toolCallId, toolName: call.toolName, output: errText, isError: true });
       }
     }
@@ -1662,6 +1645,35 @@ async function persistGatewayToolExecPending(
     ],
   );
   return rows[0]?.gbrain_tool_use_id ?? candidateId;
+}
+
+/** Settle one gateway execution by its provider-independent durable identity. */
+async function persistGatewayToolExecComplete(
+  engine: BrainEngine,
+  gbrainToolUseId: string,
+  output: unknown,
+): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE subagent_tool_executions
+        SET status = 'complete', output = $1::text::jsonb, ended_at = now()
+      WHERE gbrain_tool_use_id::text = $2`,
+    [JSON.stringify(output ?? null), gbrainToolUseId],
+  );
+}
+
+/** Fail one gateway execution by its provider-independent durable identity. */
+async function persistGatewayToolExecFailed(
+  engine: BrainEngine,
+  gbrainToolUseId: string,
+  errorMessage: string,
+  errorCode?: string,
+): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE subagent_tool_executions
+        SET status = 'failed', error = $1, output = $2::text::jsonb, ended_at = now()
+      WHERE gbrain_tool_use_id::text = $3`,
+    [errorMessage, JSON.stringify(boundedToolFailure(errorCode)), gbrainToolUseId],
+  );
 }
 
 async function persistToolExecComplete(

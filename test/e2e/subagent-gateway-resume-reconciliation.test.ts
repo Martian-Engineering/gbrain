@@ -338,6 +338,54 @@ describe('gateway resume reconciliation', () => {
       .toBe(`gbrain.proposal-baseline.v1:${rows[0]!.gbrain_tool_use_id}`);
   });
 
+  it('settles a re-executed page read by stable ID when the provider call ID drifts', async () => {
+    const sourceId = 'company';
+    const { jobId, ctx } = await makeJob('redispatch renamed proposal read', 'openai:gpt-4o', {
+      proposal_artifact_id: 'artifact-1',
+      proposal_admission_scope: 'Admitted scope.',
+      source_id: sourceId,
+    });
+    const executionId = randomUUID();
+    const rawPage = {
+      source_id: sourceId,
+      slug: 'projects/example',
+      title: 'Example',
+      compiled_truth: '# Example',
+      content_hash: 'c'.repeat(64),
+    };
+    await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'redispatch renamed proposal read' }]);
+    await seedMessage(jobId, 1, 'assistant', [{
+      type: 'tool-call', toolCallId: 'tc-renamed-page', toolName: 'brain_get_page', input: { slug: rawPage.slug },
+    }]);
+    await seedExec(
+      jobId, 1, 'tc-original-page', 'brain_get_page', 'pending', null, 0, undefined, executionId,
+    );
+
+    let captured: ChatMessage[] = [];
+    __setChatTransportForTests(async (opts) => {
+      captured = opts.messages;
+      return { text: 'done', blocks: [{ type: 'text', text: 'done' }] as ChatBlock[], stopReason: 'end',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+        model: 'openai:gpt-4o', providerId: 'openai' } satisfies ChatResult;
+    });
+    const pageTool: ToolDef = {
+      name: 'brain_get_page', description: 'read', input_schema: { type: 'object' }, idempotent: true,
+      async execute() { return rawPage; },
+    };
+    await buildHandler([pageTool])(ctx);
+
+    const healed = (captured[2].content as ChatBlock[])[0] as Extract<ChatBlock, { type: 'tool-result' }>;
+    expect((healed.output as Record<string, unknown>).proposal_baseline_ref)
+      .toBe(`gbrain.proposal-baseline.v1:${executionId}`);
+    const rows = await engine.executeRaw<{ status: string; output: unknown }>(
+      `SELECT status, output
+         FROM subagent_tool_executions
+        WHERE job_id = $1 AND gbrain_tool_use_id::text = $2`,
+      [jobId, executionId],
+    );
+    expect(rows[0]).toMatchObject({ status: 'complete', output: rawPage });
+  });
+
   it('throws on a non-idempotent tool still pending on resume', async () => {
     const { jobId, ctx } = await makeJob('unsafe', 'openai:gpt-4o');
     await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'unsafe' }]);
