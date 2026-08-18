@@ -64,6 +64,7 @@ export interface ToolLoopContextPolicy {
   readonly toolName: string;
   projectInput?(input: unknown, maxBytes: number): unknown;
   projectResult?(output: unknown, maxBytes: number): unknown;
+  projectFailedResult?(output: unknown, maxBytes: number): unknown;
   summarizeDroppedEvidence?(evidence: readonly ToolLoopContextEvidence[]): string | null;
 }
 
@@ -342,7 +343,27 @@ function compactFailedReadRound(
 ): ToolRound {
   const identified = compactRound(round, MAX_STRUCTURAL_IDENTITY_VALUE_BYTES, options);
   const projected = compactRound(round, 0, options);
-  return { ...projected, assistant: identified.assistant };
+  const originalResults = new Map(
+    toolResultBlocks(round.result).map(block => [block.toolCallId, block]),
+  );
+  const policyResult: ChatMessage = {
+    ...projected.result,
+    content: mapBlocks(projected.result, block => {
+      if (block.type !== 'tool-result') return block;
+      const original = originalResults.get(block.toolCallId);
+      const policy = policyForTool(options, block.toolName);
+      return original && policy?.projectFailedResult
+        ? {
+            ...block,
+            output: policy.projectFailedResult(
+              original.output,
+              MAX_STRUCTURAL_IDENTITY_VALUE_BYTES,
+            ),
+          }
+        : block;
+    }),
+  };
+  return { ...projected, assistant: identified.assistant, result: policyResult };
 }
 
 /** Restore one exact read result when no domain policy requires projection. */
@@ -669,10 +690,13 @@ function compactRound(
         const resultPolicy = evidence?.toolName === block.toolName
           ? policyForTool(options, toolName)
           : undefined;
+        const projectResult = evidence?.failed
+          ? resultPolicy?.projectFailedResult
+          : resultPolicy?.projectResult;
         return {
           ...block,
-          output: resultPolicy?.projectResult
-            ? resultPolicy.projectResult(block.output, perPayloadBytes)
+          output: projectResult
+            ? projectResult(block.output, perPayloadBytes)
             : boundValue(
                 block.output,
                 // The assistant call owns tool identity. A mismatched result

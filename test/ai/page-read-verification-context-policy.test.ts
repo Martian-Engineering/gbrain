@@ -8,7 +8,7 @@ import { pageReadVerificationContextPolicy } from '../../src/core/page-read-veri
 const VALID_HASH = 'a'.repeat(64);
 
 /** Build one complete get_page round around an authenticated result. */
-function pageReadRound(output: unknown): ChatMessage[] {
+function pageReadRound(output: unknown, isError = false): ChatMessage[] {
   return [
     { role: 'user', content: 'Verify the written page and continue.' },
     {
@@ -27,6 +27,7 @@ function pageReadRound(output: unknown): ChatMessage[] {
         toolCallId: 'page-read',
         toolName: 'brain_get_page',
         output,
+        ...(isError ? { isError: true } : {}),
       }],
     },
   ];
@@ -146,6 +147,44 @@ describe('page-read verification working-context policy', () => {
     expect(JSON.stringify(compacted)).not.toContain('OLD_PRIVATE_HISTORY_');
     expect(JSON.stringify(compacted)).not.toContain('gbrain.page_read_verification_projection.v1');
     expect(messages).toEqual(durableSnapshot);
+  });
+
+  it('projects the canonical missing-page error to typed absence', () => {
+    const output = 'Page not found: projects/missing-filing';
+    const compacted = compactToolLoopMessages(pageReadRound(output, true), 1, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [pageReadVerificationContextPolicy],
+      preferredProjectionBytes: 1_000,
+      preferredProjectionFits: () => true,
+    });
+
+    expect(projectedResult(compacted)).toEqual({
+      working_context_projection: {
+        schema: 'gbrain.page_read_verification_projection.v1',
+        verification: 'not_found',
+        interpretation: 'authenticated_page_absence',
+      },
+    });
+    expect(JSON.stringify(compacted)).not.toContain(output);
+  });
+
+  it('does not retain short noncanonical failure text', () => {
+    const output = 'Database connection failed with private credentials';
+    const compacted = compactToolLoopMessages(pageReadRound(output, true), 1, {
+      mutatingToolNames: new Set(),
+      toolPolicies: [pageReadVerificationContextPolicy],
+      preferredProjectionBytes: 1_000,
+      preferredProjectionFits: () => true,
+    });
+
+    expect(projectedResult(compacted)).toEqual({
+      working_context_projection: {
+        schema: 'gbrain.page_read_verification_projection.v1',
+        verification: 'unavailable',
+        interpretation: 'malformed_page_identity_or_content_hash',
+      },
+    });
+    expect(JSON.stringify(compacted)).not.toContain(output);
   });
 
   it.each([

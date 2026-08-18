@@ -17,6 +17,7 @@ interface PageReadVerificationIdentity {
 export const pageReadVerificationContextPolicy: ToolLoopContextPolicy = {
   toolName: 'brain_get_page',
   projectResult: projectPageReadResult,
+  projectFailedResult: projectFailedPageReadResult,
 };
 
 /** Project a large authenticated page result to validated identity and revision only. */
@@ -39,6 +40,26 @@ function projectPageReadResult(value: unknown, maxBytes: number): unknown {
   return jsonBytes(projection) <= maxBytes
     ? projection
     : unavailableProjection(maxBytes);
+}
+
+/** Retain only classified page-read failure facts, never raw exception text. */
+function projectFailedPageReadResult(value: unknown, maxBytes: number): unknown {
+  return pageNotFoundProjection(value, maxBytes) ?? unavailableProjection(maxBytes);
+}
+
+/** Convert the tool's canonical missing-page error to a non-prose fact. */
+function pageNotFoundProjection(value: unknown, maxBytes: number): unknown | null {
+  if (typeof value !== 'string' || !value.startsWith('Page not found: ')) return null;
+  const projection = {
+    working_context_projection: {
+      schema: PROJECTION_SCHEMA,
+      verification: 'not_found',
+      interpretation: 'authenticated_page_absence',
+    },
+  };
+  return jsonBytes(projection) <= maxBytes
+    ? projection
+    : { working_context_projection: true };
 }
 
 /** Accept only bounded canonical identity and a complete lowercase SHA-256 hash. */
