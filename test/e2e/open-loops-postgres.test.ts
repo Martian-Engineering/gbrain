@@ -34,10 +34,10 @@ describe.skipIf(skip)('list_open_loops Postgres parity', () => {
        RETURNING id`,
     );
     await engine.executeRaw(
-      `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id)
+      `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id, owner)
        VALUES
-         ($1, '2026-04-01', 'test:event', 'First projection', '', $2),
-         ($1, '2026-04-02', 'test:event', 'Second projection', '', $3)`,
+         ($1, '2026-04-01', 'test:event', 'First projection', '', $2, null),
+         ($1, '2026-04-02', 'test:event', 'Second projection', '', $3, 'people/owner')`,
       [depthRows[0].id, eventRows[0].id, eventRows[1].id],
     );
     await engine.executeRaw(
@@ -59,6 +59,7 @@ describe.skipIf(skip)('list_open_loops Postgres parity', () => {
         date: '2026-04-02',
         kind: 'intro',
         summary: 'Second follow-up',
+        owner: 'people/owner',
         source_page_slugs: ['projects/postgres-parity'],
       }],
     });
