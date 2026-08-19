@@ -124,7 +124,10 @@ export async function listOpenLoops(
          p.source_id,
          ARRAY_AGG(DISTINCT p.slug ORDER BY p.slug) AS source_page_slugs,
          ep.frontmatter->'event'->>'kind' AS kind,
-         NULLIF(ep.frontmatter->'event'->>'owner', '') AS owner,
+         COALESCE(
+           MAX(to_jsonb(te)->>'owner'),
+           NULLIF(ep.frontmatter->'event'->>'owner', '')
+         ) AS owner,
          ep.frontmatter->'event'->'who' AS who,
          ep.effective_date
        FROM timeline_entries te

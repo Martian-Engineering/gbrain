@@ -39,11 +39,12 @@ async function insertProjection(
   eventPageId: number,
   date: string,
   summary: string,
+  owner: string | null = null,
 ): Promise<void> {
   await engine.executeRaw(
-    `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id)
-     VALUES ($1, $2::date, 'test:event', $3, '', $4)`,
-    [pageId, date, summary, eventPageId],
+    `INSERT INTO timeline_entries (page_id, date, source, summary, detail, event_page_id, owner)
+     VALUES ($1, $2::date, 'test:event', $3, '', $4, $5)`,
+    [pageId, date, summary, eventPageId, owner],
   );
 }
 
@@ -139,12 +140,11 @@ describe('listOpenLoops', () => {
       event: {
         kind: 'intro',
         what: 'Make an introduction',
-        owner: 'people/owner',
         who: ['people/owner', 'people/recipient'],
       },
     });
-    await insertProjection(firstDepthId, eventId, '2026-06-15', 'Projection one');
-    await insertProjection(secondDepthId, eventId, '2026-06-15', 'Projection two');
+    await insertProjection(firstDepthId, eventId, '2026-06-15', 'Projection one', 'people/owner');
+    await insertProjection(secondDepthId, eventId, '2026-06-15', 'Projection two', 'people/owner');
 
     const page = await listOpenLoops(engine, {
       since: '2026-06-01',
