@@ -15,7 +15,7 @@ triggers:
   - "clear that off the desk"
 tools:
   - whoami
-  - chronicle_since
+  - list_open_loops
   - get_page
   - add_tag
   - add_timeline_entry
@@ -29,6 +29,12 @@ Lore's "On your desk" view derives open loops from chronicle events
 brain state, not app state, so an agent can settle one with the same two
 writes the Lore interface makes. Lore renders the result identically either
 way.
+
+Use `list_open_loops` with inclusive `since` and `until` dates to find the
+same unresolved commitments and introductions Lore displays. Follow
+`next_cursor` until it is null; each item includes its event slug and every
+same-source depth-page slug. Resolution tags have already been applied, so
+do not reconstruct open state from a capped Chronicle projection read.
 
 ## Contract
 
