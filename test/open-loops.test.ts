@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import {
   decodeOpenLoopCursor,
@@ -81,6 +82,32 @@ beforeEach(async () => {
 });
 
 describe('listOpenLoops', () => {
+  test('normalizes JSONB participant arrays returned as strings', async () => {
+    const stringJsonEngine = {
+      executeRaw: async () => [{
+        date: '2026-06-15',
+        summary: 'Make an introduction',
+        event_page_id: 42,
+        event_source_id: 'default',
+        event_slug: 'life/events/2026-06-15-intro',
+        source_id: 'default',
+        source_page_slugs: ['projects/alpha'],
+        kind: 'intro',
+        owner: null,
+        who: '["people/owner","people/recipient"]',
+        effective_date: '2026-06-15T09:30:00.000Z',
+      }],
+    } as unknown as BrainEngine;
+
+    const page = await listOpenLoops(stringJsonEngine, {
+      since: '2026-06-01',
+      until: '2026-06-30',
+      sourceId: 'default',
+    });
+
+    expect(page.items[0]?.who).toEqual(['people/owner', 'people/recipient']);
+  });
+
   test('applies resolution before pagination and returns events beyond 500 projections', async () => {
     const depthPageId = await insertPage({ slug: 'projects/example', type: 'project' });
 
