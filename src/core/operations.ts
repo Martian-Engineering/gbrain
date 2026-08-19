@@ -115,6 +115,10 @@ import {
   listRequestTraces,
   RequestTraceValidationError,
 } from './request-traces.ts';
+import {
+  listOpenLoops,
+  OpenLoopValidationError,
+} from './open-loops.ts';
 
 // --- Types ---
 
@@ -8877,6 +8881,37 @@ const chronicle_since: Operation = {
   cliHints: { name: 'since', positional: ['date'] },
 };
 
+const list_open_loops: Operation = {
+  name: 'list_open_loops',
+  description:
+    'List unresolved commitment and intro events after applying Desk resolution tags. ' +
+    'Returns oldest-first items with an opaque forward cursor.',
+  scope: 'read',
+  params: {
+    since: { type: 'string', required: true, description: 'Lower-bound day as YYYY-MM-DD (inclusive).' },
+    until: { type: 'string', required: true, description: 'Upper-bound day as YYYY-MM-DD (inclusive).' },
+    cursor: { type: 'string', description: 'Opaque cursor returned by the previous page.' },
+    limit: { type: 'number', description: 'Page size (default 100, maximum 200).' },
+  },
+  handler: async (ctx, p) => {
+    try {
+      return await listOpenLoops(ctx.engine, {
+        since: p.since as string,
+        until: p.until as string,
+        cursor: p.cursor as string | undefined,
+        limit: p.limit as number | undefined,
+        ...sourceScopeOpts(ctx),
+      });
+    } catch (error) {
+      if (error instanceof OpenLoopValidationError) {
+        throw new OperationError('invalid_params', error.message);
+      }
+      throw error;
+    }
+  },
+  cliHints: { name: 'open-loops' },
+};
+
 const chronicle_last_seen: Operation = {
   name: 'chronicle_last_seen',
   description:
@@ -9142,7 +9177,7 @@ export const operations: Operation[] = [
   // v0.29: Salience + anomalies + recent transcripts
   get_recent_salience, find_anomalies, get_recent_transcripts,
   // v0.42.x (#2390): Life Chronicle timeline reads
-  chronicle_day, chronicle_on_this_day, chronicle_since, chronicle_last_seen,
+  chronicle_day, chronicle_on_this_day, chronicle_since, list_open_loops, chronicle_last_seen,
   ontology_get, ontology_propose, ontology_dimensions, ontology_conflicts,
   volunteer_chronicle, chronicle_backfill,
   // v0.43 (#2095): push-based context
