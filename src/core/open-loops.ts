@@ -239,8 +239,16 @@ function normalizeRow(row: OpenLoopRow): OpenLoopItem {
 
 /** Preserve only well-formed participant slug arrays. */
 function normalizeWho(value: unknown): string[] | null {
-  return Array.isArray(value) && value.every(item => typeof item === 'string')
-    ? value
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return Array.isArray(parsed) && parsed.every(item => typeof item === 'string')
+    ? parsed
     : null;
 }
 
