@@ -275,24 +275,66 @@ export async function listArchivedSources(
 }
 
 /**
- * Permanently purge sources whose 72h TTL has expired. Cascades to pages
- * (and content_chunks via existing FKs). Returns the ids of purged sources.
- *
- * v0.26.5: moved from JSONB-driven iteration to a single set-based DELETE
- * with `archived = true AND archive_expires_at <= now()`. Server-side
- * filter; one round-trip; cascade-friendly.
+ * Permanently purge sources whose 72h TTL has expired and whose active OAuth
+ * clients no longer hold write authority. Cascades to pages and reconciles
+ * retained OAuth client metadata. Returns the ids of purged sources.
  */
 export async function purgeExpiredSources(
   engine: BrainEngine,
 ): Promise<string[]> {
-  const rows = await engine.executeRaw<{ id: string }>(
-    `DELETE FROM sources
-     WHERE archived = true
-       AND archive_expires_at IS NOT NULL
-       AND archive_expires_at <= now()
-     RETURNING id`,
-  );
-  return rows.map((r) => r.id);
+  return engine.transaction(async (tx) => {
+    // Lock source rows so a concurrent client provision cannot acquire a new
+    // reference between authority validation and deletion.
+    const candidates = await tx.executeRaw<{ id: string }>(
+      `SELECT s.id
+         FROM sources s
+        WHERE s.archived = true
+          AND s.archive_expires_at IS NOT NULL
+          AND s.archive_expires_at <= now()
+          AND NOT EXISTS (
+            SELECT 1
+              FROM oauth_clients c
+             WHERE c.deleted_at IS NULL
+               AND (c.source_id = s.id OR c.bound_source_id = s.id)
+          )
+        ORDER BY s.id
+        FOR UPDATE`,
+    );
+
+    const purged: string[] = [];
+    for (const { id } of candidates) {
+      // Soft-revoked rows remain as audit history, but dead authority fields
+      // leave with the source. Read grants shrink unless doing so would widen
+      // an active client through the empty-array fallback.
+      await tx.executeRaw(
+        `UPDATE oauth_clients
+            SET source_id = CASE
+                  WHEN deleted_at IS NOT NULL AND source_id = $1 THEN NULL
+                  ELSE source_id
+                END,
+                bound_source_id = CASE
+                  WHEN deleted_at IS NOT NULL AND bound_source_id = $1 THEN NULL
+                  ELSE bound_source_id
+                END,
+                federated_read = CASE
+                  WHEN deleted_at IS NULL
+                    AND cardinality(array_remove(federated_read, $1)) = 0
+                    THEN federated_read
+                  ELSE array_remove(federated_read, $1)
+                END
+          WHERE $1 = ANY(federated_read)
+             OR (deleted_at IS NOT NULL AND source_id = $1)
+             OR (deleted_at IS NOT NULL AND bound_source_id = $1)`,
+        [id],
+      );
+      const rows = await tx.executeRaw<{ id: string }>(
+        'DELETE FROM sources WHERE id = $1 RETURNING id',
+        [id],
+      );
+      if (rows[0]) purged.push(rows[0].id);
+    }
+    return purged;
+  });
 }
 
 // ── Display Helpers ─────────────────────────────────────────
